@@ -1,3 +1,14 @@
+# gitHubAnyuAgent
+
+This repository contains the standalone AnYuAgent desktop client and the Pi runtime used by it.
+
+## AnYuAgent desktop
+
+See [anyu-agent-desktop/README.md](anyu-agent-desktop/README.md) for Windows development and packaging instructions.
+
+The GitHub Actions workflow in `.github/workflows/build-anyuagent-macos.yml` builds unsigned macOS `arm64` and `x64` DMG/ZIP artifacts.
+
+## Pi Agent Harness
 <p align="center">
   <a href="https://pi.dev">
     <img alt="pi logo" src="https://pi.dev/logo-auto.svg" width="128">
