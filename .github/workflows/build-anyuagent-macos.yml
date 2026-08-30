@@ -1,0 +1,65 @@
+name: Build AnyuAgent for macOS
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  macos:
+    name: macOS ${{ matrix.arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            runner: macos-14
+          - arch: x64
+            runner: macos-13
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install Pi workspace dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Build Pi macOS runtime
+        run: |
+          npm --prefix packages/tui run build:native:darwin
+          npm --prefix packages/coding-agent run build:binary
+          mkdir -p anyu-agent-desktop/pi-runtime
+          cp packages/coding-agent/dist/pi anyu-agent-desktop/pi-runtime/pi
+          chmod +x anyu-agent-desktop/pi-runtime/pi
+
+      - name: Install desktop dependencies
+        working-directory: anyu-agent-desktop
+        run: npm ci --no-audit --no-fund
+
+      - name: Build unsigned macOS package
+        working-directory: anyu-agent-desktop
+        run: npm run dist:mac:${{ matrix.arch }}
+
+      - name: Upload macOS artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: AnyuAgent-macOS-${{ matrix.arch }}
+          path: |
+            anyu-agent-desktop/dist/*.dmg
+            anyu-agent-desktop/dist/*.zip
+          if-no-files-found: error
+          retention-days: 30
