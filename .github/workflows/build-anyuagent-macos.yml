@@ -9,6 +9,9 @@ on:
 permissions:
   contents: read
 
+env:
+  ELECTRON_MIRROR: https://npmmirror.com/mirrors/electron/
+
 jobs:
   macos:
     name: macOS ${{ matrix.arch }}

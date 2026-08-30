@@ -1,6 +1,6 @@
 {
   "name": "anyu-agent-desktop",
-  "version": "1.0.15",
+  "version": "1.0.16",
   "description": "AnYuAgent standalone desktop workspace powered by Pi",
   "main": "main.cjs",
   "author": "AnYu AI",
@@ -11,9 +11,10 @@
     "test:planner": "node tools/test-video-planner.cjs",
     "test:timeline": "node tools/test-timeline.cjs",
     "test:updater": "node tools/test-updater.cjs",
-    "dist": "electron-builder --win nsis",
-    "dist:mac:arm64": "electron-builder --mac dmg zip --arm64",
-    "dist:mac:x64": "electron-builder --mac dmg zip --x64"
+    "prepare:electron": "node node_modules/electron/install.js",
+    "dist": "npm run prepare:electron && electron-builder --win nsis",
+    "dist:mac:arm64": "npm run prepare:electron && electron-builder --mac dmg zip --arm64",
+    "dist:mac:x64": "npm run prepare:electron && electron-builder --mac dmg zip --x64"
   },
   "devDependencies": {
     "electron": "44.0.0",
@@ -24,14 +25,47 @@
     "productName": "AnYuAgent",
     "artifactName": "AnYuAgent-Setup-${version}.exe",
     "asar": true,
-    "files": ["main.cjs", "preload.cjs", "updater.cjs", "renderer/**/*", "branding/**/*"],
-    "extraResources": [{"from": "pi-runtime", "to": "pi-runtime"}],
+    "files": [
+      "main.cjs",
+      "preload.cjs",
+      "updater.cjs",
+      "renderer/**/*",
+      "branding/**/*"
+    ],
+    "extraResources": [
+      {
+        "from": "pi-runtime",
+        "to": "pi-runtime"
+      }
+    ],
     "win": {
-      "target": [{"target": "nsis", "arch": ["x64"]}],
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
       "icon": "branding/anyu.ico"
     },
     "mac": {
-      "target": [{"target": "dmg", "arch": ["arm64", "x64"]}, {"target": "zip", "arch": ["arm64", "x64"]}],
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "arm64",
+            "x64"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "arm64",
+            "x64"
+          ]
+        }
+      ],
       "icon": "branding/logo.png",
       "category": "public.app-category.developer-tools",
       "artifactName": "AnYuAgent-${version}-${arch}.${ext}"
