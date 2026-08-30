@@ -3,6 +3,7 @@ name: Build AnyuAgent for macOS
 on:
   push:
     branches: [main]
+    tags: ['v*']
   workflow_dispatch:
 
 permissions:
@@ -63,3 +64,41 @@ jobs:
             anyu-agent-desktop/dist/*.zip
           if-no-files-found: error
           retention-days: 30
+
+  release:
+    name: Publish GitHub Release
+    needs: macos
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download macOS artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: AnyuAgent-macOS-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Verify release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          assets=(release-assets/*.dmg release-assets/*.zip)
+          if [ "${#assets[@]}" -ne 4 ]; then
+            echo "Expected 4 macOS assets, found ${#assets[@]}"
+            find release-assets -maxdepth 2 -type f -print
+            exit 1
+          fi
+          printf '%s\n' "${assets[@]}"
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: AnYuAgent ${{ github.ref_name }}
+          generate_release_notes: true
+          files: |
+            release-assets/*.dmg
+            release-assets/*.zip
