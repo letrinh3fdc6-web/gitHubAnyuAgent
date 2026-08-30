@@ -6,12 +6,12 @@ This repository contains the standalone AnYuAgent desktop client and the Pi runt
 
 See [anyu-agent-desktop/README.md](anyu-agent-desktop/README.md) for Windows development and packaging instructions.
 
-The GitHub Actions workflow in `.github/workflows/build-anyuagent-macos.yml` builds unsigned macOS `arm64` and `x64` DMG/ZIP artifacts. Pushing a version tag such as `v1.0.17` also publishes those four files to a GitHub Release.
+The GitHub Actions workflow in `.github/workflows/build-anyuagent-macos.yml` builds unsigned macOS `arm64` and `x64` DMG/ZIP artifacts. Pushing a version tag such as `v1.0.18` also publishes those four files to a GitHub Release.
 
 ### macOS downloads
 
 1. Open the repository's **Releases** page.
-2. Download `AnYuAgent-1.0.17-arm64.dmg` for Apple Silicon, or `AnYuAgent-1.0.17-x64.dmg` for Intel Macs.
+2. Download `AnYuAgent-1.0.18-arm64.dmg` for Apple Silicon, or `AnYuAgent-1.0.18-x64.dmg` for Intel Macs.
 3. Open the DMG and drag **AnYuAgent** to **Applications**. These packages are currently unsigned; macOS may require Control-clicking the app and choosing **Open** on first launch.
 
 The matching `.zip` files are provided for users who prefer archive-based installation.
