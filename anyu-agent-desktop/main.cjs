@@ -63,16 +63,32 @@ async function checkForUpdate() {
 
 function updaterScriptPath() { return path.join(app.getPath('temp'), `anyuagent-updater-${process.pid}-${Date.now()}.ps1`) }
 
-function scheduleWindowsInstall(installerPath, expectedVersion) {
+function pendingUpdatePath() { return path.join(app.getPath('userData'), 'pending-update.json') }
+
+function writePendingUpdate(installerPath, expectedVersion) {
+  const markerPath = pendingUpdatePath()
+  fs.mkdirSync(path.dirname(markerPath), { recursive: true })
+  fs.writeFileSync(markerPath, JSON.stringify({
+    installerPath,
+    expectedVersion: String(expectedVersion || ''),
+    executablePath: app.getPath('exe'),
+    installDirectory: path.dirname(app.getPath('exe')),
+    createdAt: new Date().toISOString()
+  }, null, 2), { encoding: 'utf8', mode: 0o600 })
+  return markerPath
+}
+
+function scheduleWindowsInstall(installerPath, expectedVersion, markerPath = pendingUpdatePath()) {
   const executablePath = app.getPath('exe')
   const installDirectory = path.dirname(executablePath)
   const scriptPath = updaterScriptPath()
   const logPath = `${scriptPath}.log`
   const script = [
-    'param([int]$ParentPid, [string]$Installer, [string]$Executable, [string]$InstallDirectory, [string]$ExpectedVersion, [string]$Script, [string]$Log)',
+    'param([int]$ParentPid, [string]$Installer, [string]$Executable, [string]$InstallDirectory, [string]$ExpectedVersion, [string]$Script, [string]$Log, [string]$Marker)',
     "$ErrorActionPreference = 'Stop'",
-    "Start-Transcript -LiteralPath $Log -Force | Out-Null",
+    '$success = $false',
     'try {',
+    '  try { Start-Transcript -LiteralPath $Log -Force | Out-Null } catch {}',
     '  $deadline = (Get-Date).AddSeconds(30)',
     '  while ((Get-Date) -lt $deadline) {',
     '    $parent = Get-Process -Id $ParentPid -ErrorAction SilentlyContinue',
@@ -85,7 +101,18 @@ function scheduleWindowsInstall(installerPath, expectedVersion) {
     '  $exitCode = 1',
     '  for ($attempt = 1; $attempt -le 3; $attempt++) {',
     '    # /D must be the final NSIS argument so custom install locations are preserved.',
-    '    $process = Start-Process -FilePath $Installer -ArgumentList @("/S", "/NCRC", "/D=$InstallDirectory") -Wait -PassThru',
+    '    $installArgument = "/D=`"$InstallDirectory`""',
+    '    $installerArgs = @("/S", "/NCRC", $installArgument)',
+    '    try {',
+    '      $probe = $null',
+    '      $probe = Join-Path $InstallDirectory (".anyu-write-test-" + [guid]::NewGuid().ToString("N"))',
+    '      [IO.File]::WriteAllText($probe, "update")',
+    '      Remove-Item -LiteralPath $probe -Force -ErrorAction SilentlyContinue',
+    '      $process = Start-Process -FilePath $Installer -ArgumentList $installerArgs -Wait -PassThru',
+    '    } catch {',
+    '      if ($probe) { Remove-Item -LiteralPath $probe -Force -ErrorAction SilentlyContinue }',
+    '      $process = Start-Process -FilePath $Installer -ArgumentList $installerArgs -Verb RunAs -Wait -PassThru',
+    '    }',
     '    $exitCode = [int]$process.ExitCode',
     '    if ($exitCode -eq 0) { break }',
     '    Start-Sleep -Seconds 2',
@@ -109,20 +136,49 @@ function scheduleWindowsInstall(installerPath, expectedVersion) {
     '    Start-Sleep -Seconds 1',
     '  }',
     '  if (-not $started) { throw "客户端重启失败: $target" }',
+    '  $success = $true',
     '} catch {',
-    '  $_ | Out-File -LiteralPath $Log -Append -Encoding utf8',
+    '  try { $_ | Out-File -LiteralPath $Log -Append -Encoding utf8 } catch {}',
     '  exit 1',
     '} finally {',
     '  try { Stop-Transcript | Out-Null } catch {}',
-    '  Remove-Item -LiteralPath $Installer -Force -ErrorAction SilentlyContinue',
+    '  if ($success) {',
+    '    Remove-Item -LiteralPath $Installer -Force -ErrorAction SilentlyContinue',
+    '    Remove-Item -LiteralPath $Marker -Force -ErrorAction SilentlyContinue',
+    '  }',
     '  Remove-Item -LiteralPath $Script -Force -ErrorAction SilentlyContinue',
     '}'
   ].join('\r\n') + '\r\n'
   fs.writeFileSync(scriptPath, script, { encoding: 'utf8', mode: 0o600 })
   const { spawn: spawnChild } = require('child_process')
-  const child = spawnChild('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', scriptPath, '-ParentPid', String(process.pid), '-Installer', installerPath, '-Executable', executablePath, '-InstallDirectory', installDirectory, '-ExpectedVersion', String(expectedVersion || ''), '-Script', scriptPath, '-Log', logPath], { detached: true, windowsHide: true, stdio: 'ignore' })
+  const powershell = process.env.SystemRoot ? path.join(process.env.SystemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe') : 'powershell.exe'
+  const args = ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', scriptPath, '-ParentPid', String(process.pid), '-Installer', installerPath, '-Executable', executablePath, '-InstallDirectory', installDirectory, '-ExpectedVersion', String(expectedVersion || ''), '-Script', scriptPath, '-Log', logPath, '-Marker', markerPath]
+  const child = spawnChild(powershell, args, { detached: true, windowsHide: true, stdio: 'ignore' })
+  child.once('error', (error) => {
+    try { fs.appendFileSync(logPath, `更新器启动失败: ${error.message}\r\n`, { encoding: 'utf8' }) } catch {}
+  })
   child.unref()
-  return { scriptPath, logPath, executablePath }
+  return { scriptPath, logPath, executablePath, markerPath }
+}
+
+function recoverPendingUpdate() {
+  if (process.platform !== 'win32' || !app.isPackaged) return false
+  const markerPath = pendingUpdatePath()
+  let pending
+  try { pending = JSON.parse(fs.readFileSync(markerPath, 'utf8')) } catch { return false }
+  const installerPath = String(pending?.installerPath || '')
+  const expectedVersion = String(pending?.expectedVersion || '')
+  if (expectedVersion && compareVersions(app.getVersion(), expectedVersion) >= 0) {
+    try { fs.rmSync(markerPath, { force: true }); fs.rmSync(installerPath, { force: true }) } catch {}
+    return false
+  }
+  if (!installerPath || !fs.existsSync(installerPath)) {
+    try { fs.rmSync(markerPath, { force: true }) } catch {}
+    return false
+  }
+  scheduleWindowsInstall(installerPath, expectedVersion, markerPath)
+  setTimeout(() => app.exit(0), 250)
+  return true
 }
 
 async function downloadAndInstallUpdate() {
@@ -150,8 +206,14 @@ async function downloadAndInstallUpdate() {
     sendUpdateProgress({ phase: 'installing', version: info.latestVersion, loaded: packageBuffer.length, total: packageBuffer.length, percent: 100 })
     // Release the bundled Pi runtime before the installer replaces app resources.
     await stopPi()
-    scheduleWindowsInstall(installerPath, info.latestVersion)
-    setTimeout(() => app.exit(0), 150)
+    const markerPath = writePendingUpdate(installerPath, info.latestVersion)
+    scheduleWindowsInstall(installerPath, info.latestVersion, markerPath)
+    // Give the detached updater a moment to receive the handoff. The forced
+    // exit fallback prevents a hidden window or child process from blocking it.
+    setTimeout(() => {
+      app.quit()
+      setTimeout(() => app.exit(0), 1500)
+    }, 250)
     return { ...info, status: 'installing' }
   } catch (error) {
     if (installerPath) { try { fs.rmSync(installerPath, { force: true }) } catch {} }
@@ -763,6 +825,7 @@ function createWindow() {
 
 app.whenReady().then(() => {
   Menu.setApplicationMenu(null)
+  if (recoverPendingUpdate()) return
   loadAuth()
   session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
      callback({ responseHeaders: { ...details.responseHeaders, 'Content-Security-Policy': ["default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self' data: blob:; media-src 'self' data: blob:; connect-src 'self'"] } })
