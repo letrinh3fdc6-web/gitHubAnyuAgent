@@ -20,6 +20,39 @@
   const api = (route, options) => window.anyu.request(route, options)
   const esc = (value) => String(value ?? '').replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]))
   const initials = (email) => String(email || 'A').slice(0, 1).toUpperCase()
+  function cleanDisplayText(value, maxLength = 80) {
+    if (value == null) return ''
+    const text = typeof value === 'object'
+      ? value.name ?? value.title ?? value.label ?? value.display_name ?? value.displayName ?? ''
+      : value
+    return String(text).normalize('NFKC').replace(/[\u0000-\u001f\u007f-\u009f]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, maxLength)
+  }
+  function looksLikeSecret(value) {
+    const text = String(value || '')
+    if (!text) return false
+    // Some API responses put the credential itself in `name` (or use a
+    // generated numeric identifier). Never expose those values as labels.
+    if (/^(?:sk|key|token|bearer|AIza|ghp|xox[baprs])[-_]/i.test(text) && text.length > 20) return true
+    if (/^\d{8,}$/.test(text)) return true
+    if (text.length > 64) return true
+    return /^[A-Za-z0-9_-]{28,}$/.test(text) && !/[\s-]/.test(text.slice(0, 12))
+  }
+  function keyDisplayName(key) {
+    const id = key?.id == null ? '' : String(key.id)
+    if (!key || !id) return '选择密钥'
+    const rawSecret = [key?.key, key?.api_key, key?.apiKey, key?.token, key?.secret]
+      .map((value) => cleanDisplayText(value, 256)).find(Boolean)
+    const candidates = [
+      key?.display_name, key?.displayName, key?.title, key?.label,
+      key?.key_name, key?.keyName, key?.description, key?.name, key?.group?.name,
+      Array.isArray(key?.groups) ? key.groups[0]?.name : ''
+    ]
+    for (const candidate of candidates) {
+      const text = cleanDisplayText(candidate)
+      if (text && text !== rawSecret && !looksLikeSecret(text)) return text
+    }
+    return `密钥 ${id}`
+  }
   const textOf = (content) => Array.isArray(content) ? content.map((part) => part?.type === 'text' ? part.text || '' : typeof part?.content === 'string' ? part.content : '').join('') : String(content || '')
   const thinkingOf = (content) => Array.isArray(content) ? content.filter((part) => part?.type === 'thinking').map((part) => part.thinking || '').join('') : ''
   const formatBytes = (bytes) => { const size = Number(bytes || 0); if (size < 1024) return `${size} B`; if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`; return `${(size / 1024 / 1024).toFixed(1)} MB` }
@@ -185,10 +218,9 @@
       if (!item || item.id == null) continue
       const id = String(item.id)
       if (unique.has(id)) continue
-      const rawName = item.name ?? item.title ?? item.label ?? `密钥 ${id}`
-      const displayName = String(rawName).replace(/[\u0000-\u001f\u007f]+/g, ' ').replace(/\s+/g, ' ').trim() || `密钥 ${id}`
+      const displayName = keyDisplayName({ ...item, id })
       const rawStatus = item.status
-      const status = typeof rawStatus === 'string' ? rawStatus.replace(/[\u0000-\u001f\u007f]+/g, ' ').replace(/\s+/g, ' ').trim() : String(rawStatus?.label || rawStatus?.name || rawStatus?.status || '').trim()
+      const status = cleanDisplayText(rawStatus?.label || rawStatus?.name || rawStatus?.status || rawStatus)
       unique.set(id, { ...item, id: item.id, name: displayName, title: displayName, status })
     }
     state.keys = [...unique.values()]
@@ -697,6 +729,18 @@
     const text = String(value || '')
     if (state.skillEnabled.image && /@(生图|image)(?=\s|$)/i.test(text)) return 'image'
     if (state.skillEnabled.video && /@(生视频|视频|video)(?=\s|$)/i.test(text)) return 'video'
+    // Keep explicit @ mentions authoritative, then recognize the natural
+    // language requests users expect from a visual assistant. Questions about
+    // an existing image/video must remain normal chat turns.
+    const lower = text.toLowerCase()
+    const isQuestion = /为什么|怎么|如何|能不能|是否|支持吗|失败|报错|问题|what|why|how|support/.test(lower)
+    const videoIntent = /生成|制作|创建|做|拍|让.+动起来|动画|视频|video|animate/.test(lower) && /视频|动画|动起来|video|animate/.test(lower)
+    const imageDirectVerb = /画|绘制|出图|生图|draw|paint/.test(lower)
+    const imageNoun = /图片|图像|照片|插画|海报|头像|壁纸|图标|logo|image|picture|photo|illustration|poster|wallpaper/.test(lower)
+    const requestedVisual = /(?:给我|请|来|需要|想要|帮我).{0,20}(?:\d+|[一两二三四五六七八九十])\s*(?:张|幅|个|种).{0,12}(?:图|图片|照片|image|picture)/i.test(lower)
+    const imageIntent = imageDirectVerb || (/生成|制作|创建|设计|做|generate|create|render/.test(lower) && imageNoun) || requestedVisual
+    if (!isQuestion && state.skillEnabled.video && videoIntent) return 'video'
+    if (!isQuestion && state.skillEnabled.image && imageIntent) return 'image'
     return ''
   }
   function mediaPrompt(value, skill) {
@@ -704,6 +748,46 @@
   }
   function mediaReferences(attachments, kind) {
     return (attachments || []).filter((item) => item.kind === 'image' && item.data).map((item) => ({ data: item.data, name: item.name, mimeType: item.mimeType }))
+  }
+  function refineImagePrompt(prompt, references = []) {
+    const source = String(prompt || '').replace(/\s+/g, ' ').trim().slice(0, 5200)
+    if (!source) return ''
+    const lower = source.toLowerCase()
+    const clauses = []
+    if (references.length) {
+      clauses.push(`以附加的 ${references.length} 张参考图作为视觉依据，保留其中主体身份、关键外观、色彩关系和材质特征；按照文字需求自然调整动作、场景与构图，不要添加水印或无关主体`)
+    }
+    if (/海报|封面|banner|广告|宣传|排版|poster|cover|banner/.test(lower)) {
+      clauses.push('采用清晰的视觉层级和可用留白，主体与文字安全区分明，画面适合直接排版使用')
+    } else if (/人物|人像|肖像|脸|portrait|person|people/.test(lower)) {
+      clauses.push('保持人物五官、姿态和肢体结构自然，表情与服装细节清晰，避免重复人物和畸形手指')
+    } else if (/产品|商品|包装|product|package|packshot/.test(lower)) {
+      clauses.push('突出产品主体、轮廓和材质，保持品牌标识与产品结构准确，使用干净利落的商业摄影构图')
+    } else if (/风景|建筑|室内|城市|山|海|landscape|architecture|interior|city/.test(lower)) {
+      clauses.push('建立明确的前中后景和空间层次，透视关系自然，主体边缘干净，光影方向统一')
+    }
+    if (/写实|摄影|照片|真实|realistic|photo|photoreal/.test(lower)) clauses.push('写实质感，真实光线与自然材质，细节清晰但不过度锐化')
+    if (/插画|动漫|卡通|二次元|illustration|anime|cartoon/.test(lower)) clauses.push('保持统一的插画线条、色彩和造型语言，避免写实与卡通风格混杂')
+    if (/3d|三维|建模|render|渲染/.test(lower)) clauses.push('统一三维材质、光照和阴影，边缘干净，避免塑料感噪点')
+    if (!/文字|字幕|标题|logo|标志|海报|封面|text|typography|logo/.test(lower)) clauses.push('主体清晰、构图完整、细节自然，避免乱码、无意义文字、水印和重复物体')
+    const suffix = clauses.length ? `\n\n视觉执行要求：${clauses.join('；')}。` : ''
+    return `${source}${suffix}`.slice(0, 6000)
+  }
+  function chineseNumberValue(value) {
+    const raw = String(value || '').trim()
+    if (/^\d+$/.test(raw)) return Number(raw)
+    const digits = { 零: 0, 一: 1, 两: 2, 二: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9 }
+    if (raw === '十') return 10
+    if (raw.startsWith('十')) return 10 + (digits[raw.slice(1)] || 0)
+    if (raw.endsWith('十')) return (digits[raw[0]] || 0) * 10
+    if (raw.includes('十')) return (digits[raw[0]] || 0) * 10 + (digits[raw.slice(2)] || 0)
+    return digits[raw]
+  }
+  function requestedImageCount(text) {
+    const raw = String(text || '').toLowerCase()
+    const match = raw.match(/(?:输出|生成|制作|创建|画|绘制|给我)?\s*(\d{1,2}|[零一两二三四五六七八九十]{1,3})\s*(?:张|幅|份|图|个(?:版本|变体|方案|图)?|种(?:方案|风格)?|images?|pictures?|pics?)/i)
+    const count = match ? chineseNumberValue(match[1]) : 1
+    return Number.isFinite(count) ? Math.max(1, Math.min(50, Math.round(count))) : 1
   }
   function modelField(model, snake, camel, fallback) {
     const value = model?.[snake] ?? model?.[camel]
@@ -879,8 +963,11 @@
       const task = await getter(taskId)
       const status = String(task?.status || task?.state || task?.task_status || '').toLowerCase()
       if (status === 'completed' || status === 'succeeded' || status === 'done') {
-        const result = await downloader(taskId, 0)
-        return { task, result }
+        const count = kind === 'image'
+          ? Math.max(1, Number(task?.image_count || task?.requested_count || 1))
+          : 1
+        const results = await Promise.all(Array.from({ length: count }, (_, index) => downloader(taskId, index)))
+        return { task, result: results[0], results }
       }
       if (['failed', 'error', 'cancelled', 'canceled', 'rejected'].includes(status)) throw new Error(task?.error_message || '技能任务执行失败')
       await new Promise((resolve) => window.setTimeout(resolve, kind === 'video' ? 2500 : 1400))
@@ -929,7 +1016,11 @@
       if (state.sessionPath === mediaSessionPath) { updateSessionTitle(task.content, userMessage.createdAt); renderApp(); updateLiveUi(true) }
       let created
       if (kind === 'image') {
-        created = await window.anyu.imageCreate({ prompt: promptText, groupId: config.groupId, model: model.name, size: config.size || '1024x1024', quality: config.quality || 'auto', count: 1, references })
+        const count = requestedImageCount(promptText)
+        const refinedPrompt = refineImagePrompt(promptText, references)
+        task._imageCount = count
+        task._imagePrompt = { original: promptText, refined: refinedPrompt, referenceCount: references.length }
+        created = await window.anyu.imageCreate({ prompt: refinedPrompt, groupId: config.groupId, model: model.name, size: config.size || '1024x1024', quality: config.quality || 'auto', count, references })
       } else {
         const plan = planVideoRequest(promptText, model, references)
         created = await window.anyu.videoCreate({ prompt: promptText, groupId: config.groupId, model: model.name, duration: plan.duration, resolution: plan.resolution, aspectRatio: plan.aspectRatio, references: plan.files })
@@ -945,14 +1036,15 @@
       await persistMediaTimeline(mediaSessionPath)
       if (state.sessionPath === mediaSessionPath) { renderApp(); updateLiveUi(true) }
       const done = await pollMediaTask(kind, createdId)
-      const dataUrl = mediaDataUrl(done.result, kind)
-      if (!dataUrl) throw new Error('技能返回了空的媒体结果')
+      const mediaResults = kind === 'image' ? (done.results || [done.result]) : [done.result]
+      const dataUrls = mediaResults.map((item) => mediaDataUrl(item, kind))
+      if (!dataUrls.length || dataUrls.some((url) => !url)) throw new Error('技能返回了空的媒体结果')
       // Keep the generated result immediately after its request in the
       // conversation timeline, even if the provider finishes later.
-      resultMessage.content = kind === 'image' ? `已通过 ${model.display_name || model.name} 生成图片` : `已通过 ${model.display_name || model.name} 生成视频\n${mediaPlanLabel(task._mediaPlan)}`
+      resultMessage.content = kind === 'image' ? `已通过 ${model.display_name || model.name} 生成 ${dataUrls.length} 张图片` : `已通过 ${model.display_name || model.name} 生成视频\n${mediaPlanLabel(task._mediaPlan)}`
       resultMessage.mediaPending = false
-      if (kind === 'image') resultMessage.attachments = [{ id: `generated-${createdId}`, kind: 'image', name: 'Anyu 生图.png', mimeType: mediaMimeType(done.result, kind), data: done.result.data, dataUrl, downloadTaskId: createdId, downloadIndex: 0 }]
-      else resultMessage.media = { kind: 'video', name: 'Anyu 生视频.mp4', mimeType: mediaMimeType(done.result, kind), data: done.result.data, dataUrl, downloadTaskId: createdId }
+      if (kind === 'image') resultMessage.attachments = mediaResults.map((item, index) => ({ id: `generated-${createdId}-${index}`, kind: 'image', name: `Anyu 生图 ${index + 1}.png`, mimeType: mediaMimeType(item, kind), data: item.data, dataUrl: dataUrls[index], downloadTaskId: createdId, downloadIndex: index }))
+      else resultMessage.media = { kind: 'video', name: 'Anyu 生视频.mp4', mimeType: mediaMimeType(done.result, kind), data: done.result.data, dataUrl: dataUrls[0], downloadTaskId: createdId }
       if (state.sessionPath === mediaSessionPath) upsertTimelineMessage(resultMessage)
       await persistMediaTimeline(mediaSessionPath)
     } catch (error) {
@@ -1148,13 +1240,8 @@
 
   function keyHtml(key) {
     const selected = Number(key.id) === state.selectedKey
-    const label = key.name || key.title || `密钥 ${key.id}`
     const hint = key.provider || key.billing_mode || 'Anyu 路由密钥'
-    return `<div class="key ${selected ? 'selected' : ''}" data-key="${esc(key.id)}"><div class="key-name"><span class="dot ${key.status && key.status !== 'active' ? 'off' : ''}"></span>${esc(keyDisplayName(key))}</div><div class="key-meta"><span>${esc(hint)}</span><span>${key.status === 'active' || !key.status ? '可用' : esc(String(key.status))}</span></div></div>`
-  }
-  function keyDisplayName(key) {
-    const id = key?.id == null ? '' : String(key.id)
-    return String(key?.name || key?.title || key?.label || `密钥 ${id}`).replace(/[\u0000-\u001f\u007f]+/g, ' ').replace(/\s+/g, ' ').trim() || `密钥 ${id}`
+    return `<div class="key ${selected ? 'selected' : ''}" data-key="${esc(key.id)}"><div class="key-name"><span class="dot ${key.status && key.status !== 'active' ? 'off' : ''}"></span>${esc(keyDisplayName(key))}</div><div class="key-meta"><span>${esc(cleanDisplayText(hint) || 'Anyu 路由密钥')}</span><span>${key.status === 'active' || !key.status ? '可用' : esc(cleanDisplayText(key.status))}</span></div></div>`
   }
   function messageHtml(message) {
     const user = message.role === 'user'; const tool = message.role === 'tool'
@@ -1285,7 +1372,7 @@
     const restorePromptFocus = document.activeElement?.id === 'prompt'
     const restorePromptCursor = restorePromptFocus ? Number(document.activeElement?.selectionStart) : null
     const key = selectedKey()
-    const keyLabel = key?.name || key?.title || (key ? `密钥 ${key.id}` : '选择密钥')
+    const keyLabel = keyDisplayName(key)
     const model = currentModel()
     const controlsBusy = state.switching || state.sessionSwitching
     root.innerHTML = `<div class="app-shell"><aside class="sidebar"><div class="side-brand"><div class="brand-mark">A</div><div><strong>AnYuAgent</strong><span>独立 Pi Agent</span></div></div>
