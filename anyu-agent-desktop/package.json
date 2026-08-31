@@ -1,6 +1,6 @@
 {
   "name": "anyu-agent-desktop",
-  "version": "1.0.19",
+  "version": "1.0.20",
   "description": "AnYuAgent standalone desktop workspace powered by Pi",
   "main": "main.cjs",
   "author": "AnYu AI",
