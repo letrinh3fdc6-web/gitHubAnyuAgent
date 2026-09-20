@@ -1,33 +1,43 @@
-# AnYuAgent Windows 客户端
+# AnYuAgent 桌面客户端
 
-AnYuAgent 是独立 Electron 桌面客户端，不嵌入网站，也不依赖终端 Pi 窗口。
+AnYuAgent 是安域 AI 的独立桌面 Agent，不依赖浏览器页面即可登录账号、同步密钥和模型，并在本机工作目录中完成对话与任务。
 
-## 安装与启动
+## 安装
 
-1. 双击 `dist/AnYuAgent-Setup-1.0.18.exe`。
-2. 安装完成后，从桌面双击 `AnYuAgent` 图标启动。
-3. 输入 Anyu 邮箱和密码；启用 2FA 时再输入 Authenticator 验证码。
-4. 登录后客户端会同步当前账号的 API Keys、会话和可用模型，可在右侧直接切换密钥和模型。
-5. 新版本发布后，点击左下角“检查更新”。客户端会显示下载进度，校验安装包后自动退出、静默替换旧版本并重新启动；登录凭据和本机会话保留在用户数据目录中。
+1. 下载对应系统的安装包。
+2. Windows 双击安装器；macOS 打开对应架构的 DMG 并将 AnYuAgent 拖入 Applications。
+3. 启动后输入 Anyu 邮箱和密码；启用双重验证时继续输入 Authenticator 验证码。
+
+macOS 包下载入口：<https://github.com/letrinh3fdc6-web/gitHubAnyuAgent/releases/latest>
+
+macOS 首次打开未签名应用时，在终端执行：
+
+```bash
+xattr -cr /Applications/AnYuAgent.app
+```
 
 ## 开发运行
 
 ```powershell
+npm install
 npm start
 ```
 
-## 重新打包
-
-Electron 运行时已经作为 `electronDist` 固定到本地依赖。首次安装依赖时如果镜像下载失败，可设置：
+## 构建
 
 ```powershell
-$env:ELECTRON_MIRROR='https://npmmirror.com/mirrors/electron/'
-npm install
+# Windows
 npm run dist
+
+# macOS Apple Silicon
+npm run dist:mac:arm64
+
+# macOS Intel
+npm run dist:mac:x64
 ```
 
-安装器输出在 `dist/AnYuAgent-Setup-1.0.18.exe`。
+GitHub Actions 会在推送 `v*` 标签后构建 macOS arm64/x64 的 DMG 和 ZIP，并自动发布到 GitHub Release。
 
-## macOS 构建
+## 许可
 
-GitHub Actions 会在 `main` 或 `v*` 标签推送后分别构建 Apple Silicon（`arm64`）和 Intel（`x64`）版本。打 `v1.0.18` 这类标签时，构建成功后会自动创建 GitHub Release，并附加 `.dmg` 与 `.zip` 文件。当前包未做 Apple Developer 签名与公证，首次打开按 macOS 提示允许即可。
+MIT

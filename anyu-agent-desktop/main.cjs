@@ -3,7 +3,8 @@ const { spawn } = require('child_process')
 const fs = require('fs')
 const path = require('path')
 const crypto = require('crypto')
-const { DEFAULT_MANIFEST_URL, compareVersions, artifactFromManifest, verifyBuffer } = require('./updater.cjs')
+const { DEFAULT_MANIFEST_URL, compareVersions, artifactFromManifest } = require('./updater.cjs')
+const { PluginManager, MAX_PACKAGE_BYTES } = require('./plugin-manager.cjs')
 
 const API_BASE = process.env.ANYU_API_BASE || 'https://x.ailzd.com/api/v1'
 const GATEWAY_BASE = API_BASE.replace(/\/api\/v1\/?$/i, '')
@@ -37,6 +38,25 @@ function modelInputCapabilities(model, id, api) {
   if (hasImage && !input.includes('image')) input.push('image')
   return input
 }
+function modelPermissionMode(model, provider = '') {
+  const explicit = String(model?.permissionMode || model?.permission_mode || '').toLowerCase()
+  if (explicit === 'full' || explicit === 'confirm') return explicit
+  const toolFlags = [
+    model?.supportsTools, model?.supports_tools, model?.toolUse,
+    model?.tool_use, model?.capabilities?.tools, model?.capabilities?.tool_use
+  ]
+  if (toolFlags.some((value) => value === false)) return 'confirm'
+  if (toolFlags.some((value) => value === true)) return 'full'
+  const lower = `${model?.id || model?.name || ''} ${model?.api || ''} ${provider || ''}`.toLowerCase()
+  // Anyu 的主流对话模型都具备 Agent 工具调用能力；未知模型保守地要求确认。
+  if (/gpt|codex|openai|claude|anthropic|gemini|google|grok|qwen|deepseek|glm|kimi|mistral|moonshot|doubao|llama/.test(lower)) return 'full'
+  return 'confirm'
+}
+function resolvePermissionMode(requested, model, provider = '') {
+  const mode = String(requested || '').toLowerCase()
+  if (mode === 'full' || mode === 'confirm') return mode
+  return modelPermissionMode(model, provider)
+}
 let mainWindow
 let auth = null
 const keyCache = new Map()
@@ -46,18 +66,36 @@ let piRequestCounter = 0
 const piPending = new Map()
 let piStartLock = Promise.resolve()
 let updateInProgress = false
+let recoveredUpdateState = null
+let pluginManager = null
+
+function timestampValue(value) {
+  const number = Number(value)
+  if (Number.isFinite(number) && number > 0) return number < 1e12 ? number * 1000 : number
+  const parsed = Date.parse(String(value || ''))
+  return Number.isFinite(parsed) ? parsed : 0
+}
 
 function sendUpdateProgress(payload) {
   if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('update:progress', payload)
 }
 
 async function checkForUpdate() {
-  const response = await fetch(UPDATE_MANIFEST_URL, { headers: { Accept: 'application/json' } })
+  const manifestUrl = new URL(UPDATE_MANIFEST_URL)
+  manifestUrl.searchParams.set('_anyuagent_cache_bust', String(Date.now()))
+  const response = await fetch(manifestUrl, {
+    headers: {
+      Accept: 'application/json',
+      'Cache-Control': 'no-cache, no-store',
+      Pragma: 'no-cache'
+    }
+  })
   const text = await response.text()
   let manifest
   try { manifest = text ? JSON.parse(text) : null } catch { throw new Error('更新目录不是有效 JSON') }
   if (!response.ok) throw new Error(`更新目录不可用 (HTTP ${response.status})`)
-  const artifact = artifactFromManifest(manifest, app.getVersion())
+  const artifact = artifactFromManifest(manifest, app.getVersion(), manifestUrl.href)
+  if (new URL(artifact.url).origin !== manifestUrl.origin) throw new Error('更新包地址不属于当前更新源')
   return { ok: true, currentVersion: app.getVersion(), latestVersion: artifact.version, available: compareVersions(artifact.version, app.getVersion()) > 0, artifact: { name: artifact.name, version: artifact.version, bytes: artifact.bytes, sha256: artifact.sha256, url: artifact.url } }
 }
 
@@ -68,13 +106,22 @@ function pendingUpdatePath() { return path.join(app.getPath('userData'), 'pendin
 function writePendingUpdate(installerPath, expectedVersion) {
   const markerPath = pendingUpdatePath()
   fs.mkdirSync(path.dirname(markerPath), { recursive: true })
-  fs.writeFileSync(markerPath, JSON.stringify({
+  const marker = {
     installerPath,
     expectedVersion: String(expectedVersion || ''),
     executablePath: app.getPath('exe'),
     installDirectory: path.dirname(app.getPath('exe')),
     createdAt: new Date().toISOString()
-  }, null, 2), { encoding: 'utf8', mode: 0o600 })
+  }
+  const temporaryPath = `${markerPath}.${process.pid}.tmp`
+  fs.writeFileSync(temporaryPath, JSON.stringify(marker, null, 2), { encoding: 'utf8', mode: 0o600 })
+  try {
+    fs.renameSync(temporaryPath, markerPath)
+  } catch (error) {
+    if (!['EEXIST', 'EPERM'].includes(error?.code)) throw error
+    fs.rmSync(markerPath, { force: true })
+    fs.renameSync(temporaryPath, markerPath)
+  }
   return markerPath
 }
 
@@ -83,24 +130,31 @@ function scheduleWindowsInstall(installerPath, expectedVersion, markerPath = pen
   const installDirectory = path.dirname(executablePath)
   const scriptPath = updaterScriptPath()
   const logPath = `${scriptPath}.log`
+  const lockPath = `${markerPath}.lock`
   const script = [
-    'param([int]$ParentPid, [string]$Installer, [string]$Executable, [string]$InstallDirectory, [string]$ExpectedVersion, [string]$Script, [string]$Log, [string]$Marker)',
+    'param([int]$ParentPid, [string]$Installer, [string]$Executable, [string]$InstallDirectory, [string]$ExpectedVersion, [string]$Script, [string]$Log, [string]$Marker, [string]$Lock)',
     "$ErrorActionPreference = 'Stop'",
     '$success = $false',
+    '$lockStream = $null',
+    '$lockAcquired = $false',
+    'function Set-MarkerStatus([string]$Status, [string]$ErrorMessage) { try { $raw = Get-Content -LiteralPath $Marker -Raw -ErrorAction SilentlyContinue; $data = if ($raw) { $raw | ConvertFrom-Json } else { [pscustomobject]@{} }; $data | Add-Member -NotePropertyName status -NotePropertyValue $Status -Force; $data | Add-Member -NotePropertyName error -NotePropertyValue $ErrorMessage -Force; $data | Add-Member -NotePropertyName logPath -NotePropertyValue $Log -Force; $data | Add-Member -NotePropertyName updatedAt -NotePropertyValue (Get-Date).ToString("o") -Force; $temporaryMarker = "$Marker.$PID.tmp"; $utf8 = New-Object System.Text.UTF8Encoding($false); [IO.File]::WriteAllText($temporaryMarker, ($data | ConvertTo-Json -Depth 8), $utf8); Move-Item -LiteralPath $temporaryMarker -Destination $Marker -Force } catch {} }',
+    'function Write-Log([string]$Message) { try { Add-Content -LiteralPath $Log -Value ("[{0}] {1}" -f (Get-Date -Format o), $Message) -Encoding utf8 } catch {} }',
     'try {',
-    '  try { Start-Transcript -LiteralPath $Log -Force | Out-Null } catch {}',
-    '  $deadline = (Get-Date).AddSeconds(30)',
+    '  try { $lockStream = [IO.File]::Open($Lock, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None); $lockAcquired = $true } catch { Write-Log "另一个更新器正在运行，退出"; exit 0 }',
+    '  Write-Log "更新器启动，父进程 PID=$ParentPid，安装包=$Installer"',
+    '  $deadline = (Get-Date).AddSeconds(60)',
     '  while ((Get-Date) -lt $deadline) {',
     '    $parent = Get-Process -Id $ParentPid -ErrorAction SilentlyContinue',
     '    if (-not $parent) { break }',
     '    Start-Sleep -Milliseconds 250',
     '  }',
     '  $remaining = Get-Process -Id $ParentPid -ErrorAction SilentlyContinue',
-    '  if ($remaining) { Stop-Process -Id $ParentPid -Force -ErrorAction SilentlyContinue; Start-Sleep -Seconds 1 }',
+    '  if ($remaining) { Write-Log "父进程未按时退出，强制结束"; Stop-Process -Id $ParentPid -Force -ErrorAction SilentlyContinue; Start-Sleep -Seconds 2 }',
     '  if (-not (Test-Path -LiteralPath $Installer -PathType Leaf)) { throw "更新安装包不存在: $Installer" }',
+    '  if (-not (Test-Path -LiteralPath $InstallDirectory -PathType Container)) { throw "安装目录不存在: $InstallDirectory" }',
     '  $exitCode = 1',
     '  for ($attempt = 1; $attempt -le 3; $attempt++) {',
-    '    # /D must be the final NSIS argument so custom install locations are preserved.',
+    '    # NSIS requires the quoted /D value when the install directory contains spaces.',
     '    $installArgument = "/D=`"$InstallDirectory`""',
     '    $installerArgs = @("/S", "/NCRC", $installArgument)',
     '    try {',
@@ -108,12 +162,18 @@ function scheduleWindowsInstall(installerPath, expectedVersion, markerPath = pen
     '      $probe = Join-Path $InstallDirectory (".anyu-write-test-" + [guid]::NewGuid().ToString("N"))',
     '      [IO.File]::WriteAllText($probe, "update")',
     '      Remove-Item -LiteralPath $probe -Force -ErrorAction SilentlyContinue',
-    '      $process = Start-Process -FilePath $Installer -ArgumentList $installerArgs -Wait -PassThru',
+    '      Write-Log "尝试 $attempt：直接运行安装器"',
+    '      $process = Start-Process -FilePath $Installer -ArgumentList $installerArgs -Wait -PassThru -ErrorAction Stop',
     '    } catch {',
     '      if ($probe) { Remove-Item -LiteralPath $probe -Force -ErrorAction SilentlyContinue }',
-    '      $process = Start-Process -FilePath $Installer -ArgumentList $installerArgs -Verb RunAs -Wait -PassThru',
+    '      Write-Log "直接运行失败，尝试请求管理员权限：$($_.Exception.Message)"',
+    '      $process = Start-Process -FilePath $Installer -ArgumentList $installerArgs -Verb RunAs -Wait -PassThru -ErrorAction Stop',
     '    }',
     '    $exitCode = [int]$process.ExitCode',
+    '    Write-Log "安装器退出码=$exitCode"',
+    '    if ($exitCode -ne 0) {',
+    '      try { Write-Log "非零退出码，使用管理员权限重试"; $process = Start-Process -FilePath $Installer -ArgumentList $installerArgs -Verb RunAs -Wait -PassThru -ErrorAction Stop; $exitCode = [int]$process.ExitCode; Write-Log "管理员重试退出码=$exitCode" } catch { Write-Log "管理员重试失败：$($_.Exception.Message)" }',
+    '    }',
     '    if ($exitCode -eq 0) { break }',
     '    Start-Sleep -Seconds 2',
     '  }',
@@ -126,46 +186,59 @@ function scheduleWindowsInstall(installerPath, expectedVersion, markerPath = pen
     '  }',
     '  if (-not $ready) { throw "安装完成后找不到客户端: $target" }',
     '  $installedVersion = [string](Get-Item -LiteralPath $target).VersionInfo.ProductVersion',
-    '  if ($ExpectedVersion -and $installedVersion -and -not $installedVersion.StartsWith($ExpectedVersion, [StringComparison]::OrdinalIgnoreCase)) { throw "安装版本校验失败: 期望 $ExpectedVersion，实际 $installedVersion" }',
+    '  Write-Log "安装后版本=$installedVersion"',
+    '  if ($ExpectedVersion -and (-not $installedVersion -or -not $installedVersion.StartsWith($ExpectedVersion, [StringComparison]::OrdinalIgnoreCase))) { throw "安装版本校验失败: 期望 $ExpectedVersion，实际 $installedVersion" }',
     '  $started = $false',
     '  for ($launchAttempt = 1; $launchAttempt -le 3; $launchAttempt++) {',
+    '    Write-Log "尝试启动客户端 $launchAttempt"',
     '    $client = Start-Process -FilePath $target -WorkingDirectory (Split-Path -Parent $target) -PassThru -ErrorAction SilentlyContinue',
-    '    Start-Sleep -Seconds 3',
-    '    $running = Get-Process -Id $client.Id -ErrorAction SilentlyContinue',
-    '    if ($running) { $started = $true; break }',
+    '    if ($client) { Start-Sleep -Seconds 5; $running = Get-Process -Id $client.Id -ErrorAction SilentlyContinue; if ($running -and -not $running.HasExited) { $started = $true; break } }',
     '    Start-Sleep -Seconds 1',
     '  }',
     '  if (-not $started) { throw "客户端重启失败: $target" }',
+    '  Write-Log "客户端已启动，更新成功"',
     '  $success = $true',
-    '} catch {',
-    '  try { $_ | Out-File -LiteralPath $Log -Append -Encoding utf8 } catch {}',
+  '} catch {',
+    '  $failure = $_.Exception.Message',
+    '  Write-Log "更新失败：$failure"',
+    '  Set-MarkerStatus "failed" $failure',
     '  exit 1',
     '} finally {',
-    '  try { Stop-Transcript | Out-Null } catch {}',
+    '  if ($lockStream) { try { $lockStream.Dispose() } catch {} }',
     '  if ($success) {',
     '    Remove-Item -LiteralPath $Installer -Force -ErrorAction SilentlyContinue',
     '    Remove-Item -LiteralPath $Marker -Force -ErrorAction SilentlyContinue',
     '  }',
-    '  Remove-Item -LiteralPath $Script -Force -ErrorAction SilentlyContinue',
+    '  if ($lockAcquired) { Remove-Item -LiteralPath $Lock -Force -ErrorAction SilentlyContinue }',
+    '  if ($lockAcquired) { Remove-Item -LiteralPath $Script -Force -ErrorAction SilentlyContinue }',
     '}'
   ].join('\r\n') + '\r\n'
   fs.writeFileSync(scriptPath, script, { encoding: 'utf8', mode: 0o600 })
   const { spawn: spawnChild } = require('child_process')
   const powershell = process.env.SystemRoot ? path.join(process.env.SystemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe') : 'powershell.exe'
-  const args = ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', scriptPath, '-ParentPid', String(process.pid), '-Installer', installerPath, '-Executable', executablePath, '-InstallDirectory', installDirectory, '-ExpectedVersion', String(expectedVersion || ''), '-Script', scriptPath, '-Log', logPath, '-Marker', markerPath]
+  const args = ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', scriptPath, '-ParentPid', String(process.pid), '-Installer', installerPath, '-Executable', executablePath, '-InstallDirectory', installDirectory, '-ExpectedVersion', String(expectedVersion || ''), '-Script', scriptPath, '-Log', logPath, '-Marker', markerPath, '-Lock', lockPath]
   const child = spawnChild(powershell, args, { detached: true, windowsHide: true, stdio: 'ignore' })
   child.once('error', (error) => {
     try { fs.appendFileSync(logPath, `更新器启动失败: ${error.message}\r\n`, { encoding: 'utf8' }) } catch {}
+    try {
+      const marker = JSON.parse(fs.readFileSync(markerPath, 'utf8'))
+      marker.status = 'failed'; marker.error = `更新器启动失败: ${error.message}`; marker.logPath = logPath; marker.updatedAt = new Date().toISOString()
+      fs.writeFileSync(markerPath, JSON.stringify(marker, null, 2), { encoding: 'utf8', mode: 0o600 })
+    } catch {}
   })
   child.unref()
-  return { scriptPath, logPath, executablePath, markerPath }
+  return { scriptPath, logPath, executablePath, markerPath, lockPath }
 }
 
 function recoverPendingUpdate() {
   if (process.platform !== 'win32' || !app.isPackaged) return false
   const markerPath = pendingUpdatePath()
   let pending
-  try { pending = JSON.parse(fs.readFileSync(markerPath, 'utf8')) } catch { return false }
+  try { pending = JSON.parse(fs.readFileSync(markerPath, 'utf8').replace(/^\uFEFF/, '')) } catch { return false }
+  if (pending?.status === 'failed') {
+    recoveredUpdateState = { status: 'error', message: String(pending.error || '上次自动更新失败'), logPath: String(pending.logPath || '') }
+    return false
+  }
   const installerPath = String(pending?.installerPath || '')
   const expectedVersion = String(pending?.expectedVersion || '')
   if (expectedVersion && compareVersions(app.getVersion(), expectedVersion) >= 0) {
@@ -179,6 +252,10 @@ function recoverPendingUpdate() {
   scheduleWindowsInstall(installerPath, expectedVersion, markerPath)
   setTimeout(() => app.exit(0), 250)
   return true
+}
+
+function getUpdateState() {
+  return recoveredUpdateState ? { ...recoveredUpdateState } : { status: 'idle', message: '' }
 }
 
 async function downloadAndInstallUpdate() {
@@ -195,15 +272,25 @@ async function downloadAndInstallUpdate() {
     sendUpdateProgress({ phase: 'downloading', version: info.latestVersion, loaded: 0, total: info.artifact.bytes, percent: 0 })
     const response = await fetch(info.artifact.url, { headers: { Accept: 'application/octet-stream' } })
     if (!response.ok || !response.body) throw new Error(`更新包下载失败 (HTTP ${response.status})`)
-    const chunks = []; let loaded = 0
-    for await (const chunk of response.body) {
-      const buffer = Buffer.from(chunk); chunks.push(buffer); loaded += buffer.length
-      sendUpdateProgress({ phase: 'downloading', version: info.latestVersion, loaded, total: info.artifact.bytes, percent: Math.min(100, Math.round(loaded / info.artifact.bytes * 100)) })
+    const file = await fs.promises.open(installerPath, 'wx', 0o700)
+    const hash = crypto.createHash('sha256')
+    let loaded = 0
+    try {
+      for await (const chunk of response.body) {
+        const buffer = Buffer.from(chunk)
+        await file.write(buffer)
+        hash.update(buffer)
+        loaded += buffer.length
+        sendUpdateProgress({ phase: 'downloading', version: info.latestVersion, loaded, total: info.artifact.bytes, percent: Math.min(100, Math.round(loaded / info.artifact.bytes * 100)) })
+      }
+      await file.sync()
+    } finally {
+      await file.close()
     }
-    const packageBuffer = Buffer.concat(chunks)
-    verifyBuffer(packageBuffer, info.artifact.bytes, info.artifact.sha256)
-    fs.writeFileSync(installerPath, packageBuffer, { mode: 0o700 })
-    sendUpdateProgress({ phase: 'installing', version: info.latestVersion, loaded: packageBuffer.length, total: packageBuffer.length, percent: 100 })
+    const actualSha256 = hash.digest('hex')
+    if (loaded !== info.artifact.bytes) throw new Error(`更新包大小校验失败（期望 ${info.artifact.bytes}，实际 ${loaded}）`)
+    if (actualSha256 !== info.artifact.sha256.toLowerCase()) throw new Error('更新包 SHA-256 校验失败')
+    sendUpdateProgress({ phase: 'installing', version: info.latestVersion, loaded, total: loaded, percent: 100 })
     // Release the bundled Pi runtime before the installer replaces app resources.
     await stopPi()
     const markerPath = writePendingUpdate(installerPath, info.latestVersion)
@@ -488,6 +575,8 @@ function modelConfig(models) {
       compat: model?.compat,
       input: modelInputCapabilities(model, id, api),
       supportsImages: modelInputCapabilities(model, id, api).includes('image'),
+      supportsTools: model?.supportsTools ?? model?.supports_tools ?? model?.capabilities?.tools,
+      permissionMode: model?.permissionMode || model?.permission_mode || '',
       contextWindow: Number(model?.contextWindow || model?.context_window || 128000),
       maxTokens: Number(model?.maxTokens || model?.max_tokens || 16384),
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }
@@ -519,7 +608,7 @@ function settlePiRequest(id, error, value) {
   const pending = piPending.get(id)
   if (!pending) return
   piPending.delete(id)
-  clearTimeout(pending.timer)
+  if (pending.timer) clearTimeout(pending.timer)
   if (error) pending.reject(error)
   else pending.resolve(value)
 }
@@ -547,11 +636,16 @@ function sendPi(command) {
   if (!piProcess?.stdin?.writable) return Promise.reject(new Error('Pi Agent 尚未启动'))
   const id = command.id || `anyu-${++piRequestCounter}`
   const payload = { ...command, id }
-  const timeoutMs = command.type === 'prompt' ? 30000 : 15000
+  // Prompt and steer are asynchronous task submissions. Pi acknowledges them
+  // separately from the eventual agent_end/agent_settled events, so applying a
+  // client-side timeout here can report a false failure while the task is still
+  // running. They remain pending until Pi acknowledges them or the process exits.
+  // 异步任务提交只等待 Pi 的接收确认，不能因长输出超过客户端等待时间而误报失败。
+  const timeoutMs = ['prompt', 'steer', 'follow_up'].includes(command.type) ? 0 : 15000
   return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => {
-      settlePiRequest(id, new Error(`Pi 命令超时：${command.type || 'unknown'}`))
-    }, timeoutMs)
+    const timer = timeoutMs > 0
+      ? setTimeout(() => { settlePiRequest(id, new Error(`Pi 命令超时：${command.type || 'unknown'}`)) }, timeoutMs)
+      : null
     piPending.set(id, { resolve, reject, timer })
     try { piProcess.stdin.write(`${JSON.stringify(payload)}\n`) } catch (error) {
       settlePiRequest(id, error)
@@ -570,12 +664,17 @@ async function startPiUnsafe(options = {}) {
   fs.mkdirSync(sessionDir, { recursive: true })
   fs.mkdirSync(agentDir, { recursive: true })
   fs.writeFileSync(path.join(agentDir, 'models.json'), JSON.stringify(modelConfig(options.models), null, 2), { mode: 0o600 })
-  const args = ['--mode', 'rpc', '--provider', String(options.provider || providerForApi(options.models?.find((model) => model.id === options.model)?.api || 'openai-completions')), '--model', String(options.model || options.models?.[0]?.id || 'gpt-4o-mini'), '--session-dir', sessionDir]
-  if (options.permissionMode === 'full') args.push('--approve')
+  const selectedModel = (Array.isArray(options.models) ? options.models : []).find((model) => String(model?.id || model?.name || '') === String(options.model || '')) || options.models?.[0] || {}
+  const provider = String(options.provider || providerForApi(selectedModel.api || 'openai-completions'))
+  const resolvedPermissionMode = resolvePermissionMode(options.permissionMode, selectedModel, provider)
+  const args = ['--mode', 'rpc', '--provider', provider, '--model', String(options.model || selectedModel.id || 'gpt-4o-mini'), '--session-dir', sessionDir]
+  if (resolvedPermissionMode === 'full') args.push('--approve')
   if (options.sessionPath && isInside(sessionDir, options.sessionPath)) args.push('--session', path.resolve(options.sessionPath))
   const sessionCwd = options.sessionPath ? sessionWorkingDirectory(options.sessionPath) : ''
   const requestedCwd = sessionCwd || options.cwd
   const cwd = requestedCwd && fs.existsSync(requestedCwd) && fs.statSync(requestedCwd).isDirectory() ? requestedCwd : app.getPath('home')
+  const pluginPaths = pluginManager ? pluginManager.runtimeSkillPaths(cwd) : []
+  for (const skillPath of pluginPaths) args.push('--skill', skillPath)
   piBuffer = ''
   let startupStderr = ''
   piProcess = spawn(executable, args, {
@@ -613,7 +712,7 @@ async function startPiUnsafe(options = {}) {
     setTimeout(check, 120)
   })
   await sendPi({ type: 'get_state' })
-  return { ok: true, cwd, sessionDir }
+  return { ok: true, cwd, sessionDir, permissionMode: resolvedPermissionMode }
 }
 
 async function startPi(options = {}) {
@@ -636,22 +735,28 @@ function listPiSessions() {
   }
   visit(directory)
   const sessions = files.map((file) => {
-    let title = '新会话'; let modified = 0; let cwd = ''
+    let title = '新会话'; let modified = 0; let firstMessageAt = 0; let entryCreatedAt = 0; let fileBirthtime = 0; let cwd = ''; let hasNamedTitle = false
     try {
-      modified = fs.statSync(file).mtimeMs
+      const stat = fs.statSync(file)
+      modified = stat.mtimeMs
+      fileBirthtime = stat.birthtimeMs || stat.ctimeMs || stat.mtimeMs
       const lines = fs.readFileSync(file, 'utf8').split('\n').filter(Boolean)
-      for (const line of lines.slice(0, 80)) {
+      for (const line of lines) {
         let entry; try { entry = JSON.parse(line) } catch { continue }
-        if (entry.type === 'session') { if (entry.name) title = entry.name; cwd = String(entry.cwd || '') }
+        const messageTime = entry.message && (entry.message.timestamp || entry.message.createdAt || entry.message.time)
+        const entryTime = timestampValue(entry.timestamp || entry.createdAt || entry.time || messageTime)
+        if (entry.type === 'session') { if (entry.name) { title = entry.name; hasNamedTitle = true }; cwd = String(entry.cwd || ''); if (!entryCreatedAt && entryTime) entryCreatedAt = entryTime }
         const message = entry.message
-        if (title === '新会话' && message?.role === 'user') {
+        if (message?.role === 'user') {
+          if (!firstMessageAt && entryTime) firstMessageAt = entryTime
           const content = Array.isArray(message.content) ? message.content.find((part) => part.type === 'text')?.text : message.content
-          if (content) title = String(content).replace(/\s+/g, ' ').slice(0, 48)
+          if (!hasNamedTitle && content) title = String(content).replace(/\s+/g, ' ').slice(0, 48)
         }
       }
     } catch {}
     const metadata = sessionMeta[sessionMetaKey(file)] || {}
-    return { path: file, title: String(metadata.title || title), modified, cwd, pinned: Boolean(metadata.pinned) }
+    firstMessageAt = firstMessageAt || entryCreatedAt || fileBirthtime || modified
+    return { path: file, title: String(metadata.title || title), createdAt: Number(firstMessageAt), firstMessageAt: Number(firstMessageAt), modified, cwd, pinned: Boolean(metadata.pinned) }
   })
   // A media-only first message is intentionally kept in a sidecar until Pi
   // receives a normal assistant turn. Include that virtual session in history
@@ -662,7 +767,7 @@ function listPiSessions() {
     if (item.title !== '新会话') continue
     const record = mediaByPath.get(path.resolve(item.path)); const firstUser = (record?.messages || []).find((message) => message?.role === 'user')
     if (firstUser?.content) item.title = String(firstUser.content).replace(/\s+/g, ' ').slice(0, 48)
-    if (record?.modified) item.modified = Math.max(item.modified, Number(record.modified))
+    if (record?.createdAt || record?.modified) item.createdAt = item.firstMessageAt = timestampValue(record.createdAt || record.modified)
   }
   const known = new Set(sessions.map((item) => path.resolve(item.path)))
   for (const record of Object.values(mediaIndex)) {
@@ -670,9 +775,10 @@ function listPiSessions() {
     if (!sessionPath || !isInside(piSessionDir(), sessionPath) || known.has(path.resolve(sessionPath))) continue
     const firstUser = (record.messages || []).find((message) => message?.role === 'user')
     const metadata = sessionMeta[sessionMetaKey(sessionPath)] || {}
-    sessions.push({ path: sessionPath, title: String(metadata.title || firstUser?.content || '新会话').replace(/\s+/g, ' ').slice(0, 48) || '新会话', modified: Number(record.modified || 0), cwd: String(record.cwd || ''), pinned: Boolean(metadata.pinned) })
+    const createdAt = timestampValue(record.createdAt || record.modified)
+    sessions.push({ path: sessionPath, title: String(metadata.title || firstUser?.content || '新会话').replace(/\s+/g, ' ').slice(0, 48) || '新会话', createdAt, firstMessageAt: createdAt, modified: createdAt, cwd: String(record.cwd || ''), pinned: Boolean(metadata.pinned) })
   }
-  return sessions.sort((a, b) => Number(Boolean(b.pinned)) - Number(Boolean(a.pinned)) || b.modified - a.modified)
+  return sessions.sort((a, b) => Number(b.createdAt || b.firstMessageAt || b.modified || 0) - Number(a.createdAt || a.firstMessageAt || a.modified || 0) || String(a.path).localeCompare(String(b.path)))
 }
 
 async function requestApi(route, options = {}, retry = true) {
@@ -706,7 +812,7 @@ async function requestApi(route, options = {}, retry = true) {
 
 // Keep multipart assembly and media downloads in the main process so the
 // renderer never needs to handle the Anyu JWT or gateway credentials.
-async function requestMultipart(route, fields = {}, files = [], retry = true) {
+async function requestMultipart(route, fields = {}, files = [], retry = true, maxFileBytes = 16 * 1024 * 1024) {
   const boundary = `----AnYuAgent${crypto.randomBytes(12).toString('hex')}`
   const chunks = []
   const push = (value) => chunks.push(Buffer.isBuffer(value) ? value : Buffer.from(String(value)))
@@ -717,7 +823,7 @@ async function requestMultipart(route, fields = {}, files = [], retry = true) {
     if (!file?.field || typeof file.data !== 'string') continue
     let data
     try { data = Buffer.from(file.data, 'base64') } catch { continue }
-    if (!data.length || data.length > 16 * 1024 * 1024) continue
+    if (!data.length || data.length > maxFileBytes) continue
     const field = String(file.field).replace(/[^a-zA-Z0-9_.-]/g, '_')
     const filename = String(file.name || 'reference.png').replace(/["\\\r\n]/g, '_')
     const mime = String(file.mimeType || 'application/octet-stream').replace(/[\r\n]/g, '')
@@ -734,7 +840,7 @@ async function requestMultipart(route, fields = {}, files = [], retry = true) {
     const refreshed = await requestApi('/auth/refresh', { method: 'POST', body: { refresh_token: auth.refreshToken } }, false).catch(() => null)
     if (refreshed?.access_token) {
       saveAuth({ ...auth, accessToken: refreshed.access_token, refreshToken: refreshed.refresh_token || auth.refreshToken })
-      return requestMultipart(route, fields, files, false)
+      return requestMultipart(route, fields, files, false, maxFileBytes)
     }
     clearAuth()
   }
@@ -743,6 +849,25 @@ async function requestMultipart(route, fields = {}, files = [], retry = true) {
     error.status = response.status; error.code = payload?.code; throw error
   }
   return payload && payload.code === 0 ? payload.data : payload
+}
+
+async function publishPluginPackage(publication, options = {}) {
+  const packagePath = String(publication?.filePath || '')
+  if (!packagePath || !fs.existsSync(packagePath)) throw new Error('插件发布包不存在')
+  const data = fs.readFileSync(packagePath)
+  if (!data.length || data.length > MAX_PACKAGE_BYTES) throw new Error('插件包超过 64 MB 限制')
+  const manifest = publication.manifest || {}
+  const publisher = options.publisher && typeof options.publisher === 'object' ? options.publisher : { id: 'community', name: String(options.publisherName || '社区用户'), verified: false }
+  const fields = {
+    plugin_id: String(manifest.id || ''),
+    version: String(manifest.version || ''),
+    publisher_name: String(publisher.name || ''),
+    visibility: options.visibility === 'private' ? 'private' : 'public',
+    sha256: String(publication.sha256 || ''),
+    manifest: JSON.stringify(manifest),
+    metadata: JSON.stringify({ ...manifest, publisher, visibility: options.visibility === 'private' ? 'private' : 'public' })
+  }
+  return requestMultipart('/marketplace/plugins/publish', fields, [{ field: 'package', name: `${manifest.id || 'plugin'}-${manifest.version || 'latest'}.anyu-plugin.zip`, mimeType: 'application/zip', data: data.toString('base64') }], true, MAX_PACKAGE_BYTES)
 }
 
 async function requestBinary(route, retry = true) {
@@ -823,10 +948,20 @@ function createWindow() {
   mainWindow.webContents.setWindowOpenHandler(({ url }) => { if (/^https?:/i.test(url)) shell.openExternal(url); return { action: 'deny' } })
 }
 
+function requiredMediaSelection(payload, kind) {
+  const groupId = Number(payload?.groupId)
+  const model = String(payload?.model || '').trim()
+  if (!Number.isSafeInteger(groupId) || groupId <= 0 || !model) {
+    throw new Error(`请选择当前目录中的${kind === 'image' ? '图片' : '视频'}分组和模型`)
+  }
+  return { groupId, model }
+}
+
 app.whenReady().then(() => {
   Menu.setApplicationMenu(null)
   if (recoverPendingUpdate()) return
   loadAuth()
+  pluginManager = new PluginManager(app.getPath('userData'))
   session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
      callback({ responseHeaders: { ...details.responseHeaders, 'Content-Security-Policy': ["default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self' data: blob:; media-src 'self' data: blob:; connect-src 'self'"] } })
   })
@@ -846,16 +981,20 @@ app.whenReady().then(() => {
   })
   ipcMain.handle('api:request', (_, route, options) => requestApi(route, options || {}))
   ipcMain.handle('anyu:skills-groups', () => requestApi('/groups/available'))
-  ipcMain.handle('anyu:image-create', (_, payload = {}) => requestMultipart('/anyu-ai/tasks', {
-    prompt: payload.prompt, group_id: payload.groupId, model: payload.model || 'gpt-image-2',
-    size: payload.size || '1024x1024', quality: payload.quality || 'auto', count: payload.count || 1
-  }, (payload.references || []).map((file) => ({ ...file, field: 'reference_images' }))))
+  ipcMain.handle('anyu:image-create', (_, payload = {}) => {
+    const selection = requiredMediaSelection(payload, 'image')
+    return requestMultipart('/anyu-ai/tasks', {
+      prompt: payload.prompt, group_id: selection.groupId, model: selection.model,
+      size: payload.size || '1024x1024', quality: payload.quality || 'auto', count: payload.count || 1
+    }, (payload.references || []).map((file) => ({ ...file, field: 'reference_images' })))
+  })
   ipcMain.handle('anyu:image-task', (_, taskId) => requestApi(`/anyu-ai/tasks/${encodeURIComponent(String(taskId || ''))}`))
   ipcMain.handle('anyu:image-download', (_, taskId, index = 0) => requestBinary(`/anyu-ai/tasks/${encodeURIComponent(String(taskId || ''))}/images/${Number(index) || 0}`))
   ipcMain.handle('anyu:video-create', (_, payload = {}) => {
+    const selection = requiredMediaSelection(payload, 'video')
     // Keep provider defaults server-owned. The skill planner supplies a value
     // only when the user's request and the selected model make one necessary.
-    const fields = { prompt: payload.prompt, group_id: payload.groupId, model: payload.model }
+    const fields = { prompt: payload.prompt, group_id: selection.groupId, model: selection.model }
     if (Number.isFinite(Number(payload.duration)) && Number(payload.duration) > 0) fields.duration = Number(payload.duration)
     if (String(payload.resolution || '').trim()) fields.resolution = String(payload.resolution).trim()
     if (String(payload.aspectRatio || '').trim()) fields.aspect_ratio = String(payload.aspectRatio).trim()
@@ -890,7 +1029,74 @@ app.whenReady().then(() => {
     const result = await dialog.showOpenDialog(mainWindow, { properties: ['openDirectory', 'createDirectory'] })
     return result.canceled ? null : result.filePaths[0]
   })
+  ipcMain.handle('plugin:state', () => pluginManager.state())
+  ipcMain.handle('plugin:scan', (_, sourcePath) => pluginManager.scanPackage(sourcePath))
+  ipcMain.handle('plugin:pick-package', async () => {
+    const result = await dialog.showOpenDialog(mainWindow, {
+      properties: ['openFile', 'openDirectory'],
+      filters: [{ name: 'AnYu 插件', extensions: ['anyu-plugin', 'zip'] }, { name: '所有文件', extensions: ['*'] }]
+    })
+    return result.canceled ? null : result.filePaths[0]
+  })
+  ipcMain.handle('plugin:install-local', async (_, payload = {}) => pluginManager.install(payload.path, { scope: payload.scope, projectPath: payload.projectPath, source: 'local', visibility: payload.visibility || 'private' }))
+  ipcMain.handle('plugin:set-enabled', (_, payload = {}) => pluginManager.setEnabled(payload.id, payload.enabled))
+  ipcMain.handle('plugin:uninstall', (_, id) => pluginManager.uninstall(id))
+  ipcMain.handle('plugin:rollback', (_, payload = {}) => pluginManager.rollback(payload.id, payload.version))
+  ipcMain.handle('plugin:marketplace', async () => {
+    try {
+      const result = await requestApi('/marketplace/plugins')
+      const entries = Array.isArray(result) ? result : result?.items || result?.plugins || result?.data || []
+      return (Array.isArray(entries) ? entries : []).map((item) => ({
+        ...item,
+        id: item?.id || item?.pluginId || item?.plugin_id,
+        displayName: item?.displayName || item?.display_name || item?.name,
+        description: item?.description || item?.summary || '',
+        publisher: item?.publisher || item?.publisherName || item?.publisher_name,
+        verified: Boolean(item?.verified || item?.publisher?.verified),
+        downloadUrl: item?.downloadUrl || item?.download_url || item?.packageUrl || item?.package_url,
+        categories: item?.categories || item?.tags || [],
+        keywords: item?.keywords || []
+      }))
+    } catch { return [] }
+  })
+  ipcMain.handle('plugin:install-marketplace', async (_, payload = {}) => {
+    const url = String(payload.downloadUrl || payload.download_url || '')
+    if (!/^https:\/\//i.test(url)) throw new Error('市场插件下载地址无效')
+    const response = await fetch(url, { headers: { Accept: 'application/octet-stream' } })
+    if (!response.ok) throw new Error(`插件下载失败 (HTTP ${response.status})`)
+    const data = Buffer.from(await response.arrayBuffer())
+    if (!data.length || data.length > MAX_PACKAGE_BYTES) throw new Error('插件包超过 64 MB 限制')
+    const filename = `${crypto.randomUUID()}.anyu-plugin.zip`
+    const filePath = path.join(pluginManager.downloadPath, filename)
+    fs.writeFileSync(filePath, data, { mode: 0o600 })
+    try { return await pluginManager.install(filePath, { scope: payload.scope, projectPath: payload.projectPath, source: 'marketplace', visibility: 'public' }) } finally { fs.rmSync(filePath, { force: true }) }
+  })
+  ipcMain.handle('plugin:publish', async (_, payload = {}) => {
+    const id = String(payload.id || '')
+    const record = pluginManager.get(id)
+    if (!record?.installedPath) throw new Error('请选择一个已安装的自定义插件')
+    const publisherName = String(payload.publisherName || '').trim()
+    if (!publisherName) throw new Error('请填写发布者名称')
+    const visibility = payload.visibility === 'private' ? 'private' : 'public'
+    const publication = await pluginManager.preparePublish(record.installedPath, {
+      publisherId: String(payload.publisherId || auth?.user?.id || auth?.user?.user_id || 'community'),
+      publisherName,
+      visibility
+    })
+    try {
+      const result = await publishPluginPackage(publication, { publisherName, visibility, publisher: publication.manifest.publisher })
+      const status = String(result?.publishStatus || result?.reviewStatus || result?.status || result?.state || 'submitted')
+      return pluginManager.markPublished(id, {
+        visibility,
+        status,
+        publisher: publication.manifest.publisher,
+        marketplaceId: result?.id || result?.pluginId || result?.plugin_id,
+        downloadUrl: result?.downloadUrl || result?.download_url || result?.packageUrl
+      })
+    } finally { fs.rmSync(publication.filePath, { force: true }) }
+  })
   ipcMain.handle('update:check', async () => checkForUpdate())
+  ipcMain.handle('update:state', () => getUpdateState())
   ipcMain.handle('update:download-install', async () => downloadAndInstallUpdate())
   ipcMain.handle('app:open-external', (_, url) => { if (/^https?:/i.test(url)) return shell.openExternal(url) })
   ipcMain.handle('window:action', (_, action) => {

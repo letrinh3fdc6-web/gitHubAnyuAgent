@@ -1,6 +1,10 @@
 (() => {
   const root = document.querySelector('#app')
   const mediaObjectUrls = new Map()
+  const savedPermissionMode = localStorage.getItem('anyu.permissionMode')
+  const permissionModeWasSelected = localStorage.getItem('anyu.permissionMode.userSelected') === '1'
+  // 旧版本默认保存的是 confirm，新版本将其视为未主动选择，交给模型能力自动适配。
+  const initialPermissionMode = permissionModeWasSelected && ['auto', 'confirm', 'full'].includes(savedPermissionMode) ? savedPermissionMode : 'auto'
   const state = {
     user: null, keys: [], catalog: [], catalogSource: '', sessions: [], sessionPath: null,
     messages: [], mediaMessages: {}, mediaBusyCount: 0, mediaActivity: {}, attachments: [], imageLibrary: [], composerText: '', imageMenuOpen: false, imagePreview: null,
@@ -8,14 +12,15 @@
     model: localStorage.getItem('anyu.selectedModel') || '', cwd: localStorage.getItem('anyu.cwd') || '', sessionCwd: null,
     thinkingLevel: localStorage.getItem('anyu.thinkingLevel') || 'medium', thinkingLevels: ['off'],
     loading: false, skillBusy: null, error: '', twoFactor: null, permission: null, piState: null,
-    authChecking: true, activeRequest: null, retryNotice: '', runStartedAt: 0, runWatchdog: null, runPoll: null,
+    authChecking: true, activeRequest: null, retryNotice: '', runInProgress: false, runPoll: null,
     renderQueued: false, streamingMessage: null, forceScroll: false, appRenderQueued: false,
-    settingsOpen: false, skillsMarketOpen: false, skillsLoading: false, skillGroups: [], skillMenuOpen: false, skillEnabled: { image: true, video: true },
-    skillConfigs: { image: { groupId: 0, model: 'gpt-image-2', size: '1024x1024', quality: 'auto' }, video: { groupId: 0, model: '' } },
-    switching: false, sessionSwitching: false, sessionSwitchToken: 0, balanceRefresh: null,
+    settingsOpen: false, pluginMarketOpen: false, pluginMarketLoading: false, pluginMarketTab: 'marketplace', pluginMarketQuery: '', pluginMarketError: '', pluginPublishOpen: false, pluginPublishId: '', pluginPublishName: '', pluginPublishVisibility: 'public', pluginPublishLoading: false, pluginState: { installed: [], marketplace: [] },
+    skillsMarketOpen: false, skillsLoading: false, skillGroups: [], skillMenuOpen: false, skillEnabled: { image: true, video: true },
+    skillConfigs: { image: { groupId: 0, model: '', size: '1024x1024', quality: 'auto' }, video: { groupId: 0, model: '' } },
+    switching: false, sessionSwitching: false, sessionLoadingPath: null, sessionSwitchToken: 0, balanceRefresh: null,
     update: { status: 'idle', currentVersion: '', latestVersion: '', percent: 0, message: '' },
     queuedTasks: [], queueMenuId: null, queueDraining: false, sessionMenu: null, composerCursor: null,
-    permissionMode: localStorage.getItem('anyu.permissionMode') || 'confirm'
+    permissionMode: initialPermissionMode, activePermissionMode: null
   }
   const api = (route, options) => window.anyu.request(route, options)
   const esc = (value) => String(value ?? '').replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]))
@@ -58,11 +63,42 @@
   const formatBytes = (bytes) => { const size = Number(bytes || 0); if (size < 1024) return `${size} B`; if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`; return `${(size / 1024 / 1024).toFixed(1)} MB` }
   const errorText = (value) => String(value?.message || value || '').replace(/\s+/g, ' ').trim()
   const formatDuration = (milliseconds) => { const seconds = Math.max(0, Math.round(Number(milliseconds || 0) / 100) / 10); return seconds < 1 ? '< 1 秒' : `${seconds.toFixed(seconds < 10 ? 1 : 0)} 秒` }
+  function timestampValue(value) {
+    const number = Number(value)
+    if (Number.isFinite(number) && number > 0) return number < 1e12 ? number * 1000 : number
+    const parsed = Date.parse(String(value || ''))
+    return Number.isFinite(parsed) ? parsed : 0
+  }
+  function formatTimestamp(value) {
+    const number = timestampValue(value)
+    const date = number > 0 ? new Date(number) : new Date(String(value || ''))
+    if (Number.isNaN(date.getTime())) return ''
+    return date.toLocaleString('zh-CN', { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
+  }
   const providerForApi = (api) => api === 'anthropic-messages' ? 'anyu-gateway-anthropic' : api === 'google-generative-ai' || api === 'google-vertex' ? 'anyu-gateway-gemini' : 'anyu-gateway-openai'
   const canonicalApi = (value, fallback = 'openai-completions') => { const raw = String(value || '').toLowerCase(); if (raw.includes('anthropic') || raw.includes('claude')) return 'anthropic-messages'; if (raw.includes('google') || raw.includes('gemini')) return 'google-generative-ai'; if (raw.includes('response')) return 'openai-responses'; if (raw.includes('openai') || raw.includes('completion') || raw.includes('chat')) return 'openai-completions'; return fallback }
   const selectedKey = () => state.keys.find((key) => Number(key.id) === state.selectedKey)
   const currentModel = () => state.catalog.find((item) => item.id === state.model)
   const effectiveWorkspace = () => state.sessionCwd || state.cwd || ''
+  function modelPermissionMode(model = currentModel()) {
+    const explicit = String(model?.permissionMode || model?.permission_mode || '').toLowerCase()
+    if (explicit === 'full' || explicit === 'confirm') return explicit
+    const toolFlags = [
+      model?.supportsTools, model?.supports_tools, model?.toolUse,
+      model?.tool_use, model?.capabilities?.tools, model?.capabilities?.tool_use
+    ]
+    if (toolFlags.some((value) => value === false)) return 'confirm'
+    if (toolFlags.some((value) => value === true)) return 'full'
+    const lower = `${model?.id || model?.name || ''} ${model?.api || ''} ${model?.provider || ''}`.toLowerCase()
+    // Anyu 主流模型用于编码 Agent 时默认开放本机工具，未知模型仍保留确认。
+    return /gpt|codex|openai|claude|anthropic|gemini|google|grok|qwen|deepseek|glm|kimi|mistral|moonshot|doubao|llama/.test(lower) ? 'full' : 'confirm'
+  }
+  function effectivePermissionMode() {
+    return state.permissionMode === 'auto' ? (state.activePermissionMode || modelPermissionMode()) : state.permissionMode
+  }
+  function permissionModeLabel(mode = effectivePermissionMode()) {
+    return mode === 'full' ? '⚡ 完整访问' : '✓ 受控访问'
+  }
   const THINKING_LEVELS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
   const thinkingLevelLabel = (level) => ({ off: '关闭', minimal: '最小', low: '低', medium: '中', high: '高', xhigh: '极高', max: '最大' }[level] || level)
   function modelThinkingLevels(model = currentModel()) {
@@ -153,7 +189,7 @@
     state.balanceRefresh = window.setInterval(() => { void refreshBalance(true) }, 60 * 1000)
   }
 
-  function render() { state.user ? renderApp() : renderLogin() }
+  function render() { if (!state.user) state.pluginMarketOpen = false; state.user ? renderApp() : renderLogin() }
   function windowControlsMarkup(className = '') {
     return `<div class="window-controls ${className}" aria-label="窗口控制"><button type="button" data-window-action="minimize" title="最小化">−</button><button type="button" data-window-action="maximize" title="最大化">□</button><button type="button" data-window-action="close" title="关闭">×</button></div>`
   }
@@ -243,7 +279,15 @@
     const reasoning = Boolean(model?.reasoning || rawMap || (Array.isArray(rawLevels) && rawLevels.length) || inferredReasoning.reasoning)
     const thinkingLevels = Array.isArray(rawLevels) ? rawLevels.map((level) => String(level).toLowerCase()).filter((level) => THINKING_LEVELS.includes(level)) : undefined
     const thinkingLevelMap = rawMap && typeof rawMap === 'object' ? rawMap : thinkingLevels?.length ? Object.fromEntries(THINKING_LEVELS.map((level) => [level, thinkingLevels.includes(level) ? level : null])) : inferredReasoning.thinkingLevelMap
-    return { id, name: model?.name || model?.display_name || model?.displayName || id, api, provider: providerForApi(api), reasoning, thinkingLevels, thinkingLevelMap, input: capabilities.input, supportsImages: capabilities.supportsImages, contextWindow: model?.context_window || model?.contextWindow || 128000, maxTokens: model?.max_tokens || model?.maxTokens || 16384 }
+    return {
+      id, name: model?.name || model?.display_name || model?.displayName || id, api,
+      provider: providerForApi(api), reasoning, thinkingLevels, thinkingLevelMap,
+      input: capabilities.input, supportsImages: capabilities.supportsImages,
+      supportsTools: model?.supportsTools ?? model?.supports_tools ?? model?.capabilities?.tools,
+      permissionMode: model?.permissionMode || model?.permission_mode || '',
+      contextWindow: model?.context_window || model?.contextWindow || 128000,
+      maxTokens: model?.max_tokens || model?.maxTokens || 16384
+    }
   }
   async function loadCatalog() {
     try {
@@ -311,50 +355,204 @@
     return [...new Set(generic.map(Number).filter((id) => {
       const group = state.skillGroups.find((item) => Number(item.id) === id)
       if (!group) return false
-      const models = Array.isArray(group.models) ? group.models : []
-      return kind === 'image' ? Boolean(group.allow_image_generation) && (String(group.platform || '').toLowerCase() === 'openai' || models.some((model) => String(model.capability || '').toLowerCase() === 'image')) : models.some((model) => String(model.capability || '').toLowerCase() === 'video')
+      return skillModelsForGroup(group, kind).length > 0
     }))]
+  }
+  function skillModelsForGroup(group, kind) {
+    const models = Array.isArray(group?.models) ? group.models : []
+    return models.filter((model) => String(model?.name || '').trim() && String(model?.capability || '').trim().toLowerCase() === kind)
   }
   function availableSkillGroups(kind) {
     const groups = state.skillGroups.filter((group) => {
       const active = !group.status || String(group.status).toLowerCase() === 'active'
-      const models = Array.isArray(group.models) ? group.models : []
       if (!active || group.data_sharing_enabled) return false
-      if (kind === 'image') return Boolean(group.allow_image_generation) && (String(group.platform || '').toLowerCase() === 'openai' || models.some((model) => String(model.capability || '').toLowerCase() === 'image'))
-      return models.some((model) => model.capability === 'video') || ['grok', 'xai'].includes(String(group.platform || '').toLowerCase())
+      if (kind === 'image' && !group.allow_image_generation) return false
+      return skillModelsForGroup(group, kind).length > 0
     })
     const ids = keyCapabilityGroupIds(kind)
     return ids.length ? groups.filter((group) => ids.includes(Number(group.id))) : groups
   }
   function skillModels(kind) {
     const groups = availableSkillGroups(kind)
-    return groups.flatMap((group) => {
-      const configured = (group.models || []).filter((model) => kind === 'image' ? String(model.capability || '').toLowerCase() === 'image' : String(model.capability || '').toLowerCase() === 'video')
-      const fallback = kind === 'image' && !configured.length && String(group.platform || '').toLowerCase() === 'openai' ? [{ name: 'gpt-image-2', display_name: 'GPT Image 2', capability: 'image' }] : kind === 'video' && !configured.length && ['grok', 'xai'].includes(String(group.platform || '').toLowerCase()) ? [{ name: 'grok-imagine-video-1.5', display_name: 'Grok Imagine Video 1.5', capability: 'video', duration_min: 1, duration_max: 15, resolutions: ['480p', '720p', '1080p'], aspect_ratios: ['21:9', '16:9', '4:3', '1:1', '3:4', '9:16'], max_reference_images: 1, uses_grok_fields: true }] : []
-      return [...configured, ...fallback].map((model) => ({ ...model, groupId: Number(group.id), groupName: group.name }))
-    })
+    return groups.flatMap((group) => skillModelsForGroup(group, kind).map((model) => ({ ...model, name: String(model.name).trim(), groupId: Number(group.id), groupName: group.name })))
   }
   function ensureSkillSelection() {
     for (const kind of ['image', 'video']) {
       const config = state.skillConfigs[kind]
-      const groups = availableSkillGroups(kind); const models = skillModels(kind)
+      const models = skillModels(kind)
       const preferredGroup = Number(config.groupId)
       const groupModels = preferredGroup ? models.filter((model) => Number(model.groupId) === preferredGroup) : models
       const selectedModel = groupModels.find((model) => model.name === config.model)
-      const fallbackModel = selectedModel || groupModels[0] || models[0]
-      if (fallbackModel) { config.groupId = Number(fallbackModel.groupId); config.model = fallbackModel.name }
-      else if (groups[0]) config.groupId = Number(groups[0].id)
+      const nextModel = selectedModel || groupModels[0] || models[0]
+      if (nextModel) { config.groupId = Number(nextModel.groupId); config.model = nextModel.name }
+      else { config.groupId = 0; config.model = '' }
     }
   }
   async function loadSkillGroups() {
     try {
       const data = await window.anyu.skillsGroups()
-      state.skillGroups = Array.isArray(data) ? data : data?.items || data?.groups || []
+      const groups = Array.isArray(data) ? data : data?.items || data?.groups || []
+      state.skillGroups = Array.isArray(groups) ? groups : []
       ensureSkillSelection()
+      return true
     } catch (error) {
       state.skillGroups = []
+      ensureSkillSelection()
       state.error = error.message || '技能目录加载失败'
+      return false
     }
+  }
+  function pluginList() {
+    const value = state.pluginState?.installed
+    return Array.isArray(value) ? value : []
+  }
+  function pluginMarketplaceList() {
+    const value = state.pluginState?.marketplace
+    return Array.isArray(value) ? value : []
+  }
+  function pluginId(item) { return String(item?.id || item?.pluginId || '') }
+  function pluginTitle(item) { return String(item?.displayName || item?.display_name || item?.name || pluginId(item) || '未命名插件') }
+  function pluginDescription(item) { return String(item?.description || '面向 AnYuAgent 的可复用 Skill 能力。') }
+  function pluginPublisher(item) {
+    const publisher = item?.publisher
+    return typeof publisher === 'object' ? String(publisher.name || publisher.id || '未知发布者') : String(publisher || '未知发布者')
+  }
+  function pluginMatches(item, query) {
+    if (!query) return true
+    const haystack = [pluginTitle(item), pluginDescription(item), pluginPublisher(item), ...(item?.keywords || []), ...(item?.categories || [])].join(' ').toLowerCase()
+    return haystack.includes(query.toLowerCase())
+  }
+  function comparePluginVersions(left, right) {
+    const parse = (value) => String(value || '').match(/^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?$/)
+    const a = parse(left); const b = parse(right)
+    if (!a || !b) return 0
+    for (let index = 1; index <= 3; index += 1) {
+      const delta = Number(a[index]) - Number(b[index])
+      if (delta) return delta
+    }
+    if (!a[4] && b[4]) return 1
+    if (a[4] && !b[4]) return -1
+    return String(a[4] || '').localeCompare(String(b[4] || ''), 'en', { numeric: true })
+  }
+  function installedPlugin(id) { return pluginList().find((item) => pluginId(item) === id) }
+  function pluginPublishStatusLabel(item) {
+    const status = String(item?.publishStatus || '').toLowerCase()
+    if (status === 'submitted' || status === 'pending' || status === 'review') return '审核中'
+    if (status === 'approved' || status === 'published' || item?.visibility === 'public') return '已发布'
+    if (status === 'rejected') return '需修改'
+    return '仅自己可用'
+  }
+  function pluginCardMarkup(item, mode) {
+    const id = pluginId(item)
+    if (!id) return ''
+    const installed = mode === 'installed' || installedPlugin(id)
+    const record = installedPlugin(id)
+    const display = mode === 'marketplace' ? item : (record || item)
+    const version = String(display?.version || '—')
+    const categories = Array.isArray(display?.categories) ? display.categories.slice(0, 3).map((value) => `<span class="plugin-chip">${esc(value)}</span>`).join('') : ''
+    const updateAvailable = mode === 'marketplace' && record && comparePluginVersions(item?.version, record.version) > 0
+    const updateAction = updateAvailable ? `<button class="plugin-action active" data-plugin-action="update" data-plugin-id="${esc(id)}">更新</button>` : ''
+    const publishAction = mode === 'installed' && record?.source === 'local'
+      ? (record.publishStatus && record.publishStatus !== 'private' ? `<span class="plugin-publish-state">${esc(pluginPublishStatusLabel(record))}</span>` : `<button class="plugin-action" data-plugin-action="publish" data-plugin-id="${esc(id)}">发布</button>`)
+      : ''
+    const rollbackVersion = Array.isArray(record?.versions)
+      ? record.versions.find((entry) => String(entry?.version || '') && String(entry.version) !== version)?.version || ''
+      : ''
+    const rollbackAction = mode === 'installed' && rollbackVersion
+      ? `<button class="plugin-action" data-plugin-action="rollback" data-plugin-id="${esc(id)}" data-plugin-version="${esc(rollbackVersion)}">回滚 v${esc(rollbackVersion)}</button>`
+      : ''
+    const action = installed
+      ? `${updateAction}<button class="plugin-action ${record?.enabled === false ? '' : 'active'}" data-plugin-action="toggle" data-plugin-id="${esc(id)}">${record?.enabled === false ? '启用' : '已启用'}</button>${rollbackAction}${publishAction}<button class="plugin-text-action" data-plugin-action="uninstall" data-plugin-id="${esc(id)}">卸载</button>`
+      : `<button class="plugin-action active" data-plugin-action="install" data-plugin-id="${esc(id)}">安装</button>`
+    const trust = (record || item)?.verified || (record || item)?.publisher?.verified ? '<span class="plugin-badge verified">已验证</span>' : '<span class="plugin-badge">社区</span>'
+    return `<article class="plugin-card"><div class="plugin-card-top"><div class="plugin-icon">${esc(pluginTitle(item).slice(0, 1).toUpperCase())}</div><div class="plugin-card-main"><div class="plugin-card-title"><strong>${esc(pluginTitle(item))}</strong>${trust}</div><p>${esc(pluginDescription(item))}</p><div class="plugin-meta"><span>${esc(pluginPublisher(item))}</span><span>v${esc(version)}</span>${categories}</div></div></div><div class="plugin-card-actions">${action}</div></article>`
+  }
+  function pluginMarketMarkup() {
+    const tab = state.pluginMarketTab
+    const query = String(state.pluginMarketQuery || '').trim()
+    const installed = pluginList()
+    const marketplace = pluginMarketplaceList().filter((item) => pluginMatches(item, query))
+    const uploads = installed.filter((item) => item.visibility !== 'public' || item.source === 'local')
+    const items = tab === 'installed' ? installed.filter((item) => pluginMatches(item, query)) : tab === 'uploads' ? uploads.filter((item) => pluginMatches(item, query)) : marketplace
+    const empty = tab === 'marketplace' ? '市场暂时没有可用目录。你可以导入自己的 .anyu-plugin.zip，安装后立即使用。' : tab === 'installed' ? '还没有安装插件。' : '还没有本地上传的插件。'
+    const publish = state.pluginPublishOpen ? `<div class="modal-backdrop plugin-publish-backdrop"><section class="permission-modal plugin-publish-modal"><div class="settings-head"><div><div class="modal-kicker">Publish Plugin</div><h3>发布自定义插件</h3></div><button class="icon-button" id="plugin-publish-close" title="关闭">×</button></div><p>发布前会再次扫描插件包。公开插件将进入审核队列；私有插件仅对你的账号可见。</p><label class="plugin-form-label" for="plugin-publisher-name">发布者</label><input class="modal-input" id="plugin-publisher-name" value="${esc(state.pluginPublishName)}" placeholder="例如：AnYu Community"><label class="plugin-form-label" for="plugin-publish-visibility">可见性</label><select class="modal-input" id="plugin-publish-visibility"><option value="public" ${state.pluginPublishVisibility === 'public' ? 'selected' : ''}>公开发布 · 提交审核</option><option value="private" ${state.pluginPublishVisibility === 'private' ? 'selected' : ''}>私有自定义插件 · 仅自己使用</option></select><div class="modal-actions"><button class="ghost" id="plugin-publish-cancel">取消</button><button class="primary modal-primary" id="plugin-publish-submit" ${state.pluginPublishLoading ? 'disabled' : ''}>${state.pluginPublishLoading ? '发布中…' : '确认发布'}</button></div></section></div>` : ''
+    return `<div class="modal-backdrop plugin-market-backdrop"><section class="plugin-market-modal"><header class="plugin-market-head"><div><div class="modal-kicker">AnYuAgent Plugins</div><h3>插件市场</h3><p>发现、安装和管理可复用的 Agent Skills。图片和视频是核心内置 Skill，不受插件卸载影响。</p></div><button class="icon-button" id="plugin-market-close" title="关闭">×</button></header><div class="plugin-market-toolbar"><div class="plugin-tabs"><button class="plugin-tab ${tab === 'marketplace' ? 'active' : ''}" data-plugin-tab="marketplace">发现市场</button><button class="plugin-tab ${tab === 'installed' ? 'active' : ''}" data-plugin-tab="installed">已安装 <span>${installed.length}</span></button><button class="plugin-tab ${tab === 'uploads' ? 'active' : ''}" data-plugin-tab="uploads">我的上传 <span>${uploads.length}</span></button></div><div class="plugin-tools"><input id="plugin-search" value="${esc(state.pluginMarketQuery)}" placeholder="搜索插件、Skill 或发布者" aria-label="搜索插件"><button class="ghost" id="plugin-import">导入插件</button></div></div>${state.pluginMarketError ? `<div class="plugin-market-error">${esc(state.pluginMarketError)}</div>` : ''}<div class="plugin-market-content">${state.pluginMarketLoading ? '<div class="plugin-market-empty">正在同步插件目录…</div>' : items.length ? `<div class="plugin-grid">${items.map((item) => pluginCardMarkup(item, tab === 'installed' || tab === 'uploads' ? 'installed' : 'marketplace')).join('')}</div>` : `<div class="plugin-market-empty"><strong>${esc(empty)}</strong><span>插件会以版本目录安装，更新失败时可以回滚到上一版本。</span>${tab === 'marketplace' ? '<button class="primary" id="plugin-import-empty">导入本地插件</button>' : ''}</div>`}</div><footer class="plugin-market-foot"><span>${installed.length} 个已安装插件 · 本地注册表已保护</span><span>v1 仅支持 skills-only 插件</span></footer></section></div>${publish}`
+  }
+  async function loadPluginMarket() {
+    state.pluginMarketLoading = true; state.pluginMarketError = ''; scheduleAppRender()
+    try {
+      const [installed, marketplace] = await Promise.all([window.anyu.pluginState(), window.anyu.pluginMarketplace()])
+      state.pluginState = { installed: installed?.installed || [], marketplace: Array.isArray(marketplace) ? marketplace : marketplace?.items || [] }
+    } catch (error) { state.pluginMarketError = errorText(error) || '插件目录加载失败' }
+    state.pluginMarketLoading = false; scheduleAppRender()
+  }
+  async function restartAgentWithPlugins() {
+    if (!state.selectedKey || !state.model) {
+      state.error = '插件已更新；选择可用密钥和模型后启动 Agent 即可生效'
+      return
+    }
+    try { await startAgent(state.sessionPath) } catch (error) { state.error = errorText(error) || '插件变更后 Agent 重启失败' }
+  }
+  async function handlePluginAction(action, id, version = '') {
+    const current = installedPlugin(id)
+    state.pluginMarketError = ''
+    try {
+      if (action === 'publish') {
+        state.pluginPublishId = id
+        state.pluginPublishName = pluginPublisher(current) === '本地用户' ? '' : pluginPublisher(current)
+        state.pluginPublishVisibility = 'public'
+        state.pluginPublishOpen = true
+        renderApp()
+        return
+      }
+      if (action === 'install' || action === 'update') {
+        const item = pluginMarketplaceList().find((entry) => pluginId(entry) === id)
+        if (!item) throw new Error('插件目录项已失效，请刷新市场')
+        if (action === 'update' && current && comparePluginVersions(item.version, current.version) <= 0) throw new Error('当前已是最新版本')
+        await window.anyu.pluginInstallMarketplace({ downloadUrl: item.downloadUrl || item.download_url, scope: 'user' })
+      } else if (action === 'toggle') {
+        await window.anyu.pluginSetEnabled({ id, enabled: current?.enabled === false })
+      } else if (action === 'rollback') {
+        if (!version) throw new Error('没有可用的回滚版本')
+        if (!window.confirm(`确认将“${pluginTitle(current)}”回滚到 v${version} 吗？`)) return
+        await window.anyu.pluginRollback({ id, version })
+      } else if (action === 'uninstall') {
+        if (!window.confirm(`确认卸载“${pluginTitle(current)}”吗？`)) return
+        await window.anyu.pluginUninstall(id)
+      }
+      const installed = await window.anyu.pluginState(); state.pluginState = { ...state.pluginState, installed: installed?.installed || [] }
+      await restartAgentWithPlugins()
+    } catch (error) { state.pluginMarketError = errorText(error) || '插件操作失败' }
+    renderApp()
+  }
+  async function publishPlugin() {
+    const record = installedPlugin(state.pluginPublishId)
+    const publisherName = String(state.pluginPublishName || '').trim()
+    if (!record || !publisherName) { state.pluginMarketError = '请填写发布者名称'; renderApp(); return }
+    state.pluginPublishLoading = true; state.pluginMarketError = ''; renderApp()
+    try {
+      await window.anyu.pluginPublish({ id: state.pluginPublishId, publisherName, visibility: state.pluginPublishVisibility })
+      state.pluginPublishOpen = false
+      const installed = await window.anyu.pluginState()
+      state.pluginState = { ...state.pluginState, installed: installed?.installed || [] }
+      state.pluginMarketTab = 'uploads'
+    } catch (error) { state.pluginMarketError = errorText(error) || '插件发布失败' }
+    finally { state.pluginPublishLoading = false; renderApp() }
+  }
+  async function importPluginPackage() {
+    state.pluginMarketError = ''; state.pluginMarketLoading = true; renderApp()
+    try {
+      const sourcePath = await window.anyu.pluginPickPackage()
+      if (!sourcePath) return
+      const scan = await window.anyu.pluginScan(sourcePath)
+      const warnings = Array.isArray(scan.warnings) && scan.warnings.length ? `\n\n安全提示：\n${scan.warnings.map((warning) => `· ${warning}`).join('\n')}` : ''
+      const accepted = window.confirm(`准备安装“${pluginTitle(scan.manifest)}” v${scan.manifest.version}。\n\n${pluginDescription(scan.manifest)}${warnings}\n\n确认后插件会以本地私有插件启用。`)
+      if (!accepted) return
+      await window.anyu.pluginInstallLocal({ path: sourcePath, scope: 'user', visibility: 'private' })
+      const installed = await window.anyu.pluginState(); state.pluginState = { ...state.pluginState, installed: installed?.installed || [] }; state.pluginMarketTab = 'installed'
+      await restartAgentWithPlugins()
+    } catch (error) { state.pluginMarketError = errorText(error) || '插件导入失败' }
+    finally { state.pluginMarketLoading = false; renderApp() }
   }
   function protocolLabel(model) {
     if (model?.api === 'anthropic-messages') return 'Claude / Anthropic'
@@ -491,7 +689,7 @@
           role: message.role === 'toolResult' ? 'tool' : message.role,
           // Pi persists the message timestamp inside the message object. Keep
           // it so locally-rendered media can be merged into the same timeline.
-          createdAt: Number(message.timestamp || message.createdAt || message.time || 0) || index,
+          createdAt: timestampValue(message.timestamp || message.createdAt || message.time),
           content: messageText,
           thinking: thinkingOf(message.content),
           toolName: message.toolName,
@@ -516,9 +714,16 @@
     const title = String(content || '').replace(/\s+/g, ' ').trim().slice(0, 48) || '新会话'
     const existing = state.sessions.find((item) => item.path === path)
     if (existing) {
-      if (!existing.title || existing.title === '新会话') existing.title = title
+      const hadPlaceholderTitle = !existing.title || existing.title === '新会话'
+      if (hadPlaceholderTitle) {
+        existing.title = title
+        existing.createdAt = existing.firstMessageAt = Number(createdAt || Date.now())
+      }
       existing.modified = Math.max(Number(existing.modified || 0), Number(createdAt || Date.now()))
-    } else state.sessions.unshift({ path, title, modified: Number(createdAt || Date.now()) })
+      existing.createdAt = existing.createdAt || Number(createdAt || Date.now())
+      existing.firstMessageAt = existing.firstMessageAt || existing.createdAt
+    } else state.sessions.push({ path, title, createdAt: Number(createdAt || Date.now()), firstMessageAt: Number(createdAt || Date.now()), modified: Number(createdAt || Date.now()) })
+    state.sessions.sort((a, b) => Number(b.createdAt || b.firstMessageAt || b.modified || 0) - Number(a.createdAt || a.firstMessageAt || a.modified || 0) || String(a.path).localeCompare(String(b.path)))
   }
   function sessionContextMenuMarkup() {
     const menu = state.sessionMenu
@@ -570,6 +775,7 @@
     chooseModel()
     if (!state.selectedKey || !state.model) throw new Error('请先选择可用密钥和模型')
     const result = await window.anyu.piStart({ keyId: state.selectedKey, model: state.model, provider: currentModel()?.provider, models: state.catalog, sessionPath, cwd: effectiveWorkspace() || undefined, permissionMode: state.permissionMode })
+    state.activePermissionMode = result?.permissionMode || effectivePermissionMode()
     if (shouldApply()) {
       if (state.sessionCwd) state.sessionCwd = result.cwd || state.sessionCwd
       else state.cwd = result.cwd || state.cwd
@@ -585,6 +791,10 @@
   }
   async function bootstrap() {
     const me = await api('/auth/me'); state.user = me?.user || me
+    try {
+      const plugins = await window.anyu.pluginState()
+      state.pluginState = { ...state.pluginState, installed: plugins?.installed || [] }
+    } catch {}
     startBalanceRefresh()
     await loadKeys(); await loadSkillGroups(); state.catalog = await loadCatalogForKey(state.selectedKey); chooseModel(); ensureSkillSelection(); await refreshSessions()
     if (state.sessions[0]) { state.sessionPath = state.sessions[0].path; state.sessionCwd = state.sessions[0].cwd || null; if (state.sessionCwd) state.cwd = state.sessionCwd }
@@ -975,10 +1185,13 @@
     throw new Error('技能任务等待超时，请稍后在 Anyu 中查看任务状态')
   }
   async function runMediaSkill(task, kind) {
+    const directoryLoaded = await loadSkillGroups()
+    if (!directoryLoaded) throw new Error(state.error || '技能目录加载失败')
     const config = state.skillConfigs[kind]
     const models = skillModels(kind)
-    const model = models.find((item) => item.name === config.model && Number(item.groupId) === Number(config.groupId)) || models[0]
+    const model = models.find((item) => item.name === config.model && Number(item.groupId) === Number(config.groupId))
     if (!model || !config.groupId) throw new Error(`当前密钥没有可用的${kind === 'image' ? '生图' : '生视频'}分组或模型`)
+    const groupId = Number(model.groupId)
     const promptText = mediaPrompt(task.content, kind)
     if (!promptText) throw new Error(`请在 @${kind === 'image' ? '生图' : '生视频'} 后输入描述`)
     const references = mediaReferences(task.attachments, kind)
@@ -1020,10 +1233,10 @@
         const refinedPrompt = refineImagePrompt(promptText, references)
         task._imageCount = count
         task._imagePrompt = { original: promptText, refined: refinedPrompt, referenceCount: references.length }
-        created = await window.anyu.imageCreate({ prompt: refinedPrompt, groupId: config.groupId, model: model.name, size: config.size || '1024x1024', quality: config.quality || 'auto', count, references })
+        created = await window.anyu.imageCreate({ prompt: refinedPrompt, groupId, model: model.name, size: config.size || '1024x1024', quality: config.quality || 'auto', count, references })
       } else {
         const plan = planVideoRequest(promptText, model, references)
-        created = await window.anyu.videoCreate({ prompt: promptText, groupId: config.groupId, model: model.name, duration: plan.duration, resolution: plan.resolution, aspectRatio: plan.aspectRatio, references: plan.files })
+        created = await window.anyu.videoCreate({ prompt: promptText, groupId, model: model.name, duration: plan.duration, resolution: plan.resolution, aspectRatio: plan.aspectRatio, references: plan.files })
         task._mediaPlan = plan
       }
       const createdId = created?.id || created?.task_id || created?.taskId
@@ -1134,7 +1347,7 @@
         const thinkingMismatch = Boolean(message.thinking) !== Boolean(node.querySelector('.thinking-card'))
         return roleMismatch || errorMismatch || streamingMismatch || thinkingMismatch
       })
-      if (structuralChange) box.innerHTML = messagesMarkup()
+      if (structuralChange) { box.innerHTML = messagesMarkup(); bindMessageEvents(box) }
       else state.messages.forEach((message, index) => {
         const node = nodes[index]
         if (!node) return
@@ -1201,6 +1414,7 @@
     state.sessionPath = target
     state.error = ''
     state.sessionSwitching = true
+    state.sessionLoadingPath = target
     renderApp()
     const switchInProcess = async () => {
       const result = await window.anyu.piCommand({ type: 'switch_session', sessionPath: target })
@@ -1234,6 +1448,7 @@
       .finally(() => {
         if (token !== state.sessionSwitchToken) return
         state.sessionSwitching = false
+        state.sessionLoadingPath = null
         renderApp()
       })
   }
@@ -1243,8 +1458,35 @@
     const hint = key.provider || key.billing_mode || 'Anyu 路由密钥'
     return `<div class="key ${selected ? 'selected' : ''}" data-key="${esc(key.id)}"><div class="key-name"><span class="dot ${key.status && key.status !== 'active' ? 'off' : ''}"></span>${esc(keyDisplayName(key))}</div><div class="key-meta"><span>${esc(cleanDisplayText(hint) || 'Anyu 路由密钥')}</span><span>${key.status === 'active' || !key.status ? '可用' : esc(cleanDisplayText(key.status))}</span></div></div>`
   }
+  async function copyText(value) {
+    const text = String(value || '')
+    try { await navigator.clipboard.writeText(text); return } catch {}
+    const input = document.createElement('textarea')
+    input.value = text; input.style.position = 'fixed'; input.style.opacity = '0'; document.body.appendChild(input); input.select()
+    try { document.execCommand('copy') } catch {}
+    input.remove()
+  }
+  function historyMessage(index) { return state.messages[Number(index)] }
+  function editHistoryMessage(index) {
+    const message = historyMessage(index)
+    if (!message || message.role !== 'user') return
+    state.composerText = message.content || ''; state.attachments = [...(message.attachments || [])]; state.composerCursor = state.composerText.length
+    renderApp()
+    requestAnimationFrame(() => { const prompt = document.querySelector('#prompt'); if (prompt) { prompt.focus(); prompt.selectionStart = prompt.selectionEnd = prompt.value.length } })
+  }
+  function resendHistoryMessage(index) {
+    const message = historyMessage(index)
+    if (!message || message.role !== 'user') return
+    void runTask({ id: taskId(), content: message.content || '', attachments: [...(message.attachments || [])], createdAt: Date.now() })
+  }
+  function bindMessageEvents(container = document) {
+    container.querySelectorAll('[data-message-copy]').forEach((node) => node.addEventListener('click', (event) => { event.stopPropagation(); const message = historyMessage(node.closest('[data-message-index]')?.dataset.messageIndex); if (message) void copyText(message.content || '') }))
+    container.querySelectorAll('[data-message-edit]').forEach((node) => node.addEventListener('click', (event) => { event.stopPropagation(); editHistoryMessage(node.closest('[data-message-index]')?.dataset.messageIndex) }))
+    container.querySelectorAll('[data-message-resend]').forEach((node) => node.addEventListener('click', (event) => { event.stopPropagation(); resendHistoryMessage(node.closest('[data-message-index]')?.dataset.messageIndex) }))
+  }
   function messageHtml(message) {
-    const user = message.role === 'user'; const tool = message.role === 'tool'
+    const user = message.role === 'user'; const tool = message.role === 'tool'; const index = state.messages.indexOf(message)
+    const time = message.createdAt ? `<time class="message-time">${esc(formatTimestamp(message.createdAt))}</time>` : ''
     if (tool) {
       const status = message.isStreaming ? '运行中' : message.isError ? '失败' : '已完成'
       const expanded = message.isStreaming ? 'open' : ''
@@ -1252,13 +1494,14 @@
       const args = message.args && Object.keys(message.args).length ? `<details class="tool-section" ${expanded}><summary>参数</summary><pre>${esc(JSON.stringify(message.args, null, 2))}</pre></details>` : ''
       const output = message.content ? `<details class="tool-section" ${expanded}><summary>输出</summary><pre>${esc(message.content)}</pre></details>` : ''
       const progress = message.isStreaming && !message.content ? '<div class="tool-progress"><span></span>正在等待工具输出…</div>' : ''
-      return `<article class="message tool-message"><div class="avatar tool-avatar">⌘</div><details class="tool-card" ${expanded}><summary><span class="tool-chevron">›</span><span class="message-role">工具 · ${esc(message.toolName || '执行')}</span>${duration}<span class="tool-status ${message.isError ? 'failed' : message.isStreaming ? 'running' : ''}">${status}</span></summary><div class="tool-card-body">${progress}${args}${output}${message.isError ? '<span class="tool-error">执行失败</span>' : ''}</div></details></article>`
+      return `<article class="message tool-message" data-message-index="${index}"><div class="avatar tool-avatar">⌘</div><details class="tool-card" ${expanded}><summary><span class="tool-chevron">›</span><span class="message-role">工具 · ${esc(message.toolName || '执行')}</span>${duration}<span class="tool-status ${message.isError ? 'failed' : message.isStreaming ? 'running' : ''}">${status}</span></summary><div class="tool-card-body">${progress}${args}${output}${message.isError ? '<span class="tool-error">执行失败</span>' : ''}</div></details><time class="message-time">${esc(formatTimestamp(message.createdAt))}</time></article>`
     }
     const thinking = message.thinking ? `<details class="thinking-card"><summary><span class="tool-chevron">›</span>思考过程</summary><div>${esc(message.thinking)}</div></details>` : ''
     const streaming = message.isStreaming && !message.content ? '<span class="typing-dots"><i></i><i></i><i></i></span>' : ''
     const bubble = message.content ? esc(message.content) : streaming
     const media = message.media?.kind === 'video' ? `<div class="generated-video"><video src="${esc(mediaSourceUrl(message))}" controls playsinline preload="auto"></video><button type="button" class="media-download" data-download-video="${esc(message.id || '')}" title="下载视频">↓ 下载视频</button></div>` : ''
-    return `<article class="message ${user ? 'user' : ''}"><div class="avatar">${user ? initials(state.user?.email) : 'A'}</div><div class="message-body"><div class="message-role">${user ? '你' : 'AnYuAgent'}</div>${thinking}<div class="message-bubble ${message.isError ? 'tool-error' : ''} ${message.isStreaming ? 'streaming-bubble' : ''}">${bubble || '<span class="message-placeholder"> </span>'}</div>${media}${message.attachments?.length ? `<div class="message-attachments">${message.attachments.map((attachment) => attachmentMarkup(attachment, false)).join('')}</div>` : ''}</div></article>`
+    const actions = user ? `<button type="button" data-message-copy title="复制消息">复制</button><button type="button" data-message-edit title="编辑消息">编辑</button><button type="button" data-message-resend title="重发消息">重发</button>` : '<button type="button" data-message-copy title="复制消息">复制</button>'
+    return `<article class="message ${user ? 'user' : ''}" data-message-index="${index}"><div class="avatar">${user ? initials(state.user?.email) : 'A'}</div><div class="message-body"><div class="message-role">${user ? '你' : 'AnYuAgent'}</div>${thinking}<div class="message-bubble ${message.isError ? 'tool-error' : ''} ${message.isStreaming ? 'streaming-bubble' : ''}">${bubble || '<span class="message-placeholder"> </span>'}</div>${media}${message.attachments?.length ? `<div class="message-attachments">${message.attachments.map((attachment) => attachmentMarkup(attachment, false)).join('')}</div>` : ''}<div class="message-meta">${time}<span class="message-actions">${actions}</span></div></div></article>`
   }
   function permissionHtml() {
     const request = state.permission
@@ -1278,14 +1521,6 @@
     const groupId = Number(state.skillConfigs[kind].groupId)
     return skillModels(kind).filter((model) => Number(model.groupId) === groupId).map((model) => `<option value="${esc(model.name)}" ${model.name === state.skillConfigs[kind].model ? 'selected' : ''}>${esc(model.display_name || model.name)}</option>`).join('')
   }
-  function skillCapabilityRows(kind, models) {
-    if (!models.length) return `<div class="skill-capability-empty">当前密钥暂无${kind === 'image' ? '生图' : '生视频'}模型</div>`
-    return models.map((model) => {
-      const title = model.display_name || model.name
-      const meta = kind === 'video' ? mediaCapabilitySummary(model, kind) : (model.description || '参考图编辑与图片生成')
-      return `<details class="skill-capability" ${models.length === 1 ? 'open' : ''}><summary><span>${esc(title)}</span></summary><div>${esc(meta)}</div></details>`
-    }).join('')
-  }
   function skillMenuMarkup() {
     if (!state.skillMenuOpen) return ''
     const image = state.skillConfigs.image; const video = state.skillConfigs.video
@@ -1297,7 +1532,7 @@
   }
   function skillsMarketMarkup() {
     const imageModels = skillModels('image'); const videoModels = skillModels('video')
-    return `<div class="skills-market"><div class="market-heading"><div><div class="modal-kicker">AnYuAgent Skills</div><h4>技能市场</h4><p>输入 @生图 或 @生视频后，技能会根据描述、参考图和当前模型能力自动选择参数。</p></div><span class="market-status">${state.skillsLoading ? '同步中…' : `${imageModels.length + videoModels.length} 个可用模型`}</span></div><div class="skill-grid"><article class="skill-card"><div class="skill-card-icon image">✦</div><div class="skill-card-copy"><strong>生图 Skill</strong><span>自动处理图片生成与参考图编辑，遵循当前密钥的模型目录。</span><small>${imageModels.length ? `${imageModels.length} 个模型 · ${esc(state.skillConfigs.image.model)}` : '当前密钥暂无生图模型'}</small></div><button class="skill-toggle ${state.skillEnabled.image ? 'enabled' : ''}" data-skill-toggle="image">${state.skillEnabled.image ? '已启用' : '启用'}</button></article><article class="skill-card"><div class="skill-card-icon video">◉</div><div class="skill-card-copy"><strong>生视频 Skill</strong><span>自动理解时长、画幅和画质意图，并适配首帧、首尾帧、多图及厂商协议。</span><small>${videoModels.length ? `${videoModels.length} 个模型 · ${esc(state.skillConfigs.video.model)}` : '当前密钥暂无视频模型'}</small></div><button class="skill-toggle ${state.skillEnabled.video ? 'enabled' : ''}" data-skill-toggle="video">${state.skillEnabled.video ? '已启用' : '启用'}</button></article></div><div class="skill-config"><div class="config-title">技能模型</div><div class="config-row"><label>生图分组<select id="skill-image-group">${skillGroupOptions('image') || '<option value="">暂无可用分组</option>'}</select></label><label>生图模型<select id="skill-image-model">${skillModelOptions('image') || '<option value="">暂无可用模型</option>'}</select></label></div><div class="config-row"><label>视频分组<select id="skill-video-group">${skillGroupOptions('video') || '<option value="">暂无可用分组</option>'}</select></label><label>视频模型<select id="skill-video-model">${skillModelOptions('video') || '<option value="">暂无可用模型</option>'}</select></label></div><div class="skill-capability-heading">当前密钥可用能力</div><div class="skill-capability-list"><div class="skill-capability-kind"><strong>图片</strong>${skillCapabilityRows('image', imageModels)}</div><div class="skill-capability-kind"><strong>视频</strong>${skillCapabilityRows('video', videoModels)}</div></div><p class="skill-auto-note">时长、清晰度、画幅和参考素材不在这里手动配置。发送任务时，AnYuAgent 会根据你的描述和上方能力目录自动规划，并由服务端再次校验。</p></div></div>`
+    return `<div class="skills-market"><div class="market-heading"><div><div class="modal-kicker">AnYuAgent Skills</div><h4>技能市场</h4><p>输入 @生图 或 @生视频后，技能会根据描述、参考图和当前模型能力自动选择参数。</p></div><span class="market-status">${state.skillsLoading ? '同步中…' : `${imageModels.length + videoModels.length} 个可用模型`}</span></div><div class="skill-grid"><article class="skill-card"><div class="skill-card-icon image">✦</div><div class="skill-card-copy"><strong>生图 Skill</strong><span>自动处理图片生成与参考图编辑，遵循当前密钥的模型目录。</span><small>${imageModels.length ? `${imageModels.length} 个模型 · ${esc(state.skillConfigs.image.model)}` : '当前密钥暂无生图模型'}</small></div><button class="skill-toggle ${state.skillEnabled.image ? 'enabled' : ''}" data-skill-toggle="image">${state.skillEnabled.image ? '已启用' : '启用'}</button></article><article class="skill-card"><div class="skill-card-icon video">◉</div><div class="skill-card-copy"><strong>生视频 Skill</strong><span>自动理解时长、画幅和画质意图，并适配首帧、首尾帧、多图及厂商协议。</span><small>${videoModels.length ? `${videoModels.length} 个模型 · ${esc(state.skillConfigs.video.model)}` : '当前密钥暂无视频模型'}</small></div><button class="skill-toggle ${state.skillEnabled.video ? 'enabled' : ''}" data-skill-toggle="video">${state.skillEnabled.video ? '已启用' : '启用'}</button></article></div><div class="skill-config"><div class="config-title">技能模型</div><div class="config-row"><label>生图分组<select id="skill-image-group">${skillGroupOptions('image') || '<option value="">暂无可用分组</option>'}</select></label><label>生图模型<select id="skill-image-model">${skillModelOptions('image') || '<option value="">暂无可用模型</option>'}</select></label></div><div class="config-row"><label>视频分组<select id="skill-video-group">${skillGroupOptions('video') || '<option value="">暂无可用分组</option>'}</select></label><label>视频模型<select id="skill-video-model">${skillModelOptions('video') || '<option value="">暂无可用模型</option>'}</select></label></div></div></div>`
   }
   function legacyRenderApp() {
     const key = selectedKey(); const model = currentModel()
@@ -1349,13 +1584,47 @@
   }
 
   function settingsMarkup() {
-    return `<div class="modal-backdrop settings-backdrop"><section class="settings-modal"><div class="settings-head"><div><div class="modal-kicker">AnYuAgent</div><h3>设置</h3></div><button class="icon-button" id="settings-close" title="关闭">×</button></div>
-      <div class="setting-block"><label for="permission-mode">本机访问权限</label><select id="permission-mode"><option value="confirm" ${state.permissionMode === 'confirm' ? 'selected' : ''}>受控访问 · 每次操作确认</option><option value="full" ${state.permissionMode === 'full' ? 'selected' : ''}>完整访问 · 自动允许工具操作</option></select><p>完整访问会允许 Pi 读写工作目录并执行终端工具；切换后会重启本地 Agent。</p></div>
-      <div class="setting-block skill-market-block"><div class="setting-label-row"><label>技能市场</label><button class="ghost" id="skills-refresh">同步目录</button></div>${skillsMarketMarkup()}</div>
-      <div class="setting-block"><label>工作目录</label><div class="setting-value">${esc(effectiveWorkspace() || '尚未选择')}</div><button class="ghost" id="settings-cwd">选择目录</button></div>
-      <div class="setting-block"><label>账号</label><div class="setting-value">${esc(state.user?.email || 'Anyu 用户')}</div></div>
-      <div class="settings-actions"><button class="ghost" id="settings-logout">切换账号</button><button class="primary modal-primary" id="settings-done">完成</button></div>
-    </section></div>`
+    return `<div class="settings-page-layout">
+      <aside class="settings-sidebar">
+        <button type="button" class="settings-back" id="settings-back"><span aria-hidden="true">←</span><span>返回应用</span></button>
+        <label class="settings-search"><span aria-hidden="true">⌕</span><input type="search" placeholder="搜索设置" aria-label="搜索设置"></label>
+        <nav class="settings-nav" aria-label="设置分类">
+          <div class="settings-nav-heading">个人</div>
+          <button type="button" class="settings-nav-item active" aria-current="page"><span>⚙</span><span>常规</span></button>
+          <button type="button" class="settings-nav-item"><span>⇩</span><span>导入</span></button>
+          <button type="button" class="settings-nav-item"><span>☼</span><span>外观</span></button>
+          <button type="button" class="settings-nav-item"><span>♩</span><span>语音</span></button>
+          <button type="button" class="settings-nav-item"><span>◉</span><span>配置</span></button>
+          <button type="button" class="settings-nav-item"><span>◌</span><span>个性化</span></button>
+          <button type="button" class="settings-nav-item"><span>♙</span><span>宠物</span></button>
+          <button type="button" class="settings-nav-item"><span>⌨</span><span>键盘快捷键</span></button>
+          <button type="button" class="settings-nav-item"><span>◎</span><span>账户</span><span class="settings-nav-external">↗</span></button>
+          <div class="settings-nav-heading">集成</div>
+          <button type="button" class="settings-nav-item"><span>▷</span><span>电脑操控</span></button>
+          <button type="button" class="settings-nav-item"><span>◫</span><span>应用快照</span></button>
+          <button type="button" class="settings-nav-item"><span>◉</span><span>插件</span></button>
+          <button type="button" class="settings-nav-item"><span>▭</span><span>浏览器</span></button>
+          <div class="settings-nav-heading">编码</div>
+          <button type="button" class="settings-nav-item"><span>⚓</span><span>钩子</span></button>
+          <button type="button" class="settings-nav-item"><span>◎</span><span>连接</span></button>
+          <button type="button" class="settings-nav-item"><span>⑂</span><span>Git</span></button>
+          <button type="button" class="settings-nav-item"><span>▣</span><span>环境</span></button>
+          <button type="button" class="settings-nav-item"><span>↗</span><span>Worktrees</span></button>
+        </nav>
+      </aside>
+      <main class="settings-page-main">
+        <header class="settings-page-header">
+          <div><div class="modal-kicker">AnYuAgent</div><h1>常规</h1></div>
+          <div class="settings-window-controls" aria-label="窗口控制"><button type="button" data-window-action="minimize" title="最小化">−</button><button type="button" data-window-action="maximize" title="最大化">□</button><button type="button" data-window-action="close" title="关闭">×</button></div>
+        </header>
+        <div class="settings-page-content">
+          <section class="settings-section"><h2>权限</h2><div class="settings-card"><div class="settings-row"><div><strong>本机访问权限</strong><p>智能适配会根据当前模型的工具能力选择访问级别。</p></div><select id="permission-mode" aria-label="本机访问权限"><option value="auto" ${state.permissionMode === 'auto' ? 'selected' : ''}>智能适配 · ${esc(permissionModeLabel())}</option><option value="confirm" ${state.permissionMode === 'confirm' ? 'selected' : ''}>受控访问 · 每次操作确认</option><option value="full" ${state.permissionMode === 'full' ? 'selected' : ''}>完整访问 · 自动允许工具操作</option></select></div><p class="settings-help">当前模型：${esc(permissionModeLabel())}。切换后会重启本地 Agent 以应用权限。</p></div></section>
+          <section class="settings-section"><h2>常规</h2><div class="settings-card"><div class="settings-row"><div><strong>无项目任务文件夹</strong><p>在项目外启动的任务默认存储数据的位置。</p></div><div class="settings-row-actions"><span class="settings-value">${esc(effectiveWorkspace() || '尚未选择')}</span><button type="button" class="ghost" id="settings-cwd">更改</button></div></div><div class="settings-divider"></div><div class="settings-row"><div><strong>账户</strong><p>当前登录的 Anyu 账号。</p></div><span class="settings-value">${esc(state.user?.email || 'Anyu 用户')}</span></div></div></section>
+          <section class="settings-section"><div class="setting-label-row"><div><h2>技能与插件</h2><p class="settings-section-copy">管理本地插件和核心媒体技能。</p></div></div><div class="plugin-entry-block"><div class="setting-label-row"><div><label>插件市场</label><p>安装社区插件，或导入你自己制作的 Skill。</p></div><button type="button" class="primary plugin-entry-button" id="open-plugin-market">打开插件市场</button></div><div class="plugin-entry-summary"><span><strong>${pluginList().length}</strong> 个插件已安装</span><span>图片 / 视频为核心内置 Skill</span></div></div><div class="setting-block skill-market-block"><div class="setting-label-row"><label>核心技能</label><button type="button" class="ghost" id="skills-refresh">同步目录</button></div>${skillsMarketMarkup()}</div></section>
+          <section class="settings-section settings-account-actions"><h2>账号操作</h2><div class="settings-card"><div class="settings-row"><div><strong>切换账号</strong><p>退出当前账号并返回登录页面。</p></div><button type="button" class="ghost" id="settings-logout">切换账号</button></div></div></section>
+        </div>
+      </main>
+    </div>`
   }
 
   function modelOptionsMarkup() {
@@ -1369,29 +1638,46 @@
   }
 
   function renderApp() {
+    if (state.settingsOpen) {
+      root.innerHTML = `${settingsMarkup()}${state.pluginMarketOpen ? pluginMarketMarkup() : ''}${permissionHtml()}`
+      bindAppEvents()
+      return
+    }
     const restorePromptFocus = document.activeElement?.id === 'prompt'
     const restorePromptCursor = restorePromptFocus ? Number(document.activeElement?.selectionStart) : null
     const key = selectedKey()
     const keyLabel = keyDisplayName(key)
     const model = currentModel()
-    const controlsBusy = state.switching || state.sessionSwitching
+    const controlsBusy = state.switching || state.sessionSwitching || state.loading
     root.innerHTML = `<div class="app-shell"><aside class="sidebar"><div class="side-brand"><div class="brand-mark">A</div><div><strong>AnYuAgent</strong><span>独立 Pi Agent</span></div></div>
       <div class="nav-section"><div class="nav-title">工作区</div><div class="nav-item active"><span class="nav-icon">✦</span>Agent 对话</div><button class="nav-item nav-button" id="new-chat"><span class="nav-icon">＋</span>新建会话</button></div>
-       <div class="nav-section sessions-section"><div class="nav-title">本机会话</div><div id="session-list">${state.sessions.slice(0, 30).map((item) => `<button class="nav-item session ${item.path === state.sessionPath ? 'active' : ''}" data-path="${esc(item.path)}"><span class="nav-icon">${item.pinned ? '★' : '○'}</span><span class="session-label">${esc(item.title || '新会话')}</span></button>`).join('') || '<div class="empty-sessions">暂无会话</div>'}</div></div>
+       <div class="nav-section sessions-section"><div class="nav-title">本机会话</div><div id="session-list">${state.sessions.slice(0, 30).map((item) => { const loading = state.sessionLoadingPath === item.path; return `<button class="nav-item session ${item.path === state.sessionPath ? 'active' : ''}" data-path="${esc(item.path)}" aria-busy="${loading ? 'true' : 'false'}"><span class="nav-icon">${loading ? '<span class="spinner session-spinner"></span>' : item.pinned ? '★' : '○'}</span><span class="session-copy"><span class="session-label">${esc(item.title || '新会话')}</span><small class="session-time">${esc(formatTimestamp(item.firstMessageAt || item.createdAt || item.modified))}</small></span></button>` }).join('') || '<div class="empty-sessions">暂无会话</div>'}</div></div>
       <div class="side-footer"><button class="update-link ${state.update.status === 'error' ? 'error' : ''}" id="update-app" ${['checking', 'downloading', 'installing'].includes(state.update.status) ? 'disabled' : ''}><span class="nav-icon update-icon ${['checking', 'downloading', 'installing'].includes(state.update.status) ? 'spinning' : ''}">↻</span><span class="update-label">${esc(updateButtonLabel())}</span></button><button class="settings-link" id="settings-open"><span class="nav-icon">⚙</span>设置</button><div class="balance-summary" title="每 60 秒自动同步"><div class="balance-caption"><span>剩余额度</span><span class="balance-sync-dot"></span></div><strong>${esc(formatBalance())}</strong></div><div class="user-line"><div class="avatar">${initials(state.user?.email)}</div><div class="user-email" title="${esc(state.user?.email)}">${esc(state.user?.email || 'Anyu 用户')}</div></div></div></aside>
       <main class="main"><header class="topbar"><div class="topbar-title"><h2>Agent 对话</h2><span class="connection-dot ${state.piState ? '' : 'offline'}"></span><span class="connection-label">${state.piState ? '已连接' : '未连接'}</span></div><div class="top-actions"><span class="muted model-count">${state.catalog.length} 个模型</span><button class="icon-button" id="refresh" title="刷新">↻</button><div class="window-controls" aria-label="窗口控制"><button type="button" data-window-action="minimize" title="最小化">−</button><button type="button" data-window-action="maximize" title="最大化">□</button><button type="button" data-window-action="close" title="关闭">×</button></div></div></header>
       ${state.error ? `<div class="app-alert" role="status">${esc(state.error)}</div>` : ''}
       <div class="conversation"><section class="chat-panel"><div class="chat-head"><div><div class="chat-title">${esc(state.sessions.find((item) => item.path === state.sessionPath)?.title || '新会话')}</div><div class="chat-subtitle">${esc(model ? `${protocolLabel(model)} · ${model.name || model.id}` : '选择密钥和模型后开始')}</div></div><button class="ghost" id="new-chat-main">＋ 新会话</button></div>
          <div class="messages" id="messages">${messagesMarkup()}</div>
            <div class="composer">${queuedTasksMarkup()}${attachmentsMarkup()}<div class="composer-tools"><div class="key-picker-wrap"><button class="picker-button" id="key-picker" title="选择 Anyu 密钥" ${controlsBusy ? 'disabled' : ''}><span class="picker-icon">⌁</span><span class="picker-text">${esc(keyLabel)}</span><span class="picker-chevron">⌄</span></button>${state.keyMenuOpen ? `<div class="key-menu"><div class="menu-caption">Anyu 密钥 <span>${state.keys.length}</span></div>${state.keys.map((item) => `<button class="key-option ${Number(item.id) === state.selectedKey ? 'selected' : ''}" data-key="${esc(item.id)}" ${controlsBusy ? 'disabled' : ''}><span class="dot ${item.status && item.status !== 'active' ? 'off' : ''}></span><span class="key-option-label">${esc(item.name || item.title || `密钥 ${item.id}`)}</span><span class="key-option-status">${item.status === 'active' || !item.status ? '可用' : esc(item.status)}</span></button>`).join('') || '<div class="muted menu-empty">暂无密钥</div>'}</div>` : ''}</div><select id="model" class="model-picker" title="选择模型" ${controlsBusy ? 'disabled' : ''}>${modelOptionsMarkup() || '<option value="">暂无模型</option>'}</select><button class="permission-button ${state.permissionMode === 'full' ? 'full' : ''}" id="permission-quick" title="本机访问权限"><span>${state.permissionMode === 'full' ? '⚡ 完整访问' : '✓ 受控访问'}</span></button><button class="ghost cwd-button" id="choose-cwd" title="工作目录">⌂ ${esc(state.cwd ? state.cwd.split('\\').pop() || state.cwd : '目录')}</button></div><div class="composer-box"><button class="attach-button" id="attach-trigger" title="添加文件或图片" ${state.sessionSwitching ? 'disabled' : ''}>＋</button><input id="file-input" type="file" multiple hidden><input id="image-input" type="file" accept="image/*" multiple hidden><div class="attachment-menu hidden" id="attachment-menu"><button id="attach-files"><span>▧</span><span><strong>文件</strong><small>添加代码和文档</small></span></div><div class="image-reference-menu ${state.imageMenuOpen ? '' : 'hidden'}" id="image-reference-menu">${imageReferenceMarkup()}</div>${skillMenuMarkup()}<textarea id="prompt" ${state.sessionSwitching ? 'disabled' : ''} placeholder="给 AnYuAgent 一条指令…（输入 @ 调用技能或引用图片，Enter 发送，Shift+Enter 换行）">${esc(state.composerText)}</textarea><select id="thinking-level" class="thinking-picker" title="${esc(`推理强度：${thinkingLevelLabel(state.thinkingLevel)}`)}" ${state.sessionSwitching ? 'disabled' : ''}>${state.thinkingLevels.map((level) => `<option value="${esc(level)}" ${level === state.thinkingLevel ? 'selected' : ''}>${esc(thinkingLevelLabel(level))}</option>`).join('')}</select><button class="send ${state.loading ? 'stop' : ''}" id="send" ${state.sessionSwitching ? 'disabled' : ''} title="${state.loading ? '停止当前任务' : '发送'}" aria-label="${state.loading ? '停止当前任务' : '发送'}">${state.loading ? '■' : '↑'}</button></div><div class="composer-meta"><span>Pi 可读取、编辑并执行工作目录中的文件</span><span id="busy">${state.retryNotice || (state.loading ? 'Agent 正在工作…' : state.queuedTasks.length ? `${state.queuedTasks.length} 项排队中` : '')}</span></div></div></section></div></main>${state.settingsOpen ? settingsMarkup() : ''}${permissionHtml()}${imagePreviewMarkup()}${sessionContextMenuMarkup()}</div>`
-    // Normalize labels after rendering as a final guard for legacy markup or
+     if (state.pluginMarketOpen) root.insertAdjacentHTML('beforeend', pluginMarketMarkup())
+     // Normalize labels after rendering as a final guard for legacy markup or
     // API payloads that put the credential itself in `name`.
     document.querySelectorAll('.key-option[data-key]').forEach((node) => {
       const item = state.keys.find((key) => String(key.id) === String(node.dataset.key))
       const label = node.querySelector('.key-option-label')
-      if (item && label) label.textContent = keyDisplayName(item)
+      if (item && label) {
+        const displayName = keyDisplayName(item)
+        label.textContent = displayName
+        node.title = displayName
+        node.setAttribute('aria-label', displayName)
+      }
     })
     bindAppEvents(); settleMessagesAtBottom()
+    const permissionButton = document.querySelector('#permission-quick')
+    if (permissionButton) {
+      const activeMode = effectivePermissionMode()
+      permissionButton.classList.toggle('full', activeMode === 'full')
+      permissionButton.querySelector('span')?.replaceChildren(document.createTextNode(permissionModeLabel(activeMode)))
+    }
     const prompt = document.querySelector('#prompt')
     if (prompt) {
       prompt.value = state.composerText
@@ -1498,12 +1784,28 @@
        state.switching = true
        state.selectedKey = keyId; localStorage.setItem('anyu.selectedKey', String(state.selectedKey)); state.keyMenuOpen = false; state.error = ''; state.catalog = []; state.model = ''
        renderApp()
-       try { state.catalog = await loadCatalogForKey(state.selectedKey); ensureSkillSelection(); chooseModel(); await startAgent(state.sessionPath) } catch (error) { state.catalog = []; state.model = ''; state.error = error.message || '切换密钥失败' }
+       try { await loadSkillGroups(); state.catalog = await loadCatalogForKey(state.selectedKey); ensureSkillSelection(); chooseModel(); await startAgent(state.sessionPath) } catch (error) { state.catalog = []; state.model = ''; state.error = error.message || '切换密钥失败' }
       state.switching = false
       renderApp()
     }))
     document.querySelectorAll('.session').forEach((node) => node.addEventListener('click', () => switchSession(node.dataset.path)))
-    document.querySelector('#model')?.addEventListener('change', async (event) => { if (state.switching) return; state.switching = true; state.model = event.target.value; localStorage.setItem('anyu.selectedModel', state.model); try { await window.anyu.piCommand({ type: 'set_model', provider: currentModel()?.provider || providerForApi('openai-completions'), modelId: state.model }); await syncThinkingLevels() } catch (error) { state.error = error.message || '切换模型失败' }; state.switching = false; renderApp() })
+    bindMessageEvents(document.querySelector('#messages') || document)
+    document.querySelector('#model')?.addEventListener('change', async (event) => {
+      if (state.switching) return
+      state.switching = true
+      const previousPermissionMode = effectivePermissionMode()
+      state.model = event.target.value
+      localStorage.setItem('anyu.selectedModel', state.model)
+      try {
+        const nextPermissionMode = state.permissionMode === 'auto' ? modelPermissionMode() : state.permissionMode
+        // 自适配模型跨越权限档位时重启 Pi，使 --approve 与当前模型保持一致。
+        if (state.permissionMode === 'auto' && previousPermissionMode !== nextPermissionMode) await startAgent(state.sessionPath)
+        else await window.anyu.piCommand({ type: 'set_model', provider: currentModel()?.provider || providerForApi('openai-completions'), modelId: state.model })
+        await syncThinkingLevels()
+      } catch (error) { state.error = error.message || '切换模型失败' }
+      state.switching = false
+      renderApp()
+    })
     document.querySelector('#thinking-level')?.addEventListener('change', async (event) => {
       const level = String(event.target.value || 'off')
       if (!state.thinkingLevels.includes(level)) return
@@ -1534,18 +1836,46 @@
         scheduleAppRender()
       }
     })
-    document.querySelector('#settings-close')?.addEventListener('click', () => { state.settingsOpen = false; renderApp() })
-    document.querySelector('#settings-done')?.addEventListener('click', () => { state.settingsOpen = false; renderApp() })
+     const leaveSettings = () => { state.settingsOpen = false; state.pluginMarketOpen = false; state.pluginPublishOpen = false; renderApp() }
+     document.querySelector('#settings-back')?.addEventListener('click', leaveSettings)
+     document.querySelector('#settings-close')?.addEventListener('click', leaveSettings)
+     document.querySelector('#settings-done')?.addEventListener('click', leaveSettings)
+     document.querySelector('#open-plugin-market')?.addEventListener('click', async () => {
+       state.settingsOpen = true
+       state.pluginMarketOpen = true
+      state.pluginMarketTab = 'marketplace'
+      renderApp()
+      await loadPluginMarket()
+    })
+    document.querySelector('#plugin-market-close')?.addEventListener('click', () => { state.pluginMarketOpen = false; renderApp() })
+    document.querySelectorAll('[data-plugin-tab]').forEach((node) => node.addEventListener('click', () => {
+      state.pluginMarketTab = node.dataset.pluginTab || 'marketplace'
+      renderApp()
+    }))
+    document.querySelector('#plugin-search')?.addEventListener('input', (event) => {
+      state.pluginMarketQuery = event.target.value || ''
+      scheduleAppRender()
+    })
+    document.querySelector('#plugin-import')?.addEventListener('click', () => { void importPluginPackage() })
+    document.querySelector('#plugin-import-empty')?.addEventListener('click', () => { void importPluginPackage() })
+    document.querySelector('#plugin-publish-close')?.addEventListener('click', () => { state.pluginPublishOpen = false; renderApp() })
+    document.querySelector('#plugin-publish-cancel')?.addEventListener('click', () => { state.pluginPublishOpen = false; renderApp() })
+    document.querySelector('#plugin-publisher-name')?.addEventListener('input', (event) => { state.pluginPublishName = event.target.value || '' })
+    document.querySelector('#plugin-publish-visibility')?.addEventListener('change', (event) => { state.pluginPublishVisibility = event.target.value === 'private' ? 'private' : 'public' })
+    document.querySelector('#plugin-publish-submit')?.addEventListener('click', () => { void publishPlugin() })
+    document.querySelectorAll('[data-plugin-action]').forEach((node) => node.addEventListener('click', () => {
+      void handlePluginAction(node.dataset.pluginAction, node.dataset.pluginId, node.dataset.pluginVersion || '')
+    }))
     document.querySelector('#skills-refresh')?.addEventListener('click', async () => { state.skillsLoading = true; renderApp(); await loadSkillGroups(); state.skillsLoading = false; renderApp() })
     document.querySelectorAll('[data-skill-toggle]').forEach((node) => node.addEventListener('click', () => { const kind = node.dataset.skillToggle; if (kind === 'image' || kind === 'video') state.skillEnabled[kind] = !state.skillEnabled[kind]; renderApp() }))
     document.querySelector('#skill-image-group')?.addEventListener('change', (event) => { state.skillConfigs.image.groupId = Number(event.target.value); ensureSkillSelection(); renderApp() })
     document.querySelector('#skill-image-model')?.addEventListener('change', (event) => { state.skillConfigs.image.model = event.target.value; renderApp() })
     document.querySelector('#skill-video-group')?.addEventListener('change', (event) => { state.skillConfigs.video.groupId = Number(event.target.value); ensureSkillSelection(); renderApp() })
     document.querySelector('#skill-video-model')?.addEventListener('change', (event) => { state.skillConfigs.video.model = event.target.value; renderApp() })
-    document.querySelector('#permission-mode')?.addEventListener('change', async (event) => { state.permissionMode = event.target.value; localStorage.setItem('anyu.permissionMode', state.permissionMode); state.settingsOpen = false; try { await startAgent(state.sessionPath) } catch (error) { state.error = error.message || '权限模式切换失败' }; renderApp() })
-    document.querySelector('#settings-cwd')?.addEventListener('click', async () => { const directory = await window.anyu.chooseDirectory(); if (!directory) return; state.sessionCwd = null; state.cwd = directory; localStorage.setItem('anyu.cwd', directory); try { if (state.sessionPath && window.anyu.piMaterializeSession) await window.anyu.piMaterializeSession({ sessionPath: state.sessionPath, cwd: directory }); await startAgent(state.sessionPath) } catch (error) { state.error = error.message || '工作目录切换失败' }; renderApp() })
-    document.querySelector('#refresh')?.addEventListener('click', async () => { state.error = ''; try { await loadKeys(); await loadSkillGroups(); state.catalog = await loadCatalogForKey(state.selectedKey); chooseModel(); ensureSkillSelection(); await startAgent(state.sessionPath) } catch (error) { state.error = error.message || '刷新失败' }; renderApp() })
-    document.querySelector('#choose-cwd')?.addEventListener('click', async () => { const directory = await window.anyu.chooseDirectory(); if (!directory) return; state.sessionCwd = null; state.cwd = directory; localStorage.setItem('anyu.cwd', directory); try { if (state.sessionPath && window.anyu.piMaterializeSession) await window.anyu.piMaterializeSession({ sessionPath: state.sessionPath, cwd: directory }); await startAgent(state.sessionPath) } catch (error) { state.error = error.message || '工作目录切换失败' }; renderApp() })
+     document.querySelector('#permission-mode')?.addEventListener('change', async (event) => { if (state.loading) { state.error = '当前任务完成后再切换权限'; renderApp(); return }; state.permissionMode = ['auto', 'confirm', 'full'].includes(event.target.value) ? event.target.value : 'auto'; localStorage.setItem('anyu.permissionMode', state.permissionMode); localStorage.setItem('anyu.permissionMode.userSelected', '1'); try { await startAgent(state.sessionPath) } catch (error) { state.error = error.message || '权限模式切换失败' }; renderApp() })
+    document.querySelector('#settings-cwd')?.addEventListener('click', async () => { if (state.loading) { state.error = '当前任务完成后再切换工作目录'; renderApp(); return }; const directory = await window.anyu.chooseDirectory(); if (!directory) return; state.sessionCwd = null; state.cwd = directory; localStorage.setItem('anyu.cwd', directory); try { if (state.sessionPath && window.anyu.piMaterializeSession) await window.anyu.piMaterializeSession({ sessionPath: state.sessionPath, cwd: directory }); await startAgent(state.sessionPath) } catch (error) { state.error = error.message || '工作目录切换失败' }; renderApp() })
+    document.querySelector('#refresh')?.addEventListener('click', async () => { if (state.loading) { state.error = '当前任务完成后再刷新 Agent'; renderApp(); return }; state.error = ''; try { await loadKeys(); await loadSkillGroups(); state.catalog = await loadCatalogForKey(state.selectedKey); chooseModel(); ensureSkillSelection(); await startAgent(state.sessionPath) } catch (error) { state.error = error.message || '刷新失败' }; renderApp() })
+    document.querySelector('#choose-cwd')?.addEventListener('click', async () => { if (state.loading) { state.error = '当前任务完成后再切换工作目录'; renderApp(); return }; const directory = await window.anyu.chooseDirectory(); if (!directory) return; state.sessionCwd = null; state.cwd = directory; localStorage.setItem('anyu.cwd', directory); try { if (state.sessionPath && window.anyu.piMaterializeSession) await window.anyu.piMaterializeSession({ sessionPath: state.sessionPath, cwd: directory }); await startAgent(state.sessionPath) } catch (error) { state.error = error.message || '工作目录切换失败' }; renderApp() })
     document.querySelector('#new-chat')?.addEventListener('click', newConversation); document.querySelector('#new-chat-main')?.addEventListener('click', newConversation)
     document.querySelector('#attach-trigger')?.addEventListener('click', () => { document.querySelector('#attachment-menu')?.classList.toggle('hidden') })
     document.querySelector('#attach-files')?.addEventListener('click', () => { document.querySelector('#file-input')?.click() })
@@ -1664,15 +1994,13 @@
     }
   }
   async function answerPermission(answer) { if (!state.permission) return; const request = state.permission; state.permission = null; renderApp(); await window.anyu.piUiResponse({ id: request.id, ...answer }) }
-  function stopRunWatchdog() {
-    if (state.runWatchdog) window.clearTimeout(state.runWatchdog)
+  function stopRunMonitor() {
     if (state.runPoll) window.clearInterval(state.runPoll)
-    state.runWatchdog = null
     state.runPoll = null
   }
   function clearActiveRequest() {
-    stopRunWatchdog()
-    state.activeRequest = null; state.retryNotice = ''; state.runStartedAt = 0
+    stopRunMonitor()
+    state.activeRequest = null; state.retryNotice = ''; state.runInProgress = false
   }
   async function reconcileRunState() {
     if (!state.loading) return
@@ -1680,26 +2008,17 @@
       const result = await window.anyu.piCommand({ type: 'get_state' })
       const piState = result?.data || null
       state.piState = piState || state.piState
-      // Pi clears isStreaming only after the whole run has settled, including
-      // queued retries and awaited event handlers. It is the authoritative idle
-      // signal; pending message counts are not needed to release the composer.
-      if (piState?.isStreaming === false) finishAgentRun()
+      // 轮询只同步观察状态，不能把瞬时的 isStreaming=false 当成任务结束。
+      // 任务生命周期必须由 Pi 的明确结束事件驱动，避免长输出被客户端截断。
+      if (piState?.isStreaming === true) state.runInProgress = true
     } catch {
       // The main process reports process exits separately. A transient state read
       // must not interrupt an active local run.
     }
   }
-  function startRunWatchdog() {
-    stopRunWatchdog()
-    const startedAt = state.runStartedAt || Date.now()
+  function startRunMonitor() {
+    stopRunMonitor()
     state.runPoll = window.setInterval(() => { void reconcileRunState() }, 1500)
-    state.runWatchdog = window.setTimeout(async () => {
-      if (!state.loading || state.runStartedAt !== startedAt) return
-      state.retryNotice = ''
-      state.error = '模型服务响应超时，已停止当前任务。请重试或切换模型。'
-      try { await window.anyu.piCommand({ type: 'abort' }) } catch {}
-      finishAgentRun()
-    }, 90000)
   }
   function finishAgentRun() {
     if (!state.loading && !state.activeRequest) return
@@ -1767,10 +2086,10 @@
       return
     }
     const message = { role: 'user', content: payload.content, attachments: payload.attachments }
-    state.activeRequest = { ...payload, taskId: task.id }; state.retryNotice = ''; state.runStartedAt = Date.now()
+    state.activeRequest = { ...payload, taskId: task.id }; state.retryNotice = ''; state.runInProgress = false
     message.createdAt = Number(task.createdAt || Date.now())
     state.loading = true; state.error = ''; insertTimelineMessage(message); updateSessionTitle(payload.content, message.createdAt); state.composerText = ''; if (prompt) prompt.value = ''
-    renderApp(); updateLiveUi(true); startRunWatchdog()
+    renderApp(); updateLiveUi(true); startRunMonitor()
     try {
       if (!state.piState) await startAgent(state.sessionPath)
       await persistImageAttachments(payload, payload.content + payload.attachmentText)
@@ -1804,7 +2123,7 @@
     if (event.type === 'message_start') {
       const message = event.message || event.assistantMessage
       if (message?.role === 'assistant') {
-        state.streamingMessage = { role: 'assistant', content: '', createdAt: Number(message.timestamp || Date.now()), isStreaming: true }
+        state.streamingMessage = { role: 'assistant', content: '', createdAt: timestampValue(message.timestamp) || Date.now(), isStreaming: true }
         insertTimelineMessage(state.streamingMessage)
         scheduleLiveUi(true)
       }
@@ -1827,7 +2146,7 @@
         const content = textOf(event.message.content) || event.message.errorMessage || ''
         const hasError = Boolean(event.message.errorMessage)
         if (state.streamingMessage) { state.streamingMessage.content = content || state.streamingMessage.content; state.streamingMessage.isError = hasError; state.streamingMessage.isStreaming = false; state.streamingMessage = null }
-        else insertTimelineMessage({ role: 'assistant', content, createdAt: Number(event.message.timestamp || Date.now()), isError: hasError })
+        else insertTimelineMessage({ role: 'assistant', content, createdAt: timestampValue(event.message.timestamp) || Date.now(), isError: hasError })
         // Pi owns retry policy. Re-sending the prompt here would duplicate a user
         // request when Pi retries an overloaded upstream provider. The failure
         // remains visible in the conversation while agent_end decides whether it
@@ -1839,14 +2158,14 @@
     if (event.type === 'tool_execution_start') { insertTimelineMessage({ role: 'tool', toolName: event.toolName, toolCallId: event.toolCallId || event.id, args: event.args || {}, content: '', createdAt: Date.now(), isStreaming: true, startedAt: Date.now() }); scheduleLiveUi(true); return }
     if (event.type === 'tool_execution_update' || event.type === 'tool_execution_end') { const result = event.partialResult || event.result; const output = textOf(result?.content || result?.output || '') || (typeof result === 'string' ? result : ''); const item = [...state.messages].reverse().find((message) => message.role === 'tool' && ((event.toolCallId && message.toolCallId === event.toolCallId) || message.toolName === event.toolName)); if (item) { item.args = event.args || item.args; item.content = output || item.content; item.isError = Boolean(event.isError); item.isStreaming = event.type !== 'tool_execution_end'; if (!item.isStreaming) item.finishedAt = Date.now(); scheduleLiveUi(true) }; return }
     if (event.type === 'extension_ui_request') {
-      if (event.method === 'confirm' && state.permissionMode === 'full') { window.anyu.piUiResponse({ id: event.id, confirmed: true }); return }
+      if (event.method === 'confirm' && effectivePermissionMode() === 'full') { window.anyu.piUiResponse({ id: event.id, confirmed: true }); return }
       if (['confirm', 'select', 'input'].includes(event.method)) { state.permission = event; renderApp() }
       return
     }
     if (event.type === 'agent_start' || event.type === 'turn_start') {
       state.loading = true
-      if (!state.runStartedAt) state.runStartedAt = Date.now()
-      if (!state.runPoll) startRunWatchdog()
+      state.runInProgress = true
+      if (!state.runPoll) startRunMonitor()
       state.retryNotice = ''
       scheduleLiveUi(true)
       return
@@ -1855,15 +2174,14 @@
       if (event.willRetry) {
         state.retryNotice = '模型服务暂时不可用，Pi 正在自动重试…'
         state.error = ''
-        scheduleLiveUi(true)
       } else {
         state.retryNotice = ''
         const lastAssistant = [...state.messages].reverse().find((message) => message.role === 'assistant')
         if (lastAssistant?.isError) state.error = lastAssistant.content || '模型回复失败，请稍后重试或切换模型'
-        // agent_end is Pi's final event for this run. Do not leave the loading
-        // UI waiting for an optional follow-up settlement notification.
-        finishAgentRun()
       }
+      // agent_end 只代表一个底层回合结束，后面可能还有重试、压缩或排队消息。
+      // 必须等 Pi 发出 agent_settled 才释放任务状态，避免输出被提前截断。
+      scheduleLiveUi(true)
       return
     }
     if (event.type === 'auto_retry_start') {
@@ -1886,6 +2204,13 @@
     else if (update.phase === 'error') state.update = { ...state.update, status: 'error', message: update.message || '自动更新失败' }
     updateUpdateControl()
   })
+  if (window.anyu.updateState) {
+    window.anyu.updateState().then((update) => {
+      if (!update || update.status !== 'error') return
+      state.update = { ...state.update, status: 'error', message: update.message || '上次自动更新失败' }
+      scheduleAppRender()
+    }).catch(() => {})
+  }
   window.anyu.onPiExit(() => { clearActiveRequest(); state.piState = null; state.loading = false; if (state.sessionSwitching) return; state.error = 'Pi Agent 进程已退出，请刷新重试'; if (state.user) renderApp() })
   window.anyu.onPiStderr((message) => { if (/error|failed|exception/i.test(message) && !state.loading) { state.error = message.trim().slice(-500); scheduleAppRender() } })
   render()
@@ -1893,7 +2218,14 @@
     try {
       const current = await window.anyu.authState()
       state.authChecking = false
-      if (current.authenticated) { state.user = current.user; await bootstrap() }
+      if (current.authenticated) {
+        state.user = current.user
+        await bootstrap()
+        try {
+          const info = await window.anyu.checkForUpdate()
+          state.update = { ...state.update, ...info, status: info.available ? 'available' : 'latest', percent: 0 }
+        } catch {}
+      }
     } catch (error) { state.authChecking = false; state.error = error.message || '' }
     render()
   })()

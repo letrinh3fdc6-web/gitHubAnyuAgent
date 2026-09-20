@@ -18,7 +18,7 @@ function compareVersions(left, right) {
   return a[3].localeCompare(b[3], undefined, { numeric: true })
 }
 
-function artifactFromManifest(manifest, currentVersion) {
+function artifactFromManifest(manifest, currentVersion, manifestUrl = DEFAULT_MANIFEST_URL) {
   if (!manifest || typeof manifest !== 'object') throw new Error('更新目录格式无效')
   const configured = manifest.anyuAgent || manifest.anyuagent || manifest.app
   const artifacts = Array.isArray(manifest.artifacts) ? manifest.artifacts : []
@@ -35,7 +35,8 @@ function artifactFromManifest(manifest, currentVersion) {
   if (!Number.isSafeInteger(bytes) || bytes <= 0 || !/^[a-f0-9]{64}$/.test(sha256)) throw new Error('更新包校验信息不完整')
   const basePath = String(manifest.basePath || '/downloads').replace(/\/$/, '')
   const relativeUrl = String(candidate.url || `${basePath}/${candidate.name}`).replace(/^\//, '')
-  const url = /^https?:\/\//i.test(relativeUrl) ? relativeUrl : `${DEFAULT_MANIFEST_URL.replace(/\/downloads\/downloads-manifest\.json$/i, '')}/${relativeUrl}`
+  const source = new URL(String(manifestUrl || DEFAULT_MANIFEST_URL))
+  const url = /^https?:\/\//i.test(relativeUrl) ? relativeUrl : `${source.origin}/${relativeUrl}`
   return { version, name: String(candidate.name), bytes, sha256, url, currentVersion: String(currentVersion || '') }
 }
 

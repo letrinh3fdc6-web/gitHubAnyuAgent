@@ -1,14 +1,19 @@
 {
   "name": "anyu-agent-desktop",
-  "version": "1.0.21",
-  "description": "AnYuAgent standalone desktop workspace powered by Pi",
+  "version": "1.0.23",
+  "description": "AnYuAgent standalone desktop workspace",
   "main": "main.cjs",
   "author": "AnYu AI",
   "license": "MIT",
+  "dependencies": {
+    "archiver": "^7.0.1",
+    "unzipper": "^0.12.5"
+  },
   "scripts": {
     "start": "electron .",
     "dev": "electron .",
     "test:planner": "node tools/test-video-planner.cjs",
+    "test:plugins": "node tools/test-plugin-manager.cjs",
     "test:timeline": "node tools/test-timeline.cjs",
     "test:updater": "node tools/test-updater.cjs",
     "prepare:electron": "node node_modules/electron/install.js",
@@ -27,6 +32,7 @@
     "asar": true,
     "files": [
       "main.cjs",
+      "plugin-manager.cjs",
       "preload.cjs",
       "updater.cjs",
       "renderer/**/*",

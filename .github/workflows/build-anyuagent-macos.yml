@@ -41,10 +41,10 @@ jobs:
         with:
           bun-version: latest
 
-      - name: Install Pi workspace dependencies
+      - name: Install AnyuAgent workspace dependencies
         run: npm ci --no-audit --no-fund
 
-      - name: Build Pi macOS runtime
+      - name: Build AnyuAgent macOS runtime
         run: |
           npm --prefix packages/tui run build:native:darwin
           npm --prefix packages/coding-agent run build:binary

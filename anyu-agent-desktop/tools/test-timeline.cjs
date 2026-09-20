@@ -1,11 +1,14 @@
 const fs = require('fs')
 const vm = require('vm')
 const source = fs.readFileSync(require.resolve('../renderer/app.js'), 'utf8')
-const start = source.indexOf('  function orderTimeline(')
+const start = source.indexOf('  function timestampValue(')
 const end = source.indexOf('  async function refreshMessages(')
 if (start < 0 || end < 0) throw new Error('timeline functions not found')
 const context = {}
-vm.runInNewContext(`const state = { mediaActivity: {} }; ${source.slice(start, end)}; this.orderTimeline = orderTimeline; this.timelineMessagesUnique = timelineMessagesUnique; this.beginMediaActivity = beginMediaActivity; this.moveMediaActivity = moveMediaActivity; this.endMediaActivity = endMediaActivity; this.mediaActivityForSession = mediaActivityForSession;`, context)
+vm.runInNewContext(`const state = { mediaActivity: {} }; ${source.slice(start, end)}; this.orderTimeline = orderTimeline; this.timelineMessagesUnique = timelineMessagesUnique; this.beginMediaActivity = beginMediaActivity; this.moveMediaActivity = moveMediaActivity; this.endMediaActivity = endMediaActivity; this.mediaActivityForSession = mediaActivityForSession; this.timestampValue = timestampValue;`, context)
+if (context.timestampValue(1710000000) !== 1710000000000) throw new Error('Unix seconds timestamp normalization failed')
+if (context.timestampValue('') !== 0) throw new Error('empty timestamp should remain unset')
+console.log('timestamp normalization: passed')
 const actual = context.orderTimeline([
   { id: 'hello-assistant', role: 'assistant', createdAt: 3000 },
   { id: 'image-result', role: 'assistant', createdAt: 2000.5 },

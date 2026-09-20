@@ -22,6 +22,7 @@ contextBridge.exposeInMainWorld('anyu', {
   openExternal: (url) => ipcRenderer.invoke('app:open-external', url),
   windowAction: (action) => ipcRenderer.invoke('window:action', action),
   checkForUpdate: () => ipcRenderer.invoke('update:check'),
+  updateState: () => ipcRenderer.invoke('update:state'),
   downloadAndInstallUpdate: () => ipcRenderer.invoke('update:download-install'),
   onUpdateProgress: (listener) => {
     const handler = (_, event) => listener(event)
@@ -34,6 +35,16 @@ contextBridge.exposeInMainWorld('anyu', {
   piListSessions: () => ipcRenderer.invoke('pi:list-sessions'),
   piUiResponse: (response) => ipcRenderer.invoke('pi:ui-response', response),
   chooseDirectory: () => ipcRenderer.invoke('app:choose-directory'),
+  pluginState: () => ipcRenderer.invoke('plugin:state'),
+  pluginMarketplace: () => ipcRenderer.invoke('plugin:marketplace'),
+  pluginPickPackage: () => ipcRenderer.invoke('plugin:pick-package'),
+  pluginScan: (sourcePath) => ipcRenderer.invoke('plugin:scan', sourcePath),
+  pluginInstallLocal: (payload) => ipcRenderer.invoke('plugin:install-local', payload || {}),
+  pluginInstallMarketplace: (payload) => ipcRenderer.invoke('plugin:install-marketplace', payload || {}),
+  pluginPublish: (payload) => ipcRenderer.invoke('plugin:publish', payload || {}),
+  pluginSetEnabled: (payload) => ipcRenderer.invoke('plugin:set-enabled', payload || {}),
+  pluginUninstall: (id) => ipcRenderer.invoke('plugin:uninstall', id),
+  pluginRollback: (payload) => ipcRenderer.invoke('plugin:rollback', payload || {}),
   onPiEvent: (listener) => {
     const handler = (_, event) => listener(event)
     ipcRenderer.on('pi:event', handler)
