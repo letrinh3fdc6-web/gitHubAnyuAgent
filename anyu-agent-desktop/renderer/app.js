@@ -3,18 +3,23 @@
   const mediaObjectUrls = new Map()
   const savedPermissionMode = localStorage.getItem('anyu.permissionMode')
   const permissionModeWasSelected = localStorage.getItem('anyu.permissionMode.userSelected') === '1'
+  const savedSelectedKey = Number(localStorage.getItem('anyu.selectedKey') || 0)
+  const savedAccessMode = localStorage.getItem('anyu.accessMode')
   // 旧版本默认保存的是 confirm，新版本将其视为未主动选择，交给模型能力自动适配。
   const initialPermissionMode = permissionModeWasSelected && ['auto', 'confirm', 'full'].includes(savedPermissionMode) ? savedPermissionMode : 'auto'
   const state = {
-    user: null, keys: [], catalog: [], catalogSource: '', sessions: [], sessionPath: null,
+    user: null, keys: [], keysLoaded: false, catalog: [], catalogSource: '', sessions: [], sessionPath: null,
     messages: [], mediaMessages: {}, mediaBusyCount: 0, mediaActivity: {}, attachments: [], imageLibrary: [], composerText: '', imageMenuOpen: false, imagePreview: null,
-    selectedKey: Number(localStorage.getItem('anyu.selectedKey') || 0),
+    selectedKey: savedSelectedKey,
+    accessMode: ['auto', 'key'].includes(savedAccessMode) ? savedAccessMode : savedSelectedKey > 0 ? 'key' : 'auto',
     model: localStorage.getItem('anyu.selectedModel') || '', cwd: localStorage.getItem('anyu.cwd') || '', sessionCwd: null,
     thinkingLevel: localStorage.getItem('anyu.thinkingLevel') || 'medium', thinkingLevels: ['off'],
     loading: false, skillBusy: null, error: '', twoFactor: null, permission: null, piState: null,
-    authChecking: true, activeRequest: null, retryNotice: '', runInProgress: false, runPoll: null,
+    authChecking: true, authView: 'login', authBusy: false, authNotice: '', authSettings: null, authSettingsLoading: false,
+    authCodeCooldownUntil: 0, authForm: { email: '', password: '', verifyCode: '', promoCode: '', invitationCode: '', resetEmail: '', resetToken: '', newPassword: '', confirmPassword: '' },
+    activeRequest: null, retryNotice: '', runInProgress: false, runPoll: null,
     renderQueued: false, streamingMessage: null, forceScroll: false, appRenderQueued: false,
-    settingsOpen: false, pluginMarketOpen: false, pluginMarketLoading: false, pluginMarketTab: 'marketplace', pluginMarketQuery: '', pluginMarketError: '', pluginPublishOpen: false, pluginPublishId: '', pluginPublishName: '', pluginPublishVisibility: 'public', pluginPublishLoading: false, pluginState: { installed: [], marketplace: [] },
+    settingsOpen: false, settingsSection: 'general', pluginMarketLoading: false, pluginMarketTab: 'marketplace', pluginMarketQuery: '', pluginMarketError: '', pluginPublishOpen: false, pluginPublishId: '', pluginPublishName: '', pluginPublishVisibility: 'public', pluginPublishLoading: false, pluginState: { installed: [], marketplace: [] },
     skillsMarketOpen: false, skillsLoading: false, skillGroups: [], skillMenuOpen: false, skillEnabled: { image: true, video: true },
     skillConfigs: { image: { groupId: 0, model: '', size: '1024x1024', quality: 'auto' }, video: { groupId: 0, model: '' } },
     switching: false, sessionSwitching: false, sessionLoadingPath: null, sessionSwitchToken: 0, balanceRefresh: null,
@@ -75,7 +80,10 @@
     if (Number.isNaN(date.getTime())) return ''
     return date.toLocaleString('zh-CN', { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
   }
-  const providerForApi = (api) => api === 'anthropic-messages' ? 'anyu-gateway-anthropic' : api === 'google-generative-ai' || api === 'google-vertex' ? 'anyu-gateway-gemini' : 'anyu-gateway-openai'
+  const providerForApi = (api, groupId = 0) => {
+    const protocol = api === 'anthropic-messages' ? 'anthropic' : api === 'google-generative-ai' || api === 'google-vertex' ? 'gemini' : 'openai'
+    return groupId > 0 ? `anyu-gateway-${protocol}-g${groupId}` : `anyu-gateway-${protocol}`
+  }
   const canonicalApi = (value, fallback = 'openai-completions') => { const raw = String(value || '').toLowerCase(); if (raw.includes('anthropic') || raw.includes('claude')) return 'anthropic-messages'; if (raw.includes('google') || raw.includes('gemini')) return 'google-generative-ai'; if (raw.includes('response')) return 'openai-responses'; if (raw.includes('openai') || raw.includes('completion') || raw.includes('chat')) return 'openai-completions'; return fallback }
   const selectedKey = () => state.keys.find((key) => Number(key.id) === state.selectedKey)
   const currentModel = () => state.catalog.find((item) => item.id === state.model)
@@ -189,44 +197,141 @@
     state.balanceRefresh = window.setInterval(() => { void refreshBalance(true) }, 60 * 1000)
   }
 
-  function render() { if (!state.user) state.pluginMarketOpen = false; state.user ? renderApp() : renderLogin() }
+  function render() { if (!state.user) state.settingsOpen = false; state.user ? renderApp() : renderLogin() }
   function windowControlsMarkup(className = '') {
     return `<div class="window-controls ${className}" aria-label="窗口控制"><button type="button" data-window-action="minimize" title="最小化">−</button><button type="button" data-window-action="maximize" title="最大化">□</button><button type="button" data-window-action="close" title="关闭">×</button></div>`
   }
+  async function loadAuthSettings() {
+    if (state.authSettings !== null || state.authSettingsLoading || !window.anyu.publicSettings) return
+    state.authSettingsLoading = true
+    try { state.authSettings = await window.anyu.publicSettings() } catch { state.authSettings = {} }
+    state.authSettingsLoading = false
+    if (!state.user) renderLogin()
+  }
+  function authSetting(name, fallback) {
+    return state.authSettings && typeof state.authSettings[name] === 'boolean' ? state.authSettings[name] : fallback
+  }
+  function authCodeCooldown() {
+    return Math.max(0, Math.ceil((Number(state.authCodeCooldownUntil || 0) - Date.now()) / 1000))
+  }
+  function startAuthCodeCooldown() {
+    state.authCodeCooldownUntil = Date.now() + 60 * 1000
+    const tick = () => { if (authCodeCooldown() > 0 && !state.user) { renderLogin(); window.setTimeout(tick, 1000) } }
+    window.setTimeout(tick, 1000)
+  }
+  async function switchAccount() {
+    state.error = ''; state.sessionSwitchToken++; state.sessionSwitching = false; stopBalanceRefresh()
+    try { await window.anyu.piStop() } catch {}
+    try { await window.anyu.logout() } catch {}
+    state.user = null; state.keys = []; state.keysLoaded = false; state.catalog = []; state.skillGroups = []; state.mediaMessages = {}; state.mediaActivity = {}; state.mediaBusyCount = 0; state.sessions = []; state.sessionPath = null; state.sessionCwd = null; state.messages = []; state.imageLibrary = []; state.attachments = []; state.composerText = ''; state.piState = null; state.loading = false; state.permission = null; state.settingsOpen = false; state.settingsSection = 'general'; state.keyMenuOpen = false; state.imageMenuOpen = false; state.skillMenuOpen = false; state.twoFactor = null; state.streamingMessage = null; state.queuedTasks = []; state.queueMenuId = null; state.queueDraining = false; state.authChecking = false; state.authView = 'login'; state.authNotice = ''; state.authBusy = false; state.authForm.password = ''
+    render()
+  }
+  function authInput(id, type, value, label, placeholder, autocomplete = '') {
+    return `<div class="field"><label for="${id}">${label}</label><input id="${id}" type="${type}" value="${esc(value)}" ${autocomplete ? `autocomplete="${autocomplete}"` : ''} placeholder="${placeholder}"></div>`
+  }
+  function captureAuthForm() {
+    const value = (selector) => document.querySelector(selector)?.value
+    const assign = (key, selector) => { const next = value(selector); if (typeof next === 'string') state.authForm[key] = next }
+    assign('email', '#email'); assign('password', '#password'); assign('confirmPassword', '#confirm-password')
+    assign('verifyCode', '#verify-code'); assign('promoCode', '#promo-code'); assign('invitationCode', '#invitation-code')
+    assign('resetEmail', '#reset-email'); assign('resetToken', '#reset-token'); assign('newPassword', '#new-password')
+    const resetConfirmation = value('#confirm-new-password')
+    if (typeof resetConfirmation === 'string') state.authForm.confirmPassword = resetConfirmation
+  }
+  function renderNoKeyApp() {
+    root.innerHTML = `<div class="app-shell"><aside class="sidebar"><div class="side-brand"><div class="brand-mark">A</div><div><strong>AnYuAgent</strong><span>独立 Pi Agent</span></div></div><div class="nav-section"><div class="nav-title">工作区</div><div class="nav-item active"><span class="nav-icon">✦</span>Agent 对话</div></div><div class="side-footer"><button class="settings-link" id="settings-open"><span class="nav-icon">⚙</span>设置</button><div class="user-line"><div class="avatar">${initials(state.user?.email)}</div><div class="user-email" title="${esc(state.user?.email)}">${esc(state.user?.email || 'Anyu 用户')}</div></div><button class="logout" id="logout">切换账号</button></div></aside><main class="main"><header class="topbar"><div class="topbar-title"><h2>Agent 对话</h2><span class="connection-dot offline"></span><span class="connection-label">等待密钥</span></div><div class="top-actions"><button class="icon-button" id="refresh" title="刷新密钥列表">↻</button>${windowControlsMarkup()}</div></header>${state.error ? `<div class="app-alert" role="status">${esc(state.error)}</div>` : ''}<section class="no-key-panel"><div class="no-key-icon">⌁</div><h2>还没有 API 密钥</h2><p>请先前往 Anyu 网站创建 API 密钥，创建后回到这里点击刷新。</p><div class="no-key-actions"><button class="primary no-key-primary" id="open-key-site">去 x.ailzd.com 创建密钥</button><button class="ghost" id="refresh-keys">我已创建，刷新密钥</button></div><p class="muted no-key-note">桌面端不会保存或展示你的密钥明文。</p></section></main></div>`
+    document.querySelectorAll('[data-window-action]').forEach((node) => node.addEventListener('click', () => window.anyu.windowAction(node.dataset.windowAction)))
+    document.querySelector('#open-key-site')?.addEventListener('click', () => window.anyu.openExternal('https://x.ailzd.com'))
+    document.querySelector('#refresh-keys')?.addEventListener('click', async () => { await refreshKeysAndStart() })
+    document.querySelector('#refresh')?.addEventListener('click', async () => { await refreshKeysAndStart() })
+    document.querySelector('#logout')?.addEventListener('click', switchAccount)
+    document.querySelector('#settings-open')?.addEventListener('click', () => { state.settingsOpen = true; state.settingsSection = 'general'; renderApp() })
+  }
+  async function refreshKeysAndStart() {
+    state.error = ''; state.switching = true; renderApp()
+    try {
+      await loadKeys()
+      if (!state.keys.length) return
+      await loadSkillGroups(); state.catalog = await loadCatalogForKey(state.selectedKey); chooseModel(); ensureSkillSelection(); await startAgent(state.sessionPath)
+    } catch (error) { state.error = errorText(error) || '密钥刷新失败' }
+    finally { state.switching = false; renderApp() }
+  }
   function renderLogin() {
+    captureAuthForm()
+    void loadAuthSettings()
     const two = state.twoFactor
     if (state.authChecking) {
       root.innerHTML = `<main class="login">${windowControlsMarkup('login-window-controls')}<section class="login-card auth-checking"><div class="brand"><div class="brand-mark">A</div><div><h1>AnYuAgent</h1><small>独立 Pi Agent 桌面客户端</small></div></div><div class="login-loading"><span class="spinner"></span><span>正在检查登录状态…</span></div><p class="muted" style="font-size:11px;margin-top:24px">正在连接 Anyu 账号服务</p></section></main>`
       document.querySelectorAll('[data-window-action]').forEach((node) => node.addEventListener('click', () => window.anyu.windowAction(node.dataset.windowAction)))
       return
     }
-    root.innerHTML = `<main class="login">${windowControlsMarkup('login-window-controls')}<section class="login-card">
-      <div class="brand"><div class="brand-mark">A</div><div><h1>AnYuAgent</h1><small>独立 Pi Agent 桌面客户端</small></div></div>
-      ${two ? `<h2>完成安全验证</h2><p class="muted">账号 ${esc(two.user_email_masked || '')} 已开启双重验证。</p>
-        <div class="field"><label>Authenticator 验证码</label><input id="totp" inputmode="numeric" maxlength="6" placeholder="输入 6 位验证码"></div>
-        <button class="primary" id="verify">进入 AnYuAgent</button>` : `<h2>登录 AnYuAgent</h2><p class="muted">登录后同步 Anyu 密钥，在本地 Pi Agent 中对话。</p>
-        <div class="field"><label>Anyu 邮箱</label><input id="email" type="email" autocomplete="username" placeholder="name@example.com"></div>
-        <div class="field"><label>密码</label><input id="password" type="password" autocomplete="current-password" placeholder="输入 Anyu 密码"></div>
-        <button class="primary" id="login">登录并开始</button>`}
-      ${state.error ? `<div class="error">${esc(state.error)}</div>` : ''}
-      <p class="muted" style="font-size:11px;margin-top:24px">独立桌面客户端 · Pi 会话只保存在本机</p>
-    </section></main>`
+    const form = state.authForm
+    const view = state.authView
+    const registrationEnabled = authSetting('registration_enabled', true)
+    const passwordResetEnabled = authSetting('password_reset_enabled', true)
+    const passwordResetNeedsWebVerification = ['turnstile_enabled', 'tencent_captcha_enabled', 'aliyun_captcha_enabled'].some((name) => authSetting(name, false))
+    const emailVerifyEnabled = authSetting('email_verify_enabled', false)
+    const promoEnabled = authSetting('promo_code_enabled', false)
+    const invitationEnabled = authSetting('invitation_code_enabled', false)
+    const cooldown = authCodeCooldown()
+    let content = ''
+    if (two) {
+      content = `<h2>完成安全验证</h2><p class="muted">账号 ${esc(two.user_email_masked || '')} 已开启双重验证。</p><div class="field"><label for="totp">Authenticator 验证码</label><input id="totp" inputmode="numeric" maxlength="6" placeholder="输入 6 位验证码"></div><button class="primary" id="verify">进入 AnYuAgent</button>`
+    } else if (view === 'register') {
+      content = `<h2>注册 Anyu 账号</h2><p class="muted">注册后即可在桌面端登录并同步你的 API 密钥。</p>${registrationEnabled ? `<form id="auth-form">${authInput('email', 'email', form.email, 'Anyu 邮箱', 'name@example.com', 'email')}${authInput('password', 'password', form.password, '密码', '至少 6 位密码', 'new-password')}${authInput('confirm-password', 'password', form.confirmPassword, '确认密码', '再次输入密码', 'new-password')}${emailVerifyEnabled ? `<div class="field"><label for="verify-code">邮箱验证码</label><div class="inline-field"><input id="verify-code" inputmode="numeric" value="${esc(form.verifyCode)}" placeholder="输入邮箱验证码"><button type="button" class="ghost inline-action" id="send-code" ${cooldown ? 'disabled' : ''}>${cooldown ? `${cooldown}s 后重试` : '发送验证码'}</button></div></div>` : ''}${invitationEnabled ? authInput('invitation-code', 'text', form.invitationCode, '邀请码', '如网站要求，请填写邀请码') : ''}${promoEnabled ? authInput('promo-code', 'text', form.promoCode, '优惠码（可选）', '输入优惠码') : ''}<button class="primary" id="register" type="submit">注册并开始</button></form>` : `<div class="auth-notice">当前网站暂未开放注册，请前往 x.ailzd.com 完成注册。</div><button class="primary" id="open-site">打开网站注册</button>`}`
+    } else if (view === 'forgot') {
+      content = `<h2>找回密码</h2><p class="muted">输入注册邮箱，我们会发送密码重置链接。</p>${passwordResetEnabled && !passwordResetNeedsWebVerification ? `<form id="auth-form">${authInput('reset-email', 'email', form.resetEmail, '注册邮箱', 'name@example.com', 'email')}<button class="primary" id="forgot" type="submit">发送重置邮件</button></form>` : `<div class="auth-notice">${passwordResetNeedsWebVerification ? '网站已开启安全验证，请前往 x.ailzd.com 完成密码找回。' : '当前网站未开启密码找回，请前往 x.ailzd.com 操作。'}</div><button class="primary" id="open-site">打开网站找回密码</button>`}`
+    } else if (view === 'reset') {
+      content = `<h2>重置密码</h2><p class="muted">粘贴邮件中的重置令牌并设置新密码。</p><form id="auth-form">${authInput('reset-email', 'email', form.resetEmail, '注册邮箱', 'name@example.com', 'email')}${authInput('reset-token', 'text', form.resetToken, '重置令牌', '粘贴邮件中的 token')}${authInput('new-password', 'password', form.newPassword, '新密码', '至少 6 位密码', 'new-password')}${authInput('confirm-new-password', 'password', form.confirmPassword, '确认新密码', '再次输入新密码', 'new-password')}<button class="primary" id="reset" type="submit">更新密码</button></form>`
+    } else {
+      content = `<h2>登录 AnYuAgent</h2><p class="muted">登录后同步 Anyu 密钥，在本地 Pi Agent 中对话。</p><form id="auth-form">${authInput('email', 'email', form.email, 'Anyu 邮箱', 'name@example.com', 'username')}${authInput('password', 'password', form.password, '密码', '输入 Anyu 密码', 'current-password')}<button class="primary" id="login" type="submit">登录并开始</button></form>`
+    }
+    const links = two ? '' : `<div class="auth-links">${view !== 'login' ? '<button type="button" class="link-button" id="show-login">返回登录</button>' : ''}${view === 'login' && registrationEnabled ? '<button type="button" class="link-button" id="show-register">立即注册</button>' : ''}${view === 'login' && passwordResetEnabled ? '<button type="button" class="link-button" id="show-forgot">忘记密码？</button>' : ''}${view === 'forgot' ? '<button type="button" class="link-button" id="show-reset">已有重置令牌</button>' : ''}</div>`
+    root.innerHTML = `<main class="login">${windowControlsMarkup('login-window-controls')}<section class="login-card"><div class="brand"><div class="brand-mark">A</div><div><h1>AnYuAgent</h1><small>独立 Pi Agent 桌面客户端</small></div></div>${content}${state.authNotice ? `<div class="auth-notice success">${esc(state.authNotice)}</div>` : ''}${state.error ? `<div class="error">${esc(state.error)}</div>` : ''}${links}<p class="muted" style="font-size:11px;margin-top:24px">账号认证与网站一致 · Pi 会话只保存在本机</p></section></main>`
     document.querySelectorAll('[data-window-action]').forEach((node) => node.addEventListener('click', () => window.anyu.windowAction(node.dataset.windowAction)))
     const button = document.querySelector(two ? '#verify' : '#login')
-    button?.addEventListener('click', async () => {
-      state.error = ''; button.disabled = true; button.textContent = '正在验证…'
+    document.querySelector('#auth-form')?.addEventListener('submit', async (event) => {
+      event.preventDefault(); if (state.authBusy) return
+      state.error = ''; state.authNotice = ''; state.authBusy = true; if (button) button.disabled = true
       try {
-        if (two) {
-          const data = await window.anyu.login2fa({ temp_token: two.temp_token, totp_code: document.querySelector('#totp').value.trim() })
-          state.user = data.user; state.twoFactor = null; await bootstrap()
-        } else {
-          const data = await window.anyu.login({ email: document.querySelector('#email').value.trim(), password: document.querySelector('#password').value, turnstile_token: '' })
+        if (view === 'login') {
+          form.email = document.querySelector('#email')?.value.trim() || ''; form.password = document.querySelector('#password')?.value || ''
+          if (!form.email || !form.password) throw new Error('请输入邮箱和密码')
+          const data = await window.anyu.login({ email: form.email, password: form.password })
           if (data.requires_2fa) state.twoFactor = data
           else { state.user = data.user; await bootstrap() }
+        } else if (view === 'register') {
+          form.email = document.querySelector('#email')?.value.trim() || ''; form.password = document.querySelector('#password')?.value || ''; form.confirmPassword = document.querySelector('#confirm-password')?.value || ''
+          form.verifyCode = document.querySelector('#verify-code')?.value.trim() || ''; form.invitationCode = document.querySelector('#invitation-code')?.value.trim() || ''; form.promoCode = document.querySelector('#promo-code')?.value.trim() || ''
+          if (!form.email || !form.password) throw new Error('请输入邮箱和密码')
+          if (form.password.length < 6) throw new Error('密码至少需要 6 位')
+          if (form.password !== form.confirmPassword) throw new Error('两次输入的密码不一致')
+          if (emailVerifyEnabled && !form.verifyCode) throw new Error('请输入邮箱验证码')
+          const data = await window.anyu.register({ email: form.email, password: form.password, verify_code: form.verifyCode || undefined, invitation_code: form.invitationCode || undefined, promo_code: form.promoCode || undefined })
+          state.user = data.user; await bootstrap()
+        } else if (view === 'forgot') {
+          form.resetEmail = document.querySelector('#reset-email')?.value.trim() || ''
+          if (!form.resetEmail) throw new Error('请输入注册邮箱')
+          const result = await window.anyu.forgotPassword({ email: form.resetEmail })
+          state.authNotice = result?.message || '如果邮箱已注册，重置链接会很快发送到你的邮箱。'
+        } else if (view === 'reset') {
+          form.resetEmail = document.querySelector('#reset-email')?.value.trim() || ''; form.resetToken = document.querySelector('#reset-token')?.value.trim() || ''; form.newPassword = document.querySelector('#new-password')?.value || ''; form.confirmPassword = document.querySelector('#confirm-new-password')?.value || ''
+          if (!form.resetEmail || !form.resetToken) throw new Error('请输入邮箱和重置令牌')
+          if (form.newPassword.length < 6) throw new Error('新密码至少需要 6 位')
+          if (form.newPassword !== form.confirmPassword) throw new Error('两次输入的新密码不一致')
+          const result = await window.anyu.resetPassword({ email: form.resetEmail, token: form.resetToken, new_password: form.newPassword })
+          state.authNotice = result?.message || '密码已更新，请使用新密码登录。'; state.authView = 'login'; form.password = ''; form.newPassword = ''; form.confirmPassword = ''
         }
-        render()
-      } catch (error) { state.error = error.message || '登录失败，请检查账号和网络'; render() }
+      } catch (error) { state.error = errorText(error) || '操作失败，请检查网络和输入' }
+      finally { state.authBusy = false; render() }
     })
+    button?.addEventListener('click', async () => { if (two) { state.error = ''; state.authBusy = true; button.disabled = true; try { const data = await window.anyu.login2fa({ temp_token: two.temp_token, totp_code: document.querySelector('#totp').value.trim() }); state.user = data.user; state.twoFactor = null; await bootstrap(); render() } catch (error) { state.authBusy = false; state.error = errorText(error) || '验证失败'; render() } } })
+    document.querySelector('#send-code')?.addEventListener('click', async () => { if (state.authBusy || authCodeCooldown()) return; const email = document.querySelector('#email')?.value.trim() || ''; if (!email) { state.error = '请先填写邮箱'; render(); return } state.authBusy = true; try { await window.anyu.sendVerifyCode({ email }); state.authNotice = '验证码已发送，请检查邮箱。'; startAuthCodeCooldown() } catch (error) { state.error = errorText(error) || '验证码发送失败' } finally { state.authBusy = false; render() } })
+    document.querySelector('#show-login')?.addEventListener('click', () => { state.authView = 'login'; state.error = ''; state.authNotice = ''; renderLogin() })
+    document.querySelector('#show-register')?.addEventListener('click', () => { state.authView = 'register'; state.error = ''; state.authNotice = ''; renderLogin() })
+    document.querySelector('#show-forgot')?.addEventListener('click', () => { state.authView = 'forgot'; state.error = ''; state.authNotice = ''; renderLogin() })
+    document.querySelector('#show-reset')?.addEventListener('click', () => { state.authView = 'reset'; state.error = ''; state.authNotice = ''; renderLogin() })
+    document.querySelector('#open-site')?.addEventListener('click', () => window.anyu.openExternal(view === 'register' ? 'https://x.ailzd.com/register' : 'https://x.ailzd.com/forgot-password'))
   }
 
   function keyItemsFromResponse(data) {
@@ -260,28 +365,49 @@
       unique.set(id, { ...item, id: item.id, name: displayName, title: displayName, status })
     }
     state.keys = [...unique.values()]
+    state.keysLoaded = true
     if (!state.selectedKey || !state.keys.some((key) => Number(key.id) === state.selectedKey)) state.selectedKey = Number(state.keys[0]?.id || 0)
     localStorage.setItem('anyu.selectedKey', String(state.selectedKey || ''))
+  }
+  async function loadRouteData({ refreshPublicKeys = false } = {}) {
+    // 自动分组只依赖 AnYuAgent 专用目录；公开密钥仅在密钥模式下按需读取。
+    if (state.accessMode === 'key' && (refreshPublicKeys || !state.keysLoaded)) {
+      await loadKeys()
+      if (!state.keys.length) {
+        state.accessMode = 'auto'
+        state.selectedKey = 0
+        localStorage.setItem('anyu.accessMode', state.accessMode)
+        localStorage.setItem('anyu.selectedKey', '')
+      }
+    }
+    await loadSkillGroups()
+    state.catalog = state.accessMode === 'key'
+      ? await loadCatalogForKey(state.selectedKey)
+      : (await loadCatalog()).filter((model) => model.groupId > 0)
+    if (!state.catalog.length) throw new Error('当前账号没有可用于 AnYuAgent 的聊天分组和模型')
   }
   function keyPlatform(key = selectedKey()) {
     return String(key?.group?.platform || key?.groups?.[0]?.platform || key?.platform || key?.provider || '').trim()
   }
   function normalizeModel(model, platform = '') {
-    const id = String(model?.id || model?.name || model?.model_id || '').replace(/^models\//, '').trim()
-    if (!id) return null
-    const lower = `${id} ${platform} ${model?.api || model?.protocol || ''}`.toLowerCase()
+    const modelId = String(model?.model_id || model?.modelId || model?.id || model?.name || '').replace(/^models\//, '').trim()
+    if (!modelId) return null
+    const lower = `${modelId} ${platform} ${model?.api || model?.protocol || ''}`.toLowerCase()
     const apiName = lower.includes('gemini') || lower.includes('google') ? 'google-generative-ai' : lower.includes('claude') || lower.includes('anthropic') ? 'anthropic-messages' : 'openai-completions'
     const api = canonicalApi(model?.api, apiName)
-    const capabilities = modelCapabilities(model, id, api)
+    const groupId = Number(model?.group_id || model?.groupId || 0)
+    const routeId = Number.isSafeInteger(groupId) && groupId > 0 ? `${api}:${groupId}:${modelId}` : modelId
+    const capabilities = modelCapabilities(model, modelId, api)
     const rawMap = model?.thinkingLevelMap || model?.thinking_level_map || model?.reasoning_effort_map || model?.reasoningEffortMap
     const rawLevels = model?.thinkingLevels || model?.thinking_levels || model?.reasoning_levels || model?.reasoningLevels
-    const inferredReasoning = inferredReasoningConfig(id, api)
+    const inferredReasoning = inferredReasoningConfig(modelId, api)
     const reasoning = Boolean(model?.reasoning || rawMap || (Array.isArray(rawLevels) && rawLevels.length) || inferredReasoning.reasoning)
     const thinkingLevels = Array.isArray(rawLevels) ? rawLevels.map((level) => String(level).toLowerCase()).filter((level) => THINKING_LEVELS.includes(level)) : undefined
     const thinkingLevelMap = rawMap && typeof rawMap === 'object' ? rawMap : thinkingLevels?.length ? Object.fromEntries(THINKING_LEVELS.map((level) => [level, thinkingLevels.includes(level) ? level : null])) : inferredReasoning.thinkingLevelMap
     return {
-      id, name: model?.name || model?.display_name || model?.displayName || id, api,
-      provider: providerForApi(api), reasoning, thinkingLevels, thinkingLevelMap,
+      id: routeId, modelId, groupId, groupName: model?.group_name || model?.groupName || '',
+      name: model?.display_name || model?.displayName || model?.name || modelId, api,
+      provider: providerForApi(api, groupId), reasoning, thinkingLevels, thinkingLevelMap,
       input: capabilities.input, supportsImages: capabilities.supportsImages,
       supportsTools: model?.supportsTools ?? model?.supports_tools ?? model?.capabilities?.tools,
       permissionMode: model?.permissionMode || model?.permission_mode || '',
@@ -290,43 +416,11 @@
     }
   }
   async function loadCatalog() {
-    try {
-      const data = await api('/integrations/pi/catalog')
-      const models = (data?.models || data?.items || []).map((item) => normalizeModel(item)).filter(Boolean)
-      if (models.length) { state.catalogSource = 'Anyu Pi 目录'; return models }
-    } catch {}
-    try {
-      const data = await api('/groups/available')
-      const groups = data?.items || data?.groups || (Array.isArray(data) ? data : [])
-      const models = groups.flatMap((group) => {
-        return (group.models || group.model_list || group.available_models || []).map((item) => normalizeModel(item, group.platform))
-      }).filter(Boolean)
-      if (models.length) { state.catalogSource = 'Anyu 模型目录'; return [...new Map(models.map((item) => [item.id, item])).values()] }
-    } catch {}
-    for (const route of ['/models', '/models/available']) {
-      try {
-        const data = await api(route)
-        const models = (data?.models || data?.items || (Array.isArray(data) ? data : [])).map((item) => normalizeModel(item)).filter(Boolean)
-        if (models.length) { state.catalogSource = 'Anyu 模型目录'; return [...new Map(models.map((item) => [item.id, item])).values()] }
-      } catch {}
-    }
-    const fromKeys = state.keys.flatMap((key) => (key.models || key.model_list || []).map((item) => normalizeModel(item))).filter(Boolean)
-    if (!fromKeys.length) {
-      const perKey = await Promise.all(state.keys.filter((key) => key.status === 'active' || !key.status).slice(0, 20).map(async (key) => {
-        for (const route of [`/keys/${key.id}/models?role=chat`, `/codex/keys/${key.id}/models?role=chat`]) {
-          try {
-            const data = await api(route)
-            const models = (data?.items || data?.models || (Array.isArray(data) ? data : [])).map((item) => normalizeModel(item)).filter(Boolean)
-            if (models.length) return models
-          } catch {}
-        }
-        return []
-      }))
-      fromKeys.push(...perKey.flat())
-    }
-    const usable = fromKeys
-    state.catalogSource = usable.length ? '密钥模型目录' : '暂无目录'
-    return [...new Map(usable.map((item) => [item.id, item])).values()]
+    const data = await api('/integrations/anyu-agent/catalog')
+    const models = (data?.models || data?.items || []).map((item) => normalizeModel(item)).filter(Boolean)
+    if (!models.length) throw new Error('当前账号没有可用于 AnYuAgent 的文本模型，请联系管理员检查分组和协议权限')
+    state.catalogSource = 'AnYuAgent 自动目录'
+    return models
   }
   async function loadCatalogForKey(keyId) {
     if (!keyId) throw new Error('没有选择密钥，无法读取对应模型')
@@ -344,6 +438,7 @@
     return unique
   }
   function keyCapabilityGroupIds(kind) {
+    if (state.accessMode === 'auto') return []
     const key = selectedKey() || {}
     const names = kind === 'video' ? ['video_group_ids', 'videoGroupIDs', 'videoGroupIds'] : ['image_group_ids', 'imageGroupIDs', 'imageGroupIds']
     const direct = names.flatMap((name) => Array.isArray(key[name]) ? key[name] : [])
@@ -476,7 +571,7 @@
     const items = tab === 'installed' ? installed.filter((item) => pluginMatches(item, query)) : tab === 'uploads' ? uploads.filter((item) => pluginMatches(item, query)) : marketplace
     const empty = tab === 'marketplace' ? '市场暂时没有可用目录。你可以导入自己的 .anyu-plugin.zip，安装后立即使用。' : tab === 'installed' ? '还没有安装插件。' : '还没有本地上传的插件。'
     const publish = state.pluginPublishOpen ? `<div class="modal-backdrop plugin-publish-backdrop"><section class="permission-modal plugin-publish-modal"><div class="settings-head"><div><div class="modal-kicker">Publish Plugin</div><h3>发布自定义插件</h3></div><button class="icon-button" id="plugin-publish-close" title="关闭">×</button></div><p>发布前会再次扫描插件包。公开插件将进入审核队列；私有插件仅对你的账号可见。</p><label class="plugin-form-label" for="plugin-publisher-name">发布者</label><input class="modal-input" id="plugin-publisher-name" value="${esc(state.pluginPublishName)}" placeholder="例如：AnYu Community"><label class="plugin-form-label" for="plugin-publish-visibility">可见性</label><select class="modal-input" id="plugin-publish-visibility"><option value="public" ${state.pluginPublishVisibility === 'public' ? 'selected' : ''}>公开发布 · 提交审核</option><option value="private" ${state.pluginPublishVisibility === 'private' ? 'selected' : ''}>私有自定义插件 · 仅自己使用</option></select><div class="modal-actions"><button class="ghost" id="plugin-publish-cancel">取消</button><button class="primary modal-primary" id="plugin-publish-submit" ${state.pluginPublishLoading ? 'disabled' : ''}>${state.pluginPublishLoading ? '发布中…' : '确认发布'}</button></div></section></div>` : ''
-    return `<div class="modal-backdrop plugin-market-backdrop"><section class="plugin-market-modal"><header class="plugin-market-head"><div><div class="modal-kicker">AnYuAgent Plugins</div><h3>插件市场</h3><p>发现、安装和管理可复用的 Agent Skills。图片和视频是核心内置 Skill，不受插件卸载影响。</p></div><button class="icon-button" id="plugin-market-close" title="关闭">×</button></header><div class="plugin-market-toolbar"><div class="plugin-tabs"><button class="plugin-tab ${tab === 'marketplace' ? 'active' : ''}" data-plugin-tab="marketplace">发现市场</button><button class="plugin-tab ${tab === 'installed' ? 'active' : ''}" data-plugin-tab="installed">已安装 <span>${installed.length}</span></button><button class="plugin-tab ${tab === 'uploads' ? 'active' : ''}" data-plugin-tab="uploads">我的上传 <span>${uploads.length}</span></button></div><div class="plugin-tools"><input id="plugin-search" value="${esc(state.pluginMarketQuery)}" placeholder="搜索插件、Skill 或发布者" aria-label="搜索插件"><button class="ghost" id="plugin-import">导入插件</button></div></div>${state.pluginMarketError ? `<div class="plugin-market-error">${esc(state.pluginMarketError)}</div>` : ''}<div class="plugin-market-content">${state.pluginMarketLoading ? '<div class="plugin-market-empty">正在同步插件目录…</div>' : items.length ? `<div class="plugin-grid">${items.map((item) => pluginCardMarkup(item, tab === 'installed' || tab === 'uploads' ? 'installed' : 'marketplace')).join('')}</div>` : `<div class="plugin-market-empty"><strong>${esc(empty)}</strong><span>插件会以版本目录安装，更新失败时可以回滚到上一版本。</span>${tab === 'marketplace' ? '<button class="primary" id="plugin-import-empty">导入本地插件</button>' : ''}</div>`}</div><footer class="plugin-market-foot"><span>${installed.length} 个已安装插件 · 本地注册表已保护</span><span>v1 仅支持 skills-only 插件</span></footer></section></div>${publish}`
+    return `<section class="settings-section settings-plugin-market-section"><div class="plugin-market-panel"><header class="plugin-market-head"><div><h2>发现和管理插件</h2><p>安装社区插件，或导入你自己制作的 Agent Skill。</p></div></header><div class="plugin-market-toolbar"><div class="plugin-tabs"><button class="plugin-tab ${tab === 'marketplace' ? 'active' : ''}" data-plugin-tab="marketplace">发现市场</button><button class="plugin-tab ${tab === 'installed' ? 'active' : ''}" data-plugin-tab="installed">已安装 <span>${installed.length}</span></button><button class="plugin-tab ${tab === 'uploads' ? 'active' : ''}" data-plugin-tab="uploads">我的上传 <span>${uploads.length}</span></button></div><div class="plugin-tools"><input id="plugin-search" value="${esc(state.pluginMarketQuery)}" placeholder="搜索插件、Skill 或发布者" aria-label="搜索插件"><button class="ghost" id="plugin-import">导入插件</button></div></div>${state.pluginMarketError ? `<div class="plugin-market-error">${esc(state.pluginMarketError)}</div>` : ''}<div class="plugin-market-content">${state.pluginMarketLoading ? '<div class="plugin-market-empty">正在同步插件目录…</div>' : items.length ? `<div class="plugin-grid">${items.map((item) => pluginCardMarkup(item, tab === 'installed' || tab === 'uploads' ? 'installed' : 'marketplace')).join('')}</div>` : `<div class="plugin-market-empty"><strong>${esc(empty)}</strong><span>插件会以版本目录安装，更新失败时可以回滚到上一版本。</span>${tab === 'marketplace' ? '<button class="primary" id="plugin-import-empty">导入本地插件</button>' : ''}</div>`}</div><footer class="plugin-market-foot"><span>${installed.length} 个已安装插件 · 本地注册表已保护</span><span>v1 仅支持 skills-only 插件</span></footer></div></section>${publish}`
   }
   async function loadPluginMarket() {
     state.pluginMarketLoading = true; state.pluginMarketError = ''; scheduleAppRender()
@@ -555,11 +650,13 @@
     finally { state.pluginMarketLoading = false; renderApp() }
   }
   function protocolLabel(model) {
-    if (model?.api === 'anthropic-messages') return 'Claude / Anthropic'
-    if (model?.api === 'google-generative-ai' || model?.api === 'google-vertex') return 'Gemini / Google'
+    const group = cleanDisplayText(model?.groupName || '')
+    let protocol = ''
+    if (model?.api === 'anthropic-messages') protocol = 'Claude / Anthropic'
+    else if (model?.api === 'google-generative-ai' || model?.api === 'google-vertex') protocol = 'Gemini / Google'
     const name = String(model?.id || '').toLowerCase()
-    if (/deepseek|qwen|glm|通义|千问|豆包|doubao|moonshot|kimi|minimax|yi-|zhipu|baichuan|ernie|混元/.test(name)) return '国产模型'
-    return 'GPT / OpenAI 兼容'
+    if (!protocol) protocol = /deepseek|qwen|glm|通义|千问|豆包|doubao|moonshot|kimi|minimax|yi-|zhipu|baichuan|ernie|混元/.test(name) ? '国产模型' : 'GPT / OpenAI 兼容'
+    return group ? `${group} · ${protocol}` : protocol
   }
   function chooseModel() {
     if (!state.model || !state.catalog.some((item) => item.id === state.model)) state.model = state.catalog[0]?.id || ''
@@ -773,8 +870,8 @@
   }
   async function startAgent(sessionPath = state.sessionPath, shouldApply = () => true) {
     chooseModel()
-    if (!state.selectedKey || !state.model) throw new Error('请先选择可用密钥和模型')
-    const result = await window.anyu.piStart({ keyId: state.selectedKey, model: state.model, provider: currentModel()?.provider, models: state.catalog, sessionPath, cwd: effectiveWorkspace() || undefined, permissionMode: state.permissionMode })
+    if (!state.model || (state.accessMode === 'key' && !state.selectedKey)) throw new Error('请先选择可用路由和模型')
+    const result = await window.anyu.piStart({ accessMode: state.accessMode, keyId: state.selectedKey, model: state.model, provider: currentModel()?.provider, models: state.catalog, sessionPath, cwd: effectiveWorkspace() || undefined, permissionMode: state.permissionMode })
     state.activePermissionMode = result?.permissionMode || effectivePermissionMode()
     if (shouldApply()) {
       if (state.sessionCwd) state.sessionCwd = result.cwd || state.sessionCwd
@@ -796,7 +893,10 @@
       state.pluginState = { ...state.pluginState, installed: plugins?.installed || [] }
     } catch {}
     startBalanceRefresh()
-    await loadKeys(); await loadSkillGroups(); state.catalog = await loadCatalogForKey(state.selectedKey); chooseModel(); ensureSkillSelection(); await refreshSessions()
+    state.keysLoaded = false
+    await loadRouteData({ refreshPublicKeys: true })
+    localStorage.setItem('anyu.accessMode', state.accessMode)
+    chooseModel(); ensureSkillSelection(); await refreshSessions()
     if (state.sessions[0]) { state.sessionPath = state.sessions[0].path; state.sessionCwd = state.sessions[0].cwd || null; if (state.sessionCwd) state.cwd = state.sessionCwd }
     try { await startAgent(state.sessionPath) } catch (error) { state.error = error.message || 'Pi Agent 启动失败' }
   }
@@ -1534,6 +1634,9 @@
     const imageModels = skillModels('image'); const videoModels = skillModels('video')
     return `<div class="skills-market"><div class="market-heading"><div><div class="modal-kicker">AnYuAgent Skills</div><h4>技能市场</h4><p>输入 @生图 或 @生视频后，技能会根据描述、参考图和当前模型能力自动选择参数。</p></div><span class="market-status">${state.skillsLoading ? '同步中…' : `${imageModels.length + videoModels.length} 个可用模型`}</span></div><div class="skill-grid"><article class="skill-card"><div class="skill-card-icon image">✦</div><div class="skill-card-copy"><strong>生图 Skill</strong><span>自动处理图片生成与参考图编辑，遵循当前密钥的模型目录。</span><small>${imageModels.length ? `${imageModels.length} 个模型 · ${esc(state.skillConfigs.image.model)}` : '当前密钥暂无生图模型'}</small></div><button class="skill-toggle ${state.skillEnabled.image ? 'enabled' : ''}" data-skill-toggle="image">${state.skillEnabled.image ? '已启用' : '启用'}</button></article><article class="skill-card"><div class="skill-card-icon video">◉</div><div class="skill-card-copy"><strong>生视频 Skill</strong><span>自动理解时长、画幅和画质意图，并适配首帧、首尾帧、多图及厂商协议。</span><small>${videoModels.length ? `${videoModels.length} 个模型 · ${esc(state.skillConfigs.video.model)}` : '当前密钥暂无视频模型'}</small></div><button class="skill-toggle ${state.skillEnabled.video ? 'enabled' : ''}" data-skill-toggle="video">${state.skillEnabled.video ? '已启用' : '启用'}</button></article></div><div class="skill-config"><div class="config-title">技能模型</div><div class="config-row"><label>生图分组<select id="skill-image-group">${skillGroupOptions('image') || '<option value="">暂无可用分组</option>'}</select></label><label>生图模型<select id="skill-image-model">${skillModelOptions('image') || '<option value="">暂无可用模型</option>'}</select></label></div><div class="config-row"><label>视频分组<select id="skill-video-group">${skillGroupOptions('video') || '<option value="">暂无可用分组</option>'}</select></label><label>视频模型<select id="skill-video-model">${skillModelOptions('video') || '<option value="">暂无可用模型</option>'}</select></label></div></div></div>`
   }
+  function coreSkillsMarkup() {
+    return `<section class="settings-section settings-core-skills"><div class="setting-label-row"><div><h2>核心技能</h2><p class="settings-section-copy">管理内置图片与视频技能，它们不会被插件卸载影响。</p></div><button type="button" class="ghost" id="skills-refresh">同步目录</button></div><div class="setting-block skill-market-block">${skillsMarketMarkup()}</div></section>`
+  }
   function legacyRenderApp() {
     const key = selectedKey(); const model = currentModel()
      root.innerHTML = `<div class="app-shell"><aside class="sidebar"><div class="side-brand"><div class="brand-mark">A</div><div><strong>AnYuAgent</strong><span>独立 Pi Agent</span></div></div>
@@ -1584,45 +1687,29 @@
   }
 
   function settingsMarkup() {
+    // 设置导航只展示已经实现的页面，避免空入口干扰用户。
+    const section = ['general', 'skills', 'plugins'].includes(state.settingsSection) ? state.settingsSection : 'general'
+    const pageTitle = { general: '常规', skills: '核心技能', plugins: '插件市场' }[section]
+    const generalMarkup = `
+      <section class="settings-section"><h2>权限</h2><div class="settings-card"><div class="settings-row"><div><strong>本机访问权限</strong><p>智能适配会根据当前模型的工具能力选择访问级别。</p></div><select id="permission-mode" aria-label="本机访问权限"><option value="auto" ${state.permissionMode === 'auto' ? 'selected' : ''}>智能适配 · ${esc(permissionModeLabel())}</option><option value="confirm" ${state.permissionMode === 'confirm' ? 'selected' : ''}>受控访问 · 每次操作确认</option><option value="full" ${state.permissionMode === 'full' ? 'selected' : ''}>完整访问 · 自动允许工具操作</option></select></div><p class="settings-help">当前模型：${esc(permissionModeLabel())}。切换后会重启本地 Agent 以应用权限。</p></div></section>
+      <section class="settings-section"><h2>常规</h2><div class="settings-card"><div class="settings-row"><div><strong>无项目任务文件夹</strong><p>在项目外启动的任务默认存储数据的位置。</p></div><div class="settings-row-actions"><span class="settings-value">${esc(effectiveWorkspace() || '尚未选择')}</span><button type="button" class="ghost" id="settings-cwd">更改</button></div></div><div class="settings-divider"></div><div class="settings-row"><div><strong>账户</strong><p>当前登录的 Anyu 账号。</p></div><span class="settings-value">${esc(state.user?.email || 'Anyu 用户')}</span></div></div></section>
+      <section class="settings-section settings-account-actions"><h2>账号操作</h2><div class="settings-card"><div class="settings-row"><div><strong>切换账号</strong><p>退出当前账号并返回登录页面。</p></div><button type="button" class="ghost" id="settings-logout">切换账号</button></div></div></section>`
+    const content = section === 'skills' ? coreSkillsMarkup() : section === 'plugins' ? pluginMarketMarkup() : generalMarkup
     return `<div class="settings-page-layout">
       <aside class="settings-sidebar">
         <button type="button" class="settings-back" id="settings-back"><span aria-hidden="true">←</span><span>返回应用</span></button>
-        <label class="settings-search"><span aria-hidden="true">⌕</span><input type="search" placeholder="搜索设置" aria-label="搜索设置"></label>
         <nav class="settings-nav" aria-label="设置分类">
-          <div class="settings-nav-heading">个人</div>
-          <button type="button" class="settings-nav-item active" aria-current="page"><span>⚙</span><span>常规</span></button>
-          <button type="button" class="settings-nav-item"><span>⇩</span><span>导入</span></button>
-          <button type="button" class="settings-nav-item"><span>☼</span><span>外观</span></button>
-          <button type="button" class="settings-nav-item"><span>♩</span><span>语音</span></button>
-          <button type="button" class="settings-nav-item"><span>◉</span><span>配置</span></button>
-          <button type="button" class="settings-nav-item"><span>◌</span><span>个性化</span></button>
-          <button type="button" class="settings-nav-item"><span>♙</span><span>宠物</span></button>
-          <button type="button" class="settings-nav-item"><span>⌨</span><span>键盘快捷键</span></button>
-          <button type="button" class="settings-nav-item"><span>◎</span><span>账户</span><span class="settings-nav-external">↗</span></button>
-          <div class="settings-nav-heading">集成</div>
-          <button type="button" class="settings-nav-item"><span>▷</span><span>电脑操控</span></button>
-          <button type="button" class="settings-nav-item"><span>◫</span><span>应用快照</span></button>
-          <button type="button" class="settings-nav-item"><span>◉</span><span>插件</span></button>
-          <button type="button" class="settings-nav-item"><span>▭</span><span>浏览器</span></button>
-          <div class="settings-nav-heading">编码</div>
-          <button type="button" class="settings-nav-item"><span>⚓</span><span>钩子</span></button>
-          <button type="button" class="settings-nav-item"><span>◎</span><span>连接</span></button>
-          <button type="button" class="settings-nav-item"><span>⑂</span><span>Git</span></button>
-          <button type="button" class="settings-nav-item"><span>▣</span><span>环境</span></button>
-          <button type="button" class="settings-nav-item"><span>↗</span><span>Worktrees</span></button>
+          <button type="button" class="settings-nav-item ${section === 'general' ? 'active' : ''}" data-settings-section="general" ${section === 'general' ? 'aria-current="page"' : ''}><span>⚙</span><span>常规</span></button>
+          <button type="button" class="settings-nav-item ${section === 'skills' ? 'active' : ''}" data-settings-section="skills" ${section === 'skills' ? 'aria-current="page"' : ''}><span>✦</span><span>核心技能</span></button>
+          <button type="button" class="settings-nav-item ${section === 'plugins' ? 'active' : ''}" data-settings-section="plugins" ${section === 'plugins' ? 'aria-current="page"' : ''}><span>◈</span><span>插件市场</span></button>
         </nav>
       </aside>
       <main class="settings-page-main">
         <header class="settings-page-header">
-          <div><div class="modal-kicker">AnYuAgent</div><h1>常规</h1></div>
+          <div><div class="modal-kicker">AnYuAgent</div><h1>${pageTitle}</h1></div>
           <div class="settings-window-controls" aria-label="窗口控制"><button type="button" data-window-action="minimize" title="最小化">−</button><button type="button" data-window-action="maximize" title="最大化">□</button><button type="button" data-window-action="close" title="关闭">×</button></div>
         </header>
-        <div class="settings-page-content">
-          <section class="settings-section"><h2>权限</h2><div class="settings-card"><div class="settings-row"><div><strong>本机访问权限</strong><p>智能适配会根据当前模型的工具能力选择访问级别。</p></div><select id="permission-mode" aria-label="本机访问权限"><option value="auto" ${state.permissionMode === 'auto' ? 'selected' : ''}>智能适配 · ${esc(permissionModeLabel())}</option><option value="confirm" ${state.permissionMode === 'confirm' ? 'selected' : ''}>受控访问 · 每次操作确认</option><option value="full" ${state.permissionMode === 'full' ? 'selected' : ''}>完整访问 · 自动允许工具操作</option></select></div><p class="settings-help">当前模型：${esc(permissionModeLabel())}。切换后会重启本地 Agent 以应用权限。</p></div></section>
-          <section class="settings-section"><h2>常规</h2><div class="settings-card"><div class="settings-row"><div><strong>无项目任务文件夹</strong><p>在项目外启动的任务默认存储数据的位置。</p></div><div class="settings-row-actions"><span class="settings-value">${esc(effectiveWorkspace() || '尚未选择')}</span><button type="button" class="ghost" id="settings-cwd">更改</button></div></div><div class="settings-divider"></div><div class="settings-row"><div><strong>账户</strong><p>当前登录的 Anyu 账号。</p></div><span class="settings-value">${esc(state.user?.email || 'Anyu 用户')}</span></div></div></section>
-          <section class="settings-section"><div class="setting-label-row"><div><h2>技能与插件</h2><p class="settings-section-copy">管理本地插件和核心媒体技能。</p></div></div><div class="plugin-entry-block"><div class="setting-label-row"><div><label>插件市场</label><p>安装社区插件，或导入你自己制作的 Skill。</p></div><button type="button" class="primary plugin-entry-button" id="open-plugin-market">打开插件市场</button></div><div class="plugin-entry-summary"><span><strong>${pluginList().length}</strong> 个插件已安装</span><span>图片 / 视频为核心内置 Skill</span></div></div><div class="setting-block skill-market-block"><div class="setting-label-row"><label>核心技能</label><button type="button" class="ghost" id="skills-refresh">同步目录</button></div>${skillsMarketMarkup()}</div></section>
-          <section class="settings-section settings-account-actions"><h2>账号操作</h2><div class="settings-card"><div class="settings-row"><div><strong>切换账号</strong><p>退出当前账号并返回登录页面。</p></div><button type="button" class="ghost" id="settings-logout">切换账号</button></div></div></section>
-        </div>
+        <div class="settings-page-content">${content}</div>
       </main>
     </div>`
   }
@@ -1637,16 +1724,23 @@
     return [...groups.entries()].map(([group, models]) => `<optgroup label="${esc(group)}">${models.map((item) => `<option value="${esc(item.id)}" ${item.id === state.model ? 'selected' : ''}>${esc(item.name || item.id)}</option>`).join('')}</optgroup>`).join('')
   }
 
+  function routePickerMarkup(controlsBusy, keyLabel) {
+    const disabled = controlsBusy ? 'disabled' : ''
+    const autoOption = `<button class="key-option ${state.accessMode === 'auto' ? 'selected' : ''}" data-route-mode="auto" ${disabled}><span class="dot"></span><span class="key-option-label">自动分组</span><span class="key-option-status">推荐</span></button>`
+    const keyOptions = state.keys.map((item) => `<button class="key-option ${state.accessMode === 'key' && Number(item.id) === state.selectedKey ? 'selected' : ''}" data-route-mode="key" data-key="${esc(item.id)}" ${disabled}><span class="dot ${item.status && item.status !== 'active' ? 'off' : ''}"></span><span class="key-option-label">${esc(item.name || item.title || `密钥 ${item.id}`)}</span><span class="key-option-status">${item.status === 'active' || !item.status ? '可用' : esc(item.status)}</span></button>`).join('')
+    return `<button class="picker-button" id="key-picker" title="选择自动分组或我的密钥" ${disabled}><span class="picker-icon">⌁</span><span class="picker-text">${esc(keyLabel)}</span><span class="picker-chevron">⌄</span></button>${state.keyMenuOpen ? `<div class="key-menu"><div class="menu-caption">对话路由 <span>${state.keys.length + 1}</span></div>${autoOption}${keyOptions}</div>` : ''}`
+  }
+
   function renderApp() {
     if (state.settingsOpen) {
-      root.innerHTML = `${settingsMarkup()}${state.pluginMarketOpen ? pluginMarketMarkup() : ''}${permissionHtml()}`
+      root.innerHTML = `${settingsMarkup()}${permissionHtml()}`
       bindAppEvents()
       return
     }
     const restorePromptFocus = document.activeElement?.id === 'prompt'
     const restorePromptCursor = restorePromptFocus ? Number(document.activeElement?.selectionStart) : null
     const key = selectedKey()
-    const keyLabel = keyDisplayName(key)
+    const keyLabel = state.accessMode === 'auto' ? '自动分组' : keyDisplayName(key)
     const model = currentModel()
     const controlsBusy = state.switching || state.sessionSwitching || state.loading
     root.innerHTML = `<div class="app-shell"><aside class="sidebar"><div class="side-brand"><div class="brand-mark">A</div><div><strong>AnYuAgent</strong><span>独立 Pi Agent</span></div></div>
@@ -1658,7 +1752,8 @@
       <div class="conversation"><section class="chat-panel"><div class="chat-head"><div><div class="chat-title">${esc(state.sessions.find((item) => item.path === state.sessionPath)?.title || '新会话')}</div><div class="chat-subtitle">${esc(model ? `${protocolLabel(model)} · ${model.name || model.id}` : '选择密钥和模型后开始')}</div></div><button class="ghost" id="new-chat-main">＋ 新会话</button></div>
          <div class="messages" id="messages">${messagesMarkup()}</div>
            <div class="composer">${queuedTasksMarkup()}${attachmentsMarkup()}<div class="composer-tools"><div class="key-picker-wrap"><button class="picker-button" id="key-picker" title="选择 Anyu 密钥" ${controlsBusy ? 'disabled' : ''}><span class="picker-icon">⌁</span><span class="picker-text">${esc(keyLabel)}</span><span class="picker-chevron">⌄</span></button>${state.keyMenuOpen ? `<div class="key-menu"><div class="menu-caption">Anyu 密钥 <span>${state.keys.length}</span></div>${state.keys.map((item) => `<button class="key-option ${Number(item.id) === state.selectedKey ? 'selected' : ''}" data-key="${esc(item.id)}" ${controlsBusy ? 'disabled' : ''}><span class="dot ${item.status && item.status !== 'active' ? 'off' : ''}></span><span class="key-option-label">${esc(item.name || item.title || `密钥 ${item.id}`)}</span><span class="key-option-status">${item.status === 'active' || !item.status ? '可用' : esc(item.status)}</span></button>`).join('') || '<div class="muted menu-empty">暂无密钥</div>'}</div>` : ''}</div><select id="model" class="model-picker" title="选择模型" ${controlsBusy ? 'disabled' : ''}>${modelOptionsMarkup() || '<option value="">暂无模型</option>'}</select><button class="permission-button ${state.permissionMode === 'full' ? 'full' : ''}" id="permission-quick" title="本机访问权限"><span>${state.permissionMode === 'full' ? '⚡ 完整访问' : '✓ 受控访问'}</span></button><button class="ghost cwd-button" id="choose-cwd" title="工作目录">⌂ ${esc(state.cwd ? state.cwd.split('\\').pop() || state.cwd : '目录')}</button></div><div class="composer-box"><button class="attach-button" id="attach-trigger" title="添加文件或图片" ${state.sessionSwitching ? 'disabled' : ''}>＋</button><input id="file-input" type="file" multiple hidden><input id="image-input" type="file" accept="image/*" multiple hidden><div class="attachment-menu hidden" id="attachment-menu"><button id="attach-files"><span>▧</span><span><strong>文件</strong><small>添加代码和文档</small></span></div><div class="image-reference-menu ${state.imageMenuOpen ? '' : 'hidden'}" id="image-reference-menu">${imageReferenceMarkup()}</div>${skillMenuMarkup()}<textarea id="prompt" ${state.sessionSwitching ? 'disabled' : ''} placeholder="给 AnYuAgent 一条指令…（输入 @ 调用技能或引用图片，Enter 发送，Shift+Enter 换行）">${esc(state.composerText)}</textarea><select id="thinking-level" class="thinking-picker" title="${esc(`推理强度：${thinkingLevelLabel(state.thinkingLevel)}`)}" ${state.sessionSwitching ? 'disabled' : ''}>${state.thinkingLevels.map((level) => `<option value="${esc(level)}" ${level === state.thinkingLevel ? 'selected' : ''}>${esc(thinkingLevelLabel(level))}</option>`).join('')}</select><button class="send ${state.loading ? 'stop' : ''}" id="send" ${state.sessionSwitching ? 'disabled' : ''} title="${state.loading ? '停止当前任务' : '发送'}" aria-label="${state.loading ? '停止当前任务' : '发送'}">${state.loading ? '■' : '↑'}</button></div><div class="composer-meta"><span>Pi 可读取、编辑并执行工作目录中的文件</span><span id="busy">${state.retryNotice || (state.loading ? 'Agent 正在工作…' : state.queuedTasks.length ? `${state.queuedTasks.length} 项排队中` : '')}</span></div></div></section></div></main>${state.settingsOpen ? settingsMarkup() : ''}${permissionHtml()}${imagePreviewMarkup()}${sessionContextMenuMarkup()}</div>`
-     if (state.pluginMarketOpen) root.insertAdjacentHTML('beforeend', pluginMarketMarkup())
+    const routePicker = document.querySelector('.key-picker-wrap')
+    if (routePicker) routePicker.innerHTML = routePickerMarkup(controlsBusy, keyLabel)
      // Normalize labels after rendering as a final guard for legacy markup or
     // API payloads that put the credential itself in `name`.
     document.querySelectorAll('.key-option[data-key]').forEach((node) => {
@@ -1776,15 +1871,25 @@
       if (event.target.closest('button, select, input, textarea')) return
       window.anyu.windowAction('maximize')
     })
-    document.querySelector('#key-picker')?.addEventListener('click', () => { if (state.switching) return; state.keyMenuOpen = !state.keyMenuOpen; renderApp() })
-     document.querySelectorAll('[data-key]').forEach((node) => node.addEventListener('click', async () => {
+    document.querySelector('#key-picker')?.addEventListener('click', async () => {
+      if (state.switching) return
+      state.keyMenuOpen = !state.keyMenuOpen
+      if (!state.keyMenuOpen || state.keysLoaded) { renderApp(); return }
+      state.switching = true
+      renderApp()
+      try { await loadKeys() } catch (error) { state.error = error.message || '密钥列表加载失败，自动分组仍可正常使用' }
+      state.switching = false
+      renderApp()
+    })
+     document.querySelectorAll('[data-route-mode]').forEach((node) => node.addEventListener('click', async () => {
        if (state.switching) return
-       const keyId = Number(node.dataset.key)
-       if (!Number.isFinite(keyId) || !state.keys.some((key) => Number(key.id) === keyId)) { state.error = '该密钥编号无效，请刷新密钥列表'; state.keyMenuOpen = false; renderApp(); return }
+       const mode = node.dataset.routeMode === 'key' ? 'key' : 'auto'
+       const keyId = mode === 'key' ? Number(node.dataset.key) : state.selectedKey
+       if (mode === 'key' && (!Number.isFinite(keyId) || !state.keys.some((key) => Number(key.id) === keyId))) { state.error = '该密钥编号无效，请刷新密钥列表'; state.keyMenuOpen = false; renderApp(); return }
        state.switching = true
-       state.selectedKey = keyId; localStorage.setItem('anyu.selectedKey', String(state.selectedKey)); state.keyMenuOpen = false; state.error = ''; state.catalog = []; state.model = ''
+       state.accessMode = mode; state.selectedKey = keyId; localStorage.setItem('anyu.accessMode', mode); localStorage.setItem('anyu.selectedKey', String(state.selectedKey || '')); state.keyMenuOpen = false; state.error = ''; state.catalog = []; state.model = ''
        renderApp()
-       try { await loadSkillGroups(); state.catalog = await loadCatalogForKey(state.selectedKey); ensureSkillSelection(); chooseModel(); await startAgent(state.sessionPath) } catch (error) { state.catalog = []; state.model = ''; state.error = error.message || '切换密钥失败' }
+       try { await loadRouteData(); ensureSkillSelection(); chooseModel(); await startAgent(state.sessionPath) } catch (error) { state.catalog = []; state.model = ''; state.error = error.message || '切换对话路由失败' }
       state.switching = false
       renderApp()
     }))
@@ -1800,7 +1905,7 @@
         const nextPermissionMode = state.permissionMode === 'auto' ? modelPermissionMode() : state.permissionMode
         // 自适配模型跨越权限档位时重启 Pi，使 --approve 与当前模型保持一致。
         if (state.permissionMode === 'auto' && previousPermissionMode !== nextPermissionMode) await startAgent(state.sessionPath)
-        else await window.anyu.piCommand({ type: 'set_model', provider: currentModel()?.provider || providerForApi('openai-completions'), modelId: state.model })
+        else await window.anyu.piCommand({ type: 'set_model', provider: currentModel()?.provider || providerForApi('openai-completions'), modelId: currentModel()?.modelId || state.model })
         await syncThinkingLevels()
       } catch (error) { state.error = error.message || '切换模型失败' }
       state.switching = false
@@ -1813,10 +1918,9 @@
       try { await window.anyu.piCommand({ type: 'set_thinking_level', level }) } catch (error) { state.error = error.message || '推理强度切换失败' }
       renderApp()
     })
-    document.querySelector('#permission-quick')?.addEventListener('click', () => { state.settingsOpen = true; renderApp() })
-     const switchAccount = async () => { state.error = ''; state.sessionSwitchToken++; state.sessionSwitching = false; stopBalanceRefresh(); try { await window.anyu.piStop() } catch {}; try { await window.anyu.logout() } catch {}; state.user = null; state.keys = []; state.catalog = []; state.skillGroups = []; state.mediaMessages = {}; state.mediaActivity = {}; state.mediaBusyCount = 0; state.sessions = []; state.sessionPath = null; state.sessionCwd = null; state.messages = []; state.imageLibrary = []; state.attachments = []; state.composerText = ''; state.piState = null; state.loading = false; state.permission = null; state.settingsOpen = false; state.keyMenuOpen = false; state.imageMenuOpen = false; state.skillMenuOpen = false; state.twoFactor = null; state.streamingMessage = null; state.queuedTasks = []; state.queueMenuId = null; state.queueDraining = false; state.authChecking = false; render() }
+    document.querySelector('#permission-quick')?.addEventListener('click', () => { state.settingsOpen = true; state.settingsSection = 'general'; renderApp() })
     document.querySelector('#settings-logout')?.addEventListener('click', switchAccount)
-    document.querySelector('#settings-open')?.addEventListener('click', () => { state.settingsOpen = true; renderApp() })
+    document.querySelector('#settings-open')?.addEventListener('click', () => { state.settingsOpen = true; state.settingsSection = 'general'; renderApp() })
     document.querySelector('#update-app')?.addEventListener('click', async () => {
       if (['checking', 'downloading', 'installing'].includes(state.update.status)) return
       state.update = { ...state.update, status: 'checking', message: '', percent: 0 }
@@ -1836,18 +1940,23 @@
         scheduleAppRender()
       }
     })
-     const leaveSettings = () => { state.settingsOpen = false; state.pluginMarketOpen = false; state.pluginPublishOpen = false; renderApp() }
+     const leaveSettings = () => { state.settingsOpen = false; state.pluginPublishOpen = false; renderApp() }
      document.querySelector('#settings-back')?.addEventListener('click', leaveSettings)
      document.querySelector('#settings-close')?.addEventListener('click', leaveSettings)
      document.querySelector('#settings-done')?.addEventListener('click', leaveSettings)
-     document.querySelector('#open-plugin-market')?.addEventListener('click', async () => {
-       state.settingsOpen = true
-       state.pluginMarketOpen = true
-      state.pluginMarketTab = 'marketplace'
+    document.querySelectorAll('[data-settings-section]').forEach((node) => node.addEventListener('click', async () => {
+      const section = ['general', 'skills', 'plugins'].includes(node.dataset.settingsSection) ? node.dataset.settingsSection : 'general'
+      state.settingsSection = section
+      state.pluginPublishOpen = false
+      if (section === 'skills') state.skillsLoading = true
       renderApp()
-      await loadPluginMarket()
-    })
-    document.querySelector('#plugin-market-close')?.addEventListener('click', () => { state.pluginMarketOpen = false; renderApp() })
+      if (section === 'skills') {
+        await loadSkillGroups()
+        state.skillsLoading = false
+        renderApp()
+      }
+      else if (section === 'plugins') await loadPluginMarket()
+    }))
     document.querySelectorAll('[data-plugin-tab]').forEach((node) => node.addEventListener('click', () => {
       state.pluginMarketTab = node.dataset.pluginTab || 'marketplace'
       renderApp()
@@ -1874,7 +1983,7 @@
     document.querySelector('#skill-video-model')?.addEventListener('change', (event) => { state.skillConfigs.video.model = event.target.value; renderApp() })
      document.querySelector('#permission-mode')?.addEventListener('change', async (event) => { if (state.loading) { state.error = '当前任务完成后再切换权限'; renderApp(); return }; state.permissionMode = ['auto', 'confirm', 'full'].includes(event.target.value) ? event.target.value : 'auto'; localStorage.setItem('anyu.permissionMode', state.permissionMode); localStorage.setItem('anyu.permissionMode.userSelected', '1'); try { await startAgent(state.sessionPath) } catch (error) { state.error = error.message || '权限模式切换失败' }; renderApp() })
     document.querySelector('#settings-cwd')?.addEventListener('click', async () => { if (state.loading) { state.error = '当前任务完成后再切换工作目录'; renderApp(); return }; const directory = await window.anyu.chooseDirectory(); if (!directory) return; state.sessionCwd = null; state.cwd = directory; localStorage.setItem('anyu.cwd', directory); try { if (state.sessionPath && window.anyu.piMaterializeSession) await window.anyu.piMaterializeSession({ sessionPath: state.sessionPath, cwd: directory }); await startAgent(state.sessionPath) } catch (error) { state.error = error.message || '工作目录切换失败' }; renderApp() })
-    document.querySelector('#refresh')?.addEventListener('click', async () => { if (state.loading) { state.error = '当前任务完成后再刷新 Agent'; renderApp(); return }; state.error = ''; try { await loadKeys(); await loadSkillGroups(); state.catalog = await loadCatalogForKey(state.selectedKey); chooseModel(); ensureSkillSelection(); await startAgent(state.sessionPath) } catch (error) { state.error = error.message || '刷新失败' }; renderApp() })
+    document.querySelector('#refresh')?.addEventListener('click', async () => { if (state.loading) { state.error = '当前任务完成后再刷新 Agent'; renderApp(); return }; state.error = ''; try { await loadRouteData({ refreshPublicKeys: true }); chooseModel(); ensureSkillSelection(); await startAgent(state.sessionPath) } catch (error) { state.error = error.message || '刷新失败' }; renderApp() })
     document.querySelector('#choose-cwd')?.addEventListener('click', async () => { if (state.loading) { state.error = '当前任务完成后再切换工作目录'; renderApp(); return }; const directory = await window.anyu.chooseDirectory(); if (!directory) return; state.sessionCwd = null; state.cwd = directory; localStorage.setItem('anyu.cwd', directory); try { if (state.sessionPath && window.anyu.piMaterializeSession) await window.anyu.piMaterializeSession({ sessionPath: state.sessionPath, cwd: directory }); await startAgent(state.sessionPath) } catch (error) { state.error = error.message || '工作目录切换失败' }; renderApp() })
     document.querySelector('#new-chat')?.addEventListener('click', newConversation); document.querySelector('#new-chat-main')?.addEventListener('click', newConversation)
     document.querySelector('#attach-trigger')?.addEventListener('click', () => { document.querySelector('#attachment-menu')?.classList.toggle('hidden') })

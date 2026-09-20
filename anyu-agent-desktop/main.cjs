@@ -5,11 +5,19 @@ const path = require('path')
 const crypto = require('crypto')
 const { DEFAULT_MANIFEST_URL, compareVersions, artifactFromManifest } = require('./updater.cjs')
 const { PluginManager, MAX_PACKAGE_BYTES } = require('./plugin-manager.cjs')
+const { LocalGatewayBridge, managedProviderName, managedBaseUrl } = require('./gateway-bridge.cjs')
 
 const API_BASE = process.env.ANYU_API_BASE || 'https://x.ailzd.com/api/v1'
 const GATEWAY_BASE = API_BASE.replace(/\/api\/v1\/?$/i, '')
 const PI_PROVIDER = 'anyu-gateway'
 const UPDATE_MANIFEST_URL = process.env.ANYU_UPDATE_MANIFEST_URL || DEFAULT_MANIFEST_URL
+const USER_DATA_DIR = String(process.env.ANYU_USER_DATA_DIR || '').trim()
+// 本机联调可使用独立数据目录，未设置时保持 Electron 默认路径不变。
+if (USER_DATA_DIR) {
+  const resolvedUserDataDir = path.resolve(USER_DATA_DIR)
+  fs.mkdirSync(resolvedUserDataDir, { recursive: true })
+  app.setPath('userData', resolvedUserDataDir)
+}
 function providerForApi(api) {
   return api === 'anthropic-messages' ? `${PI_PROVIDER}-anthropic` : api === 'google-generative-ai' || api === 'google-vertex' ? `${PI_PROVIDER}-gemini` : `${PI_PROVIDER}-openai`
 }
@@ -59,6 +67,7 @@ function resolvePermissionMode(requested, model, provider = '') {
 }
 let mainWindow
 let auth = null
+let authRefreshPromise = null
 const keyCache = new Map()
 let piProcess = null
 let piBuffer = ''
@@ -68,6 +77,11 @@ let piStartLock = Promise.resolve()
 let updateInProgress = false
 let recoveredUpdateState = null
 let pluginManager = null
+const gatewayBridge = new LocalGatewayBridge({
+  gatewayBase: GATEWAY_BASE,
+  getAccessToken: () => auth?.accessToken || '',
+  refreshAccessToken: () => refreshAuthAccessToken()
+})
 
 function timestampValue(value) {
   const number = Number(value)
@@ -314,11 +328,12 @@ async function downloadAndInstallUpdate() {
 function authFile() { return path.join(app.getPath('userData'), 'anyu-auth.json') }
 function protect(value) {
   if (!value) return ''
-  return safeStorage.isEncryptionAvailable() ? safeStorage.encryptString(value).toString('base64') : value
+  // 系统安全存储不可用时仅保留当前进程会话，禁止把令牌明文写入磁盘。
+  return safeStorage.isEncryptionAvailable() ? safeStorage.encryptString(value).toString('base64') : ''
 }
 function unprotect(value) {
   if (!value) return ''
-  if (!safeStorage.isEncryptionAvailable()) return value
+  if (!safeStorage.isEncryptionAvailable()) return ''
   try { return safeStorage.decryptString(Buffer.from(value, 'base64')) } catch { return '' }
 }
 function loadAuth() {
@@ -335,8 +350,20 @@ function saveAuth(data) {
   fs.writeFileSync(authFile(), JSON.stringify(out), { mode: 0o600 })
 }
 function clearAuth() {
-  auth = null
-  try { fs.rmSync(authFile(), { force: true }) } catch {}
+	auth = null
+	try { fs.rmSync(authFile(), { force: true }) } catch {}
+}
+
+async function refreshAuthAccessToken() {
+  if (!auth?.refreshToken) return ''
+  if (authRefreshPromise) return authRefreshPromise
+  authRefreshPromise = (async () => {
+    const refreshed = await requestApi('/auth/refresh', { method: 'POST', body: { refresh_token: auth.refreshToken } }, false)
+    if (!refreshed?.access_token) throw new Error('登录状态刷新失败')
+    saveAuth({ ...auth, accessToken: refreshed.access_token, refreshToken: refreshed.refresh_token || auth.refreshToken })
+    return auth.accessToken
+  })()
+  try { return await authRefreshPromise } finally { authRefreshPromise = null }
 }
 
 function piAgentDir() { return path.join(app.getPath('userData'), 'pi') }
@@ -556,20 +583,23 @@ function rememberKeys(payload) {
   for (const item of items) if (item?.id != null) keyCache.set(String(item.id), item)
 }
 
-function modelConfig(models) {
+function modelConfig(models, runtime = {}) {
   const grouped = new Map()
   for (const model of (Array.isArray(models) ? models : [])) {
-    const id = String(model?.id || model?.name || '').replace(/^models\//, '').trim()
+    const id = String(model?.modelId || model?.model_id || model?.id || model?.name || '').replace(/^models\//, '').trim()
     if (!id) continue
     const lower = `${id} ${model?.api || ''}`.toLowerCase()
     const api = canonicalApi(model?.api, lower.includes('gemini') || lower.includes('google') ? 'google-generative-ai' : lower.includes('claude') || lower.includes('anthropic') ? 'anthropic-messages' : 'openai-completions')
-    const provider = providerForApi(api)
-    if (!grouped.has(provider)) grouped.set(provider, { api, models: [] })
+    const groupId = Number(model?.groupId || model?.group_id || 0)
+    const managed = runtime.managed === true && Number.isSafeInteger(groupId) && groupId > 0
+    const provider = managed ? managedProviderName(api, groupId) : providerForApi(api)
+    const baseUrl = managed ? managedBaseUrl(runtime.bridgeOrigin, api, groupId) : baseUrlForApi(api)
+    if (!grouped.has(provider)) grouped.set(provider, { api, baseUrl, models: [] })
     grouped.get(provider).models.push({
       id,
       name: String(model?.name || model?.display_name || id),
       api,
-      baseUrl: baseUrlForApi(api),
+      baseUrl,
       reasoning: Boolean(model?.reasoning || model?.supports_reasoning || model?.supportsReasoning || model?.thinkingLevelMap || model?.thinking_level_map),
       thinkingLevelMap: model?.thinkingLevelMap || model?.thinking_level_map || model?.reasoning_effort_map || model?.reasoningEffortMap,
       compat: model?.compat,
@@ -583,7 +613,7 @@ function modelConfig(models) {
     })
   }
   const providers = {}
-  for (const [provider, group] of grouped) providers[provider] = { name: `Anyu ${group.api}`, baseUrl: baseUrlForApi(group.api), api: group.api, apiKey: '$ANYU_API_KEY', authHeader: true, models: group.models }
+  for (const [provider, group] of grouped) providers[provider] = { name: `Anyu ${group.api}`, baseUrl: group.baseUrl, api: group.api, apiKey: '$ANYU_API_KEY', authHeader: true, models: group.models }
   return { providers }
 }
 
@@ -615,21 +645,23 @@ function settlePiRequest(id, error, value) {
 
 async function stopPi() {
   const child = piProcess
-  if (!child) return
-  piProcess = null
-  for (const id of [...piPending.keys()]) settlePiRequest(id, new Error('Pi process stopped'))
-  try { child.stdin?.end() } catch {}
-  try { child.kill() } catch {}
-  const waitForExit = () => new Promise((resolve) => {
-    if (child.exitCode !== null || child.signalCode) return resolve()
-    const timer = setTimeout(resolve, 1200)
-    child.once('exit', () => { clearTimeout(timer); resolve() })
-  })
-  await waitForExit()
-  if (child.exitCode === null && !child.signalCode) {
-    try { child.kill('SIGKILL') } catch {}
+  if (child) {
+    piProcess = null
+    for (const id of [...piPending.keys()]) settlePiRequest(id, new Error('Pi process stopped'))
+    try { child.stdin?.end() } catch {}
+    try { child.kill() } catch {}
+    const waitForExit = () => new Promise((resolve) => {
+      if (child.exitCode !== null || child.signalCode) return resolve()
+      const timer = setTimeout(resolve, 1200)
+      child.once('exit', () => { clearTimeout(timer); resolve() })
+    })
     await waitForExit()
+    if (child.exitCode === null && !child.signalCode) {
+      try { child.kill('SIGKILL') } catch {}
+      await waitForExit()
+    }
   }
+  await gatewayBridge.stop()
 }
 
 function sendPi(command) {
@@ -654,20 +686,33 @@ function sendPi(command) {
 }
 
 async function startPiUnsafe(options = {}) {
-  const record = keyCache.get(String(options.keyId))
-  const apiKey = keyValue(record)
-  if (!apiKey) throw new Error('所选密钥没有可用的 API Key，请刷新密钥列表后重试')
+  const managed = options.accessMode !== 'key'
   const executable = piExecutable()
   if (!fs.existsSync(executable)) throw new Error(`Pi 运行时不存在：${executable}`)
   await stopPi()
+  let credential = ''
+  let bridgeOrigin = ''
+  if (managed) {
+    if (!auth?.accessToken) throw new Error('登录状态已失效，请重新登录')
+    const bridge = await gatewayBridge.start()
+    credential = bridge.token
+    bridgeOrigin = bridge.origin
+  } else {
+    const record = keyCache.get(String(options.keyId))
+    credential = keyValue(record)
+    if (!credential) throw new Error('所选密钥没有可用的 API Key，请刷新密钥列表后重试')
+  }
   const agentDir = piAgentDir(); const sessionDir = piSessionDir()
   fs.mkdirSync(sessionDir, { recursive: true })
   fs.mkdirSync(agentDir, { recursive: true })
-  fs.writeFileSync(path.join(agentDir, 'models.json'), JSON.stringify(modelConfig(options.models), null, 2), { mode: 0o600 })
+  fs.writeFileSync(path.join(agentDir, 'models.json'), JSON.stringify(modelConfig(options.models, { managed, bridgeOrigin }), null, 2), { mode: 0o600 })
   const selectedModel = (Array.isArray(options.models) ? options.models : []).find((model) => String(model?.id || model?.name || '') === String(options.model || '')) || options.models?.[0] || {}
-  const provider = String(options.provider || providerForApi(selectedModel.api || 'openai-completions'))
+  const selectedModelId = String(selectedModel?.modelId || selectedModel?.model_id || selectedModel?.id || 'gpt-4o-mini').replace(/^models\//, '').trim()
+  const selectedGroupId = Number(selectedModel?.groupId || selectedModel?.group_id || 0)
+  if (managed && (!Number.isSafeInteger(selectedGroupId) || selectedGroupId <= 0)) throw new Error('自动分组模型缺少有效分组，请刷新模型目录')
+  const provider = managed ? managedProviderName(selectedModel.api || 'openai-completions', selectedGroupId) : String(options.provider || providerForApi(selectedModel.api || 'openai-completions'))
   const resolvedPermissionMode = resolvePermissionMode(options.permissionMode, selectedModel, provider)
-  const args = ['--mode', 'rpc', '--provider', provider, '--model', String(options.model || selectedModel.id || 'gpt-4o-mini'), '--session-dir', sessionDir]
+  const args = ['--mode', 'rpc', '--provider', provider, '--model', selectedModelId, '--session-dir', sessionDir]
   if (resolvedPermissionMode === 'full') args.push('--approve')
   if (options.sessionPath && isInside(sessionDir, options.sessionPath)) args.push('--session', path.resolve(options.sessionPath))
   const sessionCwd = options.sessionPath ? sessionWorkingDirectory(options.sessionPath) : ''
@@ -679,7 +724,7 @@ async function startPiUnsafe(options = {}) {
   let startupStderr = ''
   piProcess = spawn(executable, args, {
     cwd,
-    env: { ...process.env, PI_CODING_AGENT_DIR: agentDir, PI_CODING_AGENT_SESSION_DIR: sessionDir, ANYU_API_KEY: apiKey, PI_SKIP_VERSION_CHECK: '1' },
+    env: { ...process.env, PI_CODING_AGENT_DIR: agentDir, PI_CODING_AGENT_SESSION_DIR: sessionDir, ANYU_API_KEY: credential, PI_SKIP_VERSION_CHECK: '1' },
     stdio: ['pipe', 'pipe', 'pipe'],
     windowsHide: true
   })
@@ -716,7 +761,10 @@ async function startPiUnsafe(options = {}) {
 }
 
 async function startPi(options = {}) {
-  const run = piStartLock.then(() => startPiUnsafe(options), () => startPiUnsafe(options))
+  const execute = async () => {
+    try { return await startPiUnsafe(options) } catch (error) { await stopPi(); throw error }
+  }
+  const run = piStartLock.then(execute, execute)
   piStartLock = run.catch(() => {})
   return run
 }
@@ -793,9 +841,8 @@ async function requestApi(route, options = {}, retry = true) {
   const text = await response.text()
   try { payload = text ? JSON.parse(text) : null } catch { payload = { message: text } }
   if (response.status === 401 && retry && auth?.refreshToken && !route.includes('/auth/')) {
-    const refreshed = await requestApi('/auth/refresh', { method: 'POST', body: { refresh_token: auth.refreshToken } }, false).catch(() => null)
-    if (refreshed?.access_token) {
-      saveAuth({ ...auth, accessToken: refreshed.access_token, refreshToken: refreshed.refresh_token || auth.refreshToken })
+    const refreshed = await refreshAuthAccessToken().catch(() => '')
+    if (refreshed) {
       return requestApi(route, options, false)
     }
     clearAuth()
@@ -936,6 +983,29 @@ async function login2fa(body) {
   return data
 }
 
+// 桌面端复用网站的邮箱注册、验证码和密码找回接口。
+async function register(body) {
+  const data = await requestApi('/auth/register', { method: 'POST', body }, false)
+  if (data?.access_token) saveAuth({ accessToken: data.access_token, refreshToken: data.refresh_token || '', user: data.user || null })
+  return data
+}
+
+async function sendVerifyCode(body) {
+  return requestApi('/auth/send-verify-code', { method: 'POST', body }, false)
+}
+
+async function forgotPassword(body) {
+  return requestApi('/auth/forgot-password', { method: 'POST', body }, false)
+}
+
+async function resetPassword(body) {
+  return requestApi('/auth/reset-password', { method: 'POST', body }, false)
+}
+
+async function publicSettings() {
+  return requestApi('/settings/public', {}, false)
+}
+
 function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1440, height: 920, minWidth: 1050, minHeight: 700,
@@ -966,17 +1036,33 @@ app.whenReady().then(() => {
      callback({ responseHeaders: { ...details.responseHeaders, 'Content-Security-Policy': ["default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self' data: blob:; media-src 'self' data: blob:; connect-src 'self'"] } })
   })
   ipcMain.handle('auth:state', async () => {
-    if (!auth?.accessToken) return { authenticated: false }
+    if (!auth?.accessToken && !auth?.refreshToken) return { authenticated: false }
     try {
-      const user = await requestApi('/auth/me')
+      let user
+      try {
+        user = await requestApi('/auth/me')
+      } catch (error) {
+        // 应用长时间未打开时 access token 可能过期，先轮换会话再恢复登录态。
+        if (!auth?.refreshToken || error?.status !== 401) throw error
+        const refreshed = await requestApi('/auth/refresh', { method: 'POST', body: { refresh_token: auth.refreshToken } }, false)
+        if (!refreshed?.access_token) throw error
+        saveAuth({ ...auth, accessToken: refreshed.access_token, refreshToken: refreshed.refresh_token || auth.refreshToken })
+        user = await requestApi('/auth/me', {}, false)
+      }
       saveAuth({ ...auth, user: user.user || user })
       return { authenticated: true, user: auth.user }
     } catch { clearAuth(); return { authenticated: false } }
   })
   ipcMain.handle('auth:login', (_, body) => login(body))
   ipcMain.handle('auth:login2fa', (_, body) => login2fa(body))
+  ipcMain.handle('auth:register', (_, body) => register(body))
+  ipcMain.handle('auth:send-verify-code', (_, body) => sendVerifyCode(body))
+  ipcMain.handle('auth:forgot-password', (_, body) => forgotPassword(body))
+  ipcMain.handle('auth:reset-password', (_, body) => resetPassword(body))
+  ipcMain.handle('auth:public-settings', () => publicSettings())
   ipcMain.handle('auth:logout', async () => {
     try { if (auth?.refreshToken) await requestApi('/auth/logout', { method: 'POST', body: { refresh_token: auth.refreshToken } }) } catch {}
+    await stopPi()
     clearAuth(); return { ok: true }
   })
   ipcMain.handle('api:request', (_, route, options) => requestApi(route, options || {}))
@@ -1110,3 +1196,4 @@ app.whenReady().then(() => {
   app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow() })
 })
 app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit() })
+app.on('before-quit', () => { void stopPi() })

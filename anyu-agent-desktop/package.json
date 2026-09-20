@@ -1,18 +1,20 @@
 {
   "name": "anyu-agent-desktop",
-  "version": "1.0.23",
+  "version": "1.0.24",
   "description": "AnYuAgent standalone desktop workspace",
   "main": "main.cjs",
   "author": "AnYu AI",
   "license": "MIT",
   "dependencies": {
-    "archiver": "^7.0.1",
-    "unzipper": "^0.12.5"
+    "archiver": "7.0.1",
+    "unzipper": "0.12.5"
   },
   "scripts": {
     "start": "electron .",
     "dev": "electron .",
     "test:planner": "node tools/test-video-planner.cjs",
+    "test:gateway-bridge": "node tools/test-gateway-bridge.cjs",
+    "test:route-mode": "node tools/test-route-mode.cjs",
     "test:plugins": "node tools/test-plugin-manager.cjs",
     "test:timeline": "node tools/test-timeline.cjs",
     "test:updater": "node tools/test-updater.cjs",
