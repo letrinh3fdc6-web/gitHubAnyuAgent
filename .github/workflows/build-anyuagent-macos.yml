@@ -20,13 +20,11 @@ jobs:
       matrix:
         include:
           - arch: arm64
-            runner: macos-14
-            runtime_sha256: d8c88d3c8d08080651b692e3b4da8fa5bc7cc6c00ec877ca45dfb18ccab26e2e
-          - arch: x64
-            # macos-13 Intel runners are retired/indefinitely queued in the
-            # current GitHub-hosted pool. macos-15 provides the x64 image.
             runner: macos-15
-            runtime_sha256: 2ca6f1cfa205456349375ccdfa432c1e8bcdb63aa51ceddab7d4ea7d7fe33834
+            macho_arch: arm64
+          - arch: x64
+            runner: macos-15-intel
+            macho_arch: x86_64
     runs-on: ${{ matrix.runner }}
     steps:
       - name: Checkout
@@ -38,30 +36,42 @@ jobs:
           node-version: 22
           cache: npm
 
-      - name: Restore verified AnyuAgent macOS runtime
-        env:
-          RUNTIME_VERSION: v1.0.21
-          RUNTIME_SHA256: ${{ matrix.runtime_sha256 }}
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Install AnyuAgent workspace dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Restore pinned model catalog
         run: |
           set -euo pipefail
-          runtime_zip="${RUNNER_TEMP}/AnYuAgent-${RUNTIME_VERSION}-${{ matrix.arch }}.zip"
-          curl --fail --location --retry 3 \
-            "https://github.com/${GITHUB_REPOSITORY}/releases/download/${RUNTIME_VERSION}/AnYuAgent-${RUNTIME_VERSION#v}-${{ matrix.arch }}.zip" \
-            --output "${runtime_zip}"
-          echo "${RUNTIME_SHA256}  ${runtime_zip}" | shasum --algorithm 256 --check
-          runtime_root="${RUNNER_TEMP}/anyu-runtime"
-          runtime_common="${RUNNER_TEMP}/anyu-runtime-common"
-          mkdir -p "${runtime_common}"
-          cp -R anyu-agent-desktop/pi-runtime/assets "${runtime_common}/assets"
-          cp anyu-agent-desktop/pi-runtime/photon_rs_bg.wasm "${runtime_common}/photon_rs_bg.wasm"
-          rm -rf "${runtime_root}" anyu-agent-desktop/pi-runtime
-          mkdir -p "${runtime_root}" anyu-agent-desktop/pi-runtime
-          unzip -q "${runtime_zip}" 'AnYuAgent.app/Contents/Resources/pi-runtime/*' -d "${runtime_root}"
-          cp -R "${runtime_root}/AnYuAgent.app/Contents/Resources/pi-runtime/." anyu-agent-desktop/pi-runtime/
-          cp -R "${runtime_common}/." anyu-agent-desktop/pi-runtime/
+          ai_version="$(node -p "require('./packages/ai/package.json').version")"
+          ai_archive="$(npm pack --silent --ignore-scripts --pack-destination "${RUNNER_TEMP}" "@earendil-works/pi-ai@${ai_version}")"
+          catalog_root="${RUNNER_TEMP}/anyu-model-catalog"
+          mkdir -p "${catalog_root}" packages/ai/src/providers/data
+          tar -xzf "${RUNNER_TEMP}/${ai_archive}" -C "${catalog_root}" package/dist/providers/data
+          cp -R "${catalog_root}/package/dist/providers/data/." packages/ai/src/providers/data/
+
+      - name: Build native AnyuAgent runtime
+        run: |
+          set -euo pipefail
+          npm --prefix packages/tui run build:native:darwin
+          npm --prefix packages/tui run build
+          npm --prefix packages/telemetry run build
+          npm --prefix packages/ai run build:offline
+          npm --prefix packages/agent run build
+          npm --prefix packages/protocol run build
+          npm --prefix packages/client run build
+          npm --prefix packages/coding-agent run build
+          bun build --compile --no-compile-autoload-bunfig \
+            ./packages/coding-agent/src/bun/cli.ts \
+            ./packages/coding-agent/src/utils/image-resize-worker.ts \
+            --outfile packages/coding-agent/dist/pi
+          npm --prefix packages/coding-agent run copy-binary-assets
+          cp packages/coding-agent/dist/pi anyu-agent-desktop/pi-runtime/pi
+          rm -f anyu-agent-desktop/pi-runtime/pi.exe
           chmod +x anyu-agent-desktop/pi-runtime/pi
           test -s anyu-agent-desktop/pi-runtime/pi
-          file anyu-agent-desktop/pi-runtime/pi
 
       - name: Install desktop dependencies
         working-directory: anyu-agent-desktop
@@ -70,6 +80,17 @@ jobs:
       - name: Build unsigned macOS package
         working-directory: anyu-agent-desktop
         run: npm run dist:mac:${{ matrix.arch }}
+
+      - name: Verify packaged architectures
+        env:
+          EXPECTED_ARCH: ${{ matrix.macho_arch }}
+        run: |
+          set -euo pipefail
+          app_binary="$(find anyu-agent-desktop/dist -type f -path '*/AnYuAgent.app/Contents/MacOS/AnYuAgent' -print -quit)"
+          runtime_binary="$(find anyu-agent-desktop/dist -type f -path '*/AnYuAgent.app/Contents/Resources/pi-runtime/pi' -print -quit)"
+          test -n "${app_binary}" && test -n "${runtime_binary}"
+          file "${app_binary}" "${runtime_binary}" | tee "${RUNNER_TEMP}/anyu-architectures.txt"
+          test "$(grep -c "${EXPECTED_ARCH}" "${RUNNER_TEMP}/anyu-architectures.txt")" -eq 2
 
       - name: Upload macOS artifacts
         uses: actions/upload-artifact@v4
