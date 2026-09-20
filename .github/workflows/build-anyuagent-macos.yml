@@ -21,10 +21,12 @@ jobs:
         include:
           - arch: arm64
             runner: macos-14
+            runtime_sha256: d8c88d3c8d08080651b692e3b4da8fa5bc7cc6c00ec877ca45dfb18ccab26e2e
           - arch: x64
             # macos-13 Intel runners are retired/indefinitely queued in the
             # current GitHub-hosted pool. macos-15 provides the x64 image.
             runner: macos-15
+            runtime_sha256: 2ca6f1cfa205456349375ccdfa432c1e8bcdb63aa51ceddab7d4ea7d7fe33834
     runs-on: ${{ matrix.runner }}
     steps:
       - name: Checkout
@@ -36,21 +38,30 @@ jobs:
           node-version: 22
           cache: npm
 
-      - name: Set up Bun
-        uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: latest
-
-      - name: Install AnyuAgent workspace dependencies
-        run: npm ci --no-audit --no-fund
-
-      - name: Build AnyuAgent macOS runtime
+      - name: Restore verified AnyuAgent macOS runtime
+        env:
+          RUNTIME_VERSION: v1.0.21
+          RUNTIME_SHA256: ${{ matrix.runtime_sha256 }}
         run: |
-          npm --prefix packages/tui run build:native:darwin
-          npm --prefix packages/coding-agent run build:binary
-          mkdir -p anyu-agent-desktop/pi-runtime
-          cp packages/coding-agent/dist/pi anyu-agent-desktop/pi-runtime/pi
+          set -euo pipefail
+          runtime_zip="${RUNNER_TEMP}/AnYuAgent-${RUNTIME_VERSION}-${{ matrix.arch }}.zip"
+          curl --fail --location --retry 3 \
+            "https://github.com/${GITHUB_REPOSITORY}/releases/download/${RUNTIME_VERSION}/AnYuAgent-${RUNTIME_VERSION#v}-${{ matrix.arch }}.zip" \
+            --output "${runtime_zip}"
+          echo "${RUNTIME_SHA256}  ${runtime_zip}" | shasum --algorithm 256 --check
+          runtime_root="${RUNNER_TEMP}/anyu-runtime"
+          runtime_common="${RUNNER_TEMP}/anyu-runtime-common"
+          mkdir -p "${runtime_common}"
+          cp -R anyu-agent-desktop/pi-runtime/assets "${runtime_common}/assets"
+          cp anyu-agent-desktop/pi-runtime/photon_rs_bg.wasm "${runtime_common}/photon_rs_bg.wasm"
+          rm -rf "${runtime_root}" anyu-agent-desktop/pi-runtime
+          mkdir -p "${runtime_root}" anyu-agent-desktop/pi-runtime
+          unzip -q "${runtime_zip}" 'AnYuAgent.app/Contents/Resources/pi-runtime/*' -d "${runtime_root}"
+          cp -R "${runtime_root}/AnYuAgent.app/Contents/Resources/pi-runtime/." anyu-agent-desktop/pi-runtime/
+          cp -R "${runtime_common}/." anyu-agent-desktop/pi-runtime/
           chmod +x anyu-agent-desktop/pi-runtime/pi
+          test -s anyu-agent-desktop/pi-runtime/pi
+          file anyu-agent-desktop/pi-runtime/pi
 
       - name: Install desktop dependencies
         working-directory: anyu-agent-desktop
