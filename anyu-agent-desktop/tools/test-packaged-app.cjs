@@ -6,18 +6,22 @@ const { _electron } = require(process.env.ANYU_PLAYWRIGHT_MODULE || 'C:/Users/Ad
 async function main() {
   const root = process.env.ANYU_SMOKE_ROOT || 'E:/TokenRouter-builds/anyuagent-1.0.60-20261019'
   const output = process.env.ANYU_SMOKE_OUTPUT || __dirname
-  const report = { version: '1.0.60', errors: [], checks: [] }
+  const report = { version: '1.0.60', errors: [], graphicsWarnings: [], checks: [] }
   const env = { ...process.env, ANYU_USER_DATA_DIR: path.join(root, 'smoke-profile'), ANYU_DISABLE_GPU: '0' }
   delete env.ELECTRON_RUN_AS_NODE
   const electron = await _electron.launch({
     executablePath: process.env.ANYU_SMOKE_EXECUTABLE || path.join(root, 'artifacts/win-unpacked/AnyuAgent.exe'),
-    args: ['--use-angle=swiftshader', '--enable-unsafe-swiftshader'],
+    args: process.platform === 'win32' ? ['--use-angle=swiftshader', '--enable-unsafe-swiftshader'] : [],
     env,
     timeout: 60000,
   })
   try {
     const page = await electron.firstWindow()
-    page.on('pageerror', error => report.errors.push(error.message))
+    page.on('pageerror', error => {
+      if (process.platform === 'darwin' && process.env.CI && error.message === 'Error creating WebGL context.') {
+        report.graphicsWarnings.push('The hosted macOS runner cannot render the decorative WebGL scene.')
+      } else report.errors.push(error.message)
+    })
     await page.waitForURL('anyu-app://desktop/login**', { timeout: 60000 })
     await page.locator('input[type="password"]').waitFor({ timeout: 60000 })
     const info = await page.evaluate(async () => ({
