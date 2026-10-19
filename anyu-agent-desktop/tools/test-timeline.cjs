@@ -4,7 +4,9 @@ const source = fs.readFileSync(require.resolve('../renderer/app.js'), 'utf8')
 const start = source.indexOf('  function timestampValue(')
 const end = source.indexOf('  async function refreshMessages(')
 if (start < 0 || end < 0) throw new Error('timeline functions not found')
-const context = {}
+// 切片范围里包含思考强度相关的定义，它们依赖模板库；
+// 真实页面由 index.html 先加载 thinking-presets.js，这里等价地在沙箱里提供。
+const context = { thinkingPresets: require('../thinking-presets.js') }
 vm.runInNewContext(`const state = { mediaActivity: {} }; ${source.slice(start, end)}; this.orderTimeline = orderTimeline; this.timelineMessagesUnique = timelineMessagesUnique; this.beginMediaActivity = beginMediaActivity; this.moveMediaActivity = moveMediaActivity; this.endMediaActivity = endMediaActivity; this.mediaActivityForSession = mediaActivityForSession; this.timestampValue = timestampValue;`, context)
 if (context.timestampValue(1710000000) !== 1710000000000) throw new Error('Unix seconds timestamp normalization failed')
 if (context.timestampValue('') !== 0) throw new Error('empty timestamp should remain unset')
@@ -17,6 +19,11 @@ const actual = context.orderTimeline([
 ]).map((message) => message.id)
 const expected = ['image-request', 'image-result', 'hello-assistant', 'hello-request']
 if (actual.join(',') !== expected.join(',')) throw new Error(`timeline order expected ${expected.join(',')}, got ${actual.join(',')}`)
+const liveMessage = { role: 'assistant', content: '', createdAt: 4000 }
+const orderedLive = context.orderTimeline([{ role: 'user', content: '开始', createdAt: 3000 }, liveMessage])
+if (orderedLive[1] !== liveMessage) throw new Error('timeline sort must preserve live message identity')
+liveMessage.content = '增量'
+if (orderedLive[1].content !== '增量') throw new Error('timeline must reflect live message updates')
 console.log('timeline ordering: passed')
 const mediaTask = { id: 'task-video-1', role: 'user', content: '@生视频 让小狗动起来', createdAt: 2000 }
 const restoredMediaTask = { role: 'user', content: mediaTask.content, createdAt: 2000 }

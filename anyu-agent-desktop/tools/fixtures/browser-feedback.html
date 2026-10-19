@@ -1,0 +1,11 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><title>测试商品</title></head><body>
+<h1>测试商品</h1><p>用户评价·2000+</p>
+<button id="reviews-button">查看全部评价</button><button id="questions-button">查看全部问答</button>
+<section id="reviews" hidden><p>默认排序</p><p>匿名用户</p><p>2026年9月29日已购：白色</p><p>包装完整，质量不错</p><p>商家回复：谢谢支持</p><p>已折叠2条评价</p></section>
+<section id="questions" hidden><p>问大家·1</p><p>问</p><p>可以清洗吗？</p><p>已购</p><p>可以手洗</p></section>
+<script>
+document.querySelector('#reviews-button').onclick = () => document.querySelector('#reviews').hidden = false;
+document.querySelector('#questions-button').onclick = () => document.querySelector('#questions').hidden = false;
+document.addEventListener('keydown', (event) => { if (event.key === 'Escape') document.querySelector('#reviews').hidden = true; });
+</script></body></html>

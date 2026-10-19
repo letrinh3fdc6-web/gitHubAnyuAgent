@@ -6,9 +6,15 @@ const DEFAULT_MAX_REQUEST_BYTES = 64 * 1024 * 1024
 const ANYU_AGENT_GATEWAY_PATH = '/api/v1/integrations/anyu-agent/gateway'
 const HOP_BY_HOP_HEADERS = new Set(['connection', 'keep-alive', 'proxy-authenticate', 'proxy-authorization', 'te', 'trailer', 'transfer-encoding', 'upgrade'])
 const FORWARDED_REQUEST_HEADERS = new Set([
-  'accept', 'accept-encoding', 'content-type', 'user-agent', 'anthropic-version', 'anthropic-beta',
+  'accept', 'accept-encoding', 'content-type', 'anthropic-version', 'anthropic-beta',
   'openai-beta', 'x-session-id', 'x-request-id'
 ])
+
+function createUpstreamAgent(protocol) {
+  return protocol === 'https:'
+    ? new https.Agent({ keepAlive: true, maxSockets: 8, maxFreeSockets: 2 })
+    : new http.Agent({ keepAlive: true, maxSockets: 8, maxFreeSockets: 2 })
+}
 
 function managedProviderName(api, groupId) {
   const protocol = api === 'anthropic-messages' ? 'anthropic' : api === 'google-generative-ai' || api === 'google-vertex' ? 'gemini' : 'openai'
@@ -49,6 +55,20 @@ function requestModel(route, body) {
 		const payload = body?.length ? JSON.parse(body.toString('utf8')) : null
 		return String(payload?.model || '').replace(/^models\//, '').trim().slice(0, 256)
 	} catch { return '' }
+}
+
+function normalizeManagedRequestBody(route, body) {
+  const path = String(route?.upstreamPath || '').split('?')[0]
+  const responses = path === '/v1/responses' || path === '/v1/responses/compact'
+  if (!responses && path !== '/v1/chat/completions') return body
+  let payload
+  try { payload = JSON.parse(body.toString('utf8')) } catch { return body }
+  const effort = responses ? payload?.reasoning?.effort : payload?.reasoning_effort
+  if (effort !== 'off') return body
+  // Pi 的关闭档是 off；本机 OpenAI 兼容网关接受的关闭值为 none。
+  if (responses) payload.reasoning.effort = 'none'
+  else payload.reasoning_effort = 'none'
+  return Buffer.from(JSON.stringify(payload))
 }
 
 function allowedGatewayPath(pathname) {
@@ -102,17 +122,26 @@ class LocalGatewayBridge {
   constructor(options = {}) {
     this.gatewayBase = new URL(options.gatewayBase)
     if (!['http:', 'https:'].includes(this.gatewayBase.protocol)) throw new Error('网关地址必须使用 HTTP 或 HTTPS')
+    // 与主进程的正式域名请求共用 DNS 兜底，避免系统 DNS 返回保留测试地址。
+    this.lookup = typeof options.lookup === 'function' ? options.lookup : undefined
+    this.userAgent = String(options.userAgent || 'AnyuAgent-Desktop')
     this.getAccessToken = options.getAccessToken
     this.refreshAccessToken = options.refreshAccessToken
     this.maxRequestBytes = Number(options.maxRequestBytes || DEFAULT_MAX_REQUEST_BYTES)
     this.server = null
     this.sockets = new Set()
+    // Pi 会连续发起多轮请求，复用到正式网关的连接可避免重复 TCP/TLS 握手。
+    this.upstreamAgent = createUpstreamAgent(this.gatewayBase.protocol)
     this.token = ''
     this.origin = ''
   }
 
   async start() {
+    // 多会话并行后，网关桥是所有 Pi 子进程共用的入口；令牌一旦轮换，
+    // 先启动的进程会被 401 掐断。已启动时直接复用现有监听与令牌。
+    if (this.server && this.token && this.origin) return { origin: this.origin, token: this.token }
     await this.stop()
+    if (!this.upstreamAgent || this.upstreamAgent.destroyed) this.upstreamAgent = createUpstreamAgent(this.gatewayBase.protocol)
     this.token = crypto.randomBytes(32).toString('base64url')
     this.server = http.createServer((req, res) => { void this.handle(req, res) })
     this.server.on('connection', (socket) => {
@@ -140,6 +169,7 @@ class LocalGatewayBridge {
     for (const socket of this.sockets) socket.destroy()
     this.sockets.clear()
     await new Promise((resolve) => server.close(() => resolve()))
+    this.upstreamAgent.destroy()
   }
 
   async handle(req, res) {
@@ -166,7 +196,7 @@ class LocalGatewayBridge {
 			writeJSON(res, 400, '请求缺少有效模型')
 			return
 		}
-		await this.proxy(req, res, route, body, true)
+		await this.proxy(req, res, route, normalizeManagedRequestBody(route, body), true)
   }
 
   async proxy(clientRequest, clientResponse, route, body, allowRefresh) {
@@ -175,12 +205,13 @@ class LocalGatewayBridge {
       writeJSON(clientResponse, 401, '登录状态已失效，请重新登录')
       return
     }
-    // 自动分组请求只能进入 AnYuAgent 独立后端，绝不回落到旧网关 URL。
+    // 自动分组请求只能进入 AnYuAgent 专用网关，绝不回落到旧通用 URL。
     const target = new URL(`${ANYU_AGENT_GATEWAY_PATH}${route.upstreamPath}`, this.gatewayBase)
     const headers = {
       Authorization: `Bearer ${accessToken}`,
       'X-AnYu-Group-ID': String(route.groupId),
       'X-AnYu-Model': route.model,
+      'User-Agent': this.userAgent,
       'Content-Length': String(body.length)
     }
     for (const [name, value] of Object.entries(clientRequest.headers || {})) {
@@ -188,7 +219,9 @@ class LocalGatewayBridge {
     }
     const transport = target.protocol === 'https:' ? https : http
     await new Promise((resolve) => {
-      const upstream = transport.request(target, { method: clientRequest.method, headers }, (upstreamResponse) => {
+      const requestOptions = { method: clientRequest.method, headers, agent: this.upstreamAgent }
+      if (this.lookup) requestOptions.lookup = this.lookup
+      const upstream = transport.request(target, requestOptions, (upstreamResponse) => {
         if (upstreamResponse.statusCode === 401 && allowRefresh) {
           const chunks = []
           upstreamResponse.on('data', (chunk) => chunks.push(chunk))
@@ -222,4 +255,4 @@ class LocalGatewayBridge {
   }
 }
 
-module.exports = { ANYU_AGENT_GATEWAY_PATH, LocalGatewayBridge, managedProviderName, managedBaseUrl, parseManagedRoute, allowedGatewayPath, requestModel }
+module.exports = { ANYU_AGENT_GATEWAY_PATH, LocalGatewayBridge, managedProviderName, managedBaseUrl, parseManagedRoute, allowedGatewayPath, requestModel, normalizeManagedRequestBody }

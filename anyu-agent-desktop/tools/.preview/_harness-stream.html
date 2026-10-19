@@ -1,0 +1,1602 @@
+<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><style>:root {
+  /* 外观主题令牌：默认值与原硬编码配色完全一致，未选主题时视觉保持原样。
+     主题只覆盖令牌，组件规则本身不随主题变化，避免新增主题时逐条改样式。 */
+  --anyu-canvas: #ffffff;
+  --anyu-chrome: #fafafa;
+  --anyu-chrome-active: #eceef1;
+  --anyu-line: #e8eaed;
+  --anyu-line-strong: #d8dadd;
+  /* 次级分隔线由主线与画布混出，默认值 #f2f3f5 与原 #f0f1f2 肉眼无差，
+     主题切换时不必逐套单独声明。 */
+  --anyu-line-soft: color-mix(in srgb, var(--anyu-line) 55%, var(--anyu-canvas));
+  --anyu-ink: #202124;
+  --anyu-ink-soft: #565b61;
+  --anyu-ink-muted: #858b92;
+  --anyu-accent: #174ea6;
+  --anyu-accent-soft: #e8f0fe;
+  --anyu-accent-ink: #1a4a8a;
+  --anyu-primary: #202124;
+  --anyu-primary-hover: #000000;
+  --anyu-primary-ink: #ffffff;
+  --anyu-bubble: #f1f3f4;
+  --anyu-conversation: #ffffff;
+  /* 警示色只用于"完整访问"这类需要用户留意的状态。八套主题都是浅色底，
+     固定值即已满足对比度要求，因此不在每套主题里重复声明。 */
+  --anyu-caution: #d8a850;
+  --anyu-caution-soft: #fdf5e6;
+  --anyu-caution-ink: #8a5a12;
+
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, sans-serif;
+  color: var(--anyu-ink);
+  background: transparent;
+  font-size: 14px;
+}
+
+/* 经典配色外观。画布与外框带一层极浅的色相，内容卡片保持白色，
+   因此对比度与可读性不随主题变化。 */
+:root[data-anyu-theme="rice"] {
+  --anyu-canvas: #fbf7ee;
+  --anyu-chrome: #f4eee0;
+  --anyu-chrome-active: #eadfc8;
+  --anyu-line: #e6dcc7;
+  --anyu-line-strong: #d8caae;
+  --anyu-ink: #2e2a24;
+  --anyu-ink-soft: #5c5347;
+  --anyu-ink-muted: #8b8172;
+  --anyu-accent: #a8452f;
+  --anyu-accent-soft: #f3e6d3;
+  --anyu-accent-ink: #7d2f1d;
+  --anyu-primary: #3a3229;
+  --anyu-primary-hover: #241e18;
+  --anyu-bubble: #f1ead9;
+  --anyu-conversation: #fdfaf4;
+}
+:root[data-anyu-theme="celadon"] {
+  --anyu-canvas: #f3f8f5;
+  --anyu-chrome: #e8f1ec;
+  --anyu-chrome-active: #d9e9e0;
+  --anyu-line: #d6e6dd;
+  --anyu-line-strong: #bfd6ca;
+  --anyu-ink: #1f3a33;
+  --anyu-ink-soft: #446056;
+  --anyu-ink-muted: #769087;
+  --anyu-accent: #2c6e5b;
+  --anyu-accent-soft: #dcede5;
+  --anyu-accent-ink: #1d5343;
+  --anyu-primary: #23473d;
+  --anyu-primary-hover: #16332b;
+  --anyu-bubble: #e6f1ea;
+  --anyu-conversation: #f8fbf9;
+}
+:root[data-anyu-theme="navy"] {
+  --anyu-canvas: #f4f6fb;
+  --anyu-chrome: #e9edf7;
+  --anyu-chrome-active: #dbe2f2;
+  --anyu-line: #dde3f0;
+  --anyu-line-strong: #c5cfe6;
+  --anyu-ink: #1b2440;
+  --anyu-ink-soft: #43506f;
+  --anyu-ink-muted: #77839f;
+  --anyu-accent: #2a4c8f;
+  --anyu-accent-soft: #dee6f7;
+  --anyu-accent-ink: #1d3a70;
+  --anyu-primary: #24386b;
+  --anyu-primary-hover: #1a2a52;
+  --anyu-bubble: #e7ecf8;
+  --anyu-conversation: #f8fafd;
+}
+:root[data-anyu-theme="bamboo"] {
+  --anyu-canvas: #f4f7ef;
+  --anyu-chrome: #e9f0e1;
+  --anyu-chrome-active: #dde8d0;
+  --anyu-line: #dce6cd;
+  --anyu-line-strong: #c6d5b3;
+  --anyu-ink: #22301c;
+  --anyu-ink-soft: #47523d;
+  --anyu-ink-muted: #7b8670;
+  --anyu-accent: #3f6b2e;
+  --anyu-accent-soft: #e2ecd6;
+  --anyu-accent-ink: #2f5222;
+  --anyu-primary: #2f4a22;
+  --anyu-primary-hover: #223618;
+  --anyu-bubble: #e8f0dd;
+  --anyu-conversation: #f9fbf6;
+}
+:root[data-anyu-theme="ochre"] {
+  --anyu-canvas: #fbf4ec;
+  --anyu-chrome: #f4e8da;
+  --anyu-chrome-active: #ead9c4;
+  --anyu-line: #ecdcca;
+  --anyu-line-strong: #d9c0a4;
+  --anyu-ink: #3a2b22;
+  --anyu-ink-soft: #5f4c40;
+  --anyu-ink-muted: #91806f;
+  --anyu-accent: #b0552f;
+  --anyu-accent-soft: #f6e3d3;
+  --anyu-accent-ink: #8a3f1f;
+  --anyu-primary: #4a3728;
+  --anyu-primary-hover: #33251a;
+  --anyu-bubble: #f4e8d9;
+  --anyu-conversation: #fdf8f2;
+}
+:root[data-anyu-theme="rouge"] {
+  --anyu-canvas: #fbf4f6;
+  --anyu-chrome: #f5e8ec;
+  --anyu-chrome-active: #ecd8de;
+  --anyu-line: #eedde2;
+  --anyu-line-strong: #dcbfc8;
+  --anyu-ink: #3a2430;
+  --anyu-ink-soft: #63495a;
+  --anyu-ink-muted: #93798a;
+  --anyu-accent: #a63d63;
+  --anyu-accent-soft: #f6dfe8;
+  --anyu-accent-ink: #83304d;
+  --anyu-primary: #4a2733;
+  --anyu-primary-hover: #331a22;
+  --anyu-bubble: #f5e6eb;
+  --anyu-conversation: #fdf8fa;
+}
+:root[data-anyu-theme="frost"] {
+  --anyu-canvas: #f5f6f8;
+  --anyu-chrome: #eceef1;
+  --anyu-chrome-active: #e0e3e8;
+  --anyu-line: #e2e5e9;
+  --anyu-line-strong: #ccd1d8;
+  --anyu-ink: #23262b;
+  --anyu-ink-soft: #4c5259;
+  --anyu-ink-muted: #838a93;
+  --anyu-accent: #4a5568;
+  --anyu-accent-soft: #e4e8ef;
+  --anyu-accent-ink: #39424f;
+  --anyu-primary: #2b3038;
+  --anyu-primary-hover: #1b1f24;
+  --anyu-bubble: #e9ecf0;
+  --anyu-conversation: #fafbfc;
+}
+* { box-sizing: border-box; }
+html, body, #app { margin: 0; width: 100%; height: 100%; min-height: 0; max-height: 100%; background: transparent; }
+body { overflow: hidden; }
+button, input, select, textarea { font: inherit; color: inherit; }
+button { border: 0; cursor: pointer; }
+button:disabled { cursor: wait; opacity: .58; }
+.hidden { display: none !important; }
+.muted { color: #73777d; }
+.login { position: relative; height: 100vh; display: grid; place-items: center; padding: 24px; border-radius: 16px; overflow: hidden; background: var(--anyu-canvas); -webkit-app-region: drag; }
+.login .login-card, .login .window-controls, .login input, .login button { -webkit-app-region: no-drag; }
+.login-window-controls { position: absolute; top: 10px; right: 12px; }
+.login-card { width: 390px; padding: 38px 36px 32px; border: 1px solid #e1e3e6; border-radius: 18px; background: #fff; box-shadow: 0 12px 35px #0000000d; }
+.auth-checking { min-height: 250px; }
+.brand { display: flex; align-items: center; gap: 12px; margin-bottom: 30px; }
+.brand-mark { width: 42px; height: 42px; border-radius: 12px; background: #111; color: #fff; display: grid; place-items: center; font-weight: 800; font-size: 18px; }
+.brand h1 { font-size: 21px; margin: 0; }
+.brand small { display: block; color: #7a7f86; margin-top: 3px; }
+.login-card h2 { font-size: 24px; margin: 0 0 7px; }
+.field { display: grid; gap: 7px; margin-top: 17px; }
+.field label { font-size: 12px; color: #51555b; }
+.field input { width: 100%; border: 1px solid #d8dadd; background: #fff; border-radius: 9px; padding: 12px; outline: 0; }
+.field input:focus, .modal-input:focus { border-color: #222; box-shadow: 0 0 0 3px #0000000b; }
+.primary { width: 100%; margin-top: 23px; padding: 12px 16px; border-radius: 9px; background: #202124; color: #fff; font-weight: 600; }
+.primary:hover { background: #000; }
+.error { margin-top: 13px; color: #c5221f; font-size: 12px; line-height: 1.45; }
+.auth-links { display: flex; flex-wrap: wrap; justify-content: center; gap: 12px; margin-top: 16px; }
+.link-button { padding: 0; background: transparent; color: #4b5563; font-size: 12px; }
+.link-button:hover { color: #111827; text-decoration: underline; }
+.inline-field { display: flex; gap: 8px; align-items: stretch; }
+.inline-field input { min-width: 0; flex: 1; }
+.inline-action { flex: 0 0 auto; padding: 0 11px; border: 1px solid #d8dadd; border-radius: 9px; background: #fff; color: #454b52; font-size: 12px; white-space: nowrap; }
+.inline-action:hover { border-color: #202124; color: #202124; }
+.auth-notice { margin-top: 16px; padding: 11px 12px; border: 1px solid #e4e6e8; border-radius: 9px; background: #fafafa; color: #5f6368; font-size: 12px; line-height: 1.5; }
+.auth-notice.success { border-color: #cce8d3; background: #f2fbf4; color: #18733a; }
+.no-key-panel { display: grid; place-items: center; align-content: center; gap: 10px; min-height: 0; height: 100%; padding: 32px; text-align: center; }
+.no-key-icon { width: 58px; height: 58px; display: grid; place-items: center; border: 1px solid #dfe3e7; border-radius: 16px; color: #202124; font-size: 30px; }
+.no-key-panel h2 { margin: 8px 0 0; font-size: 22px; }
+.no-key-panel p { max-width: 420px; margin: 0; color: #697078; font-size: 13px; line-height: 1.6; }
+.no-key-actions { display: flex; flex-wrap: wrap; justify-content: center; gap: 10px; margin-top: 8px; }
+.no-key-primary { width: auto; margin-top: 0; }
+.no-key-note { font-size: 11px !important; }
+@media (max-height: 760px) {
+  .login { place-items: start center; overflow-y: auto; padding: 16px 24px; }
+  .login-card { padding: 24px 30px; }
+  .brand { margin-bottom: 18px; }
+  .field { margin-top: 12px; }
+  .primary { margin-top: 16px; }
+}
+.login-loading { display: flex; align-items: center; justify-content: center; gap: 10px; color: #5f6368; padding: 28px 0 4px; }
+.spinner { width: 16px; height: 16px; border: 2px solid #dfe1e5; border-top-color: #202124; border-radius: 50%; animation: spin .8s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+.app-shell { width: 100%; height: 100vh; height: 100dvh; min-height: 0; max-height: 100%; overflow: hidden; display: grid; grid-template-columns: 248px minmax(0, 1fr); border: 1px solid #0000000d; border-radius: 16px; background: var(--anyu-canvas); box-shadow: 0 14px 38px #00000029, 0 2px 6px #00000018; isolation: isolate; }
+.sidebar { min-width: 0; min-height: 0; display: flex; flex-direction: column; padding: 14px 12px; border-right: 1px solid var(--anyu-line); background: var(--anyu-chrome); }
+.side-brand { display: flex; align-items: center; gap: 10px; padding: 6px 10px 25px; }
+.side-brand .brand-mark { width: 30px; height: 30px; border-radius: 9px; font-size: 14px; }
+.side-brand strong { font-size: 15px; }
+.side-brand span { display: block; margin-top: 2px; color: #7b8086; font-size: 11px; }
+.nav-section { min-width: 0; }
+.sessions-section { flex: 1; min-height: 0; overflow: hidden; display: flex; flex-direction: column; }
+#session-list { flex: 1 1 auto; min-height: 0; overflow-x: hidden; overflow-y: auto; scrollbar-gutter: stable; padding-bottom: 4px; }
+.session-workspace-group + .session-workspace-group { margin-top: 10px; }
+.session-workspace-heading { display: flex; align-items: center; gap: 6px; padding: 8px 10px 5px; color: #858b92; font-size: 10px; font-weight: 600; }
+.session-workspace-heading small { margin-left: auto; color: #a0a5aa; font-size: 10px; }
+.session-workspace-icon { color: #737a80; }
+.session-workspace-items { display: grid; gap: 2px; }
+.nav-title { padding: 13px 10px 7px; color: #8a8f94; text-transform: uppercase; font-size: 10px; letter-spacing: .8px; }
+.nav-item { display: flex; align-items: center; gap: 9px; width: 100%; padding: 9px 10px; border-radius: 8px; background: transparent; color: var(--anyu-ink-soft); text-align: left; }
+.nav-item.active, .nav-item:hover { background: var(--anyu-chrome-active); color: var(--anyu-ink); }
+.nav-button { cursor: pointer; }
+.nav-icon { width: 17px; flex: 0 0 17px; color: #686d73; text-align: center; }
+.session-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.session-copy { min-width: 0; display: grid; gap: 2px; }
+.session-time { color: #9399a0; font-size: 10px; line-height: 1.2; }
+.session-spinner { width: 12px; height: 12px; border-width: 2px; }
+.empty-sessions { padding: 10px; color: #9aa0a6; font-size: 12px; }
+.session-context-menu { position: fixed; z-index: 60; width: 168px; padding: 5px; border: 1px solid #dfe3e7; border-radius: 10px; background: #fff; box-shadow: 0 12px 30px #0002, 0 2px 6px #0001; }
+.session-context-menu button { display: flex; align-items: center; gap: 9px; width: 100%; padding: 8px 9px; border-radius: 7px; background: transparent; color: #3f454b; font-size: 12px; text-align: left; }
+.session-context-menu button:hover { background: #f1f3f4; }
+.session-context-menu button.danger { color: #c5221f; }
+.side-footer { margin-top: auto; padding: 12px 10px 3px; border-top: 1px solid var(--anyu-line); }
+.settings-link { display: flex; align-items: center; gap: 9px; width: 100%; padding: 8px 0 14px; background: transparent; color: var(--anyu-ink-soft); text-align: left; }
+.settings-link:hover { color: var(--anyu-ink); }
+.settings-page-layout { width: 100%; height: 100vh; height: 100dvh; min-height: 0; display: grid; grid-template-columns: 230px minmax(0, 1fr); overflow: hidden; background: var(--anyu-canvas); color: var(--anyu-ink); }
+.settings-sidebar { min-width: 0; min-height: 0; overflow-y: auto; padding: 20px 14px 28px; border-right: 1px solid var(--anyu-line); background: var(--anyu-chrome); }
+.settings-back { display: inline-flex; align-items: center; gap: 8px; width: 100%; margin: 0 0 16px; padding: 7px 9px; border-radius: 8px; background: transparent; color: var(--anyu-ink); font-size: 13px; text-align: left; }
+.settings-back:hover { background: var(--anyu-chrome-active); }
+.settings-back span:first-child { font-size: 19px; line-height: 1; }
+.settings-nav { display: grid; gap: 4px; }
+.settings-nav-item { display: flex; align-items: center; gap: 9px; width: 100%; min-height: 36px; padding: 8px 9px; border-radius: 8px; background: transparent; color: var(--anyu-ink-soft); font-size: 12px; text-align: left; }
+.settings-nav-item:hover, .settings-nav-item.active { background: var(--anyu-chrome-active); color: var(--anyu-ink); }
+.settings-nav-item > span:first-child { display: inline-grid; width: 15px; place-items: center; color: #686d73; font-size: 13px; }
+.settings-page-main { min-width: 0; min-height: 0; display: flex; flex-direction: column; overflow: hidden; background: var(--anyu-canvas); }
+.settings-page-header { display: flex; align-items: flex-start; justify-content: space-between; min-height: 72px; padding: 26px 30px 14px; border-bottom: 1px solid var(--anyu-line-soft); -webkit-app-region: drag; }
+.settings-page-header > div:first-child { min-width: 0; }
+.settings-page-header h1 { margin: 7px 0 0; font-size: 23px; font-weight: 650; letter-spacing: 0; }
+.settings-window-controls { display: flex; align-items: center; gap: 2px; margin: -8px -9px 0 16px; -webkit-app-region: no-drag; }
+.settings-window-controls button { display: grid; width: 30px; height: 27px; place-items: center; border-radius: 7px; background: transparent; color: #676d73; font-size: 16px; line-height: 1; }
+.settings-window-controls button:hover { background: #f0f1f2; color: #202124; }
+.settings-window-controls button:last-child:hover { background: #fce8e6; color: #c5221f; }
+.settings-page-content { min-height: 0; overflow-y: auto; padding: 34px clamp(24px, 6vw, 92px) 64px; scrollbar-gutter: stable; }
+.settings-section { width: min(820px, 100%); margin: 0 auto 34px; }
+.settings-section h2 { margin: 0 0 12px; color: #34383d; font-size: 14px; font-weight: 650; }
+.settings-section-copy { margin: -4px 0 14px; color: #7b8086; font-size: 12px; line-height: 1.45; }
+.settings-card { border: 1px solid #e1e4e7; border-radius: 12px; background: #fff; }
+.settings-row { display: flex; align-items: center; justify-content: space-between; gap: 22px; min-height: 76px; padding: 17px 16px; }
+.settings-row + .settings-row { border-top: 1px solid #edf0f2; }
+.settings-row > div:first-child { min-width: 0; }
+.settings-row strong { display: block; color: #34383d; font-size: 12px; font-weight: 600; }
+.settings-row p { max-width: 620px; margin: 4px 0 0; color: #858b92; font-size: 11px; line-height: 1.45; }
+.settings-row select { min-width: 214px; max-width: 310px; padding: 9px 11px; border: 1px solid #d8dadd; border-radius: 8px; background: #fff; color: #353a3f; outline: 0; font-size: 12px; }
+.settings-row select:focus { border-color: #9aa6b2; box-shadow: 0 0 0 3px #00000008; }
+.permission-segmented { display: inline-flex; flex-wrap: wrap; gap: 3px; padding: 3px; border: 1px solid #d8dadd; border-radius: 9px; background: #f4f5f6; }
+.permission-segmented button { border: 0; border-radius: 6px; padding: 8px 10px; background: transparent; color: #60666d; cursor: pointer; font: inherit; font-size: 11px; }
+.permission-segmented button:hover { background: #fff; color: #34383d; }
+.permission-segmented button.active { background: #fff; color: #174ea6; box-shadow: 0 1px 3px #00000018; font-weight: 600; }
+.settings-row-actions { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.settings-value { max-width: 360px; overflow: hidden; color: #6d737a; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.settings-help { margin: 0; padding: 0 16px 15px; color: #858b92; font-size: 11px; line-height: 1.5; }
+.settings-divider { height: 1px; margin: 0 16px; background: #edf0f2; }
+.settings-account-actions { padding-bottom: 24px; }
+.settings-account-actions .settings-row { min-height: 66px; }
+.update-link { display: flex; align-items: center; gap: 9px; width: 100%; padding: 7px 0 8px; background: transparent; color: #565b61; text-align: left; font-size: 12px; }
+.update-link:hover { color: #202124; }
+.update-link.error { color: #c5221f; }
+.update-icon { font-size: 17px; line-height: 1; }
+.update-icon.spinning { animation: spin .85s linear infinite; }
+.balance-summary { margin: 0 0 12px; padding: 9px 10px 10px; border: 1px solid #e3e6e9; border-radius: 10px; background: #fff; }
+.balance-caption { display: flex; align-items: center; gap: 6px; color: #858b92; font-size: 11px; }
+.balance-sync-dot { width: 5px; height: 5px; border-radius: 50%; background: #1e8e3e; box-shadow: 0 0 0 2px #e6f4ea; }
+.balance-summary strong { display: block; margin-top: 5px; color: #202124; font-size: 17px; font-weight: 650; letter-spacing: .1px; }
+.user-line { display: flex; align-items: center; gap: 9px; }
+.avatar { width: 28px; height: 28px; border-radius: 50%; display: grid; place-items: center; background: #e8eaed; color: #3f444a; font-weight: 700; font-size: 12px; }
+.user-email { max-width: 165px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
+.main { height: 100%; min-width: 0; min-height: 0; overflow: hidden; display: flex; flex: 1 1 auto; flex-direction: column; box-shadow: inset 1px 0 #00000008; }
+.topbar { height: 58px; display: flex; align-items: center; justify-content: space-between; padding: 0 12px 0 28px; border-bottom: 1px solid var(--anyu-line); background: var(--anyu-canvas); -webkit-app-region: drag; }
+.topbar button, .topbar select, .topbar .top-actions, .topbar .window-controls { -webkit-app-region: no-drag; }
+.topbar-title { display: flex; align-items: center; gap: 8px; }
+.topbar h2 { margin: 0; font-size: 15px; font-weight: 600; }
+.connection-dot { width: 7px; height: 7px; border-radius: 50%; background: #1e8e3e; }
+.connection-dot.offline { background: #d93025; }
+.connection-label { color: #73777d; font-size: 11px; }
+.top-actions { display: flex; align-items: center; gap: 8px; }
+.window-controls { display: flex; align-items: center; gap: 2px; margin-left: 5px; }
+.window-controls button { display: grid; width: 30px; height: 27px; place-items: center; border-radius: 7px; background: transparent; color: #676d73; font-size: 16px; line-height: 1; }
+.window-controls button:hover { background: #f0f1f2; color: #202124; }
+.window-controls button:last-child:hover { background: #fce8e6; color: #c5221f; }
+.model-count { font-size: 12px; }
+.icon-button { width: 30px; height: 30px; border: 1px solid #dadce0; border-radius: 8px; background: #fff; color: #5f6368; }
+.icon-button:hover { background: #f5f6f7; }
+.ghost { padding: 8px 11px; border: 1px solid #dadce0; border-radius: 8px; background: #fff; color: #5f6368; }
+.ghost:hover { background: #f5f6f7; border-color: #c7c9cc; }
+.app-alert { margin: 12px 28px 0; padding: 9px 12px; border: 1px solid #f1c4c4; border-radius: 8px; background: #fff7f7; color: #a50e0e; font-size: 12px; }
+/* 提权重启后的确认提示。复用主题强调色令牌，随外观主题一起变化。 */
+.app-notice { margin: 12px 28px 0; padding: 9px 12px; border: 1px solid var(--anyu-line-strong); border-radius: 8px; background: var(--anyu-accent-soft); color: var(--anyu-accent-ink); font-size: 12px; display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.app-notice-close { flex: 0 0 auto; padding: 3px 10px; border: 1px solid var(--anyu-line-strong); border-radius: 6px; background: transparent; color: var(--anyu-accent-ink); font-size: 12px; cursor: pointer; }
+.app-notice-close:hover { background: var(--anyu-chrome-active); }
+.conversation { flex: 1 1 auto; min-height: 0; overflow: hidden; display: flex; padding: 20px 28px 16px; background: var(--anyu-conversation); }
+.chat-panel { width: min(900px, 100%); height: 100%; min-width: 0; min-height: 0; max-height: 100%; display: grid; grid-template-rows: auto minmax(0, 1fr) auto; margin: 0 auto; }
+.conversation.browser-layout { display: grid; grid-template-columns: minmax(380px, 1.25fr) minmax(320px, 1fr); gap: 14px; padding: 16px; }
+.browser-layout .chat-panel { width: 100%; margin: 0; }
+.agent-browser-panel { min-width: 0; min-height: 0; display: grid; grid-template-rows: 34px minmax(0, 1fr); }
+.agent-browser-frame { min-width: 0; min-height: 0; overflow: hidden; border: 1px solid var(--anyu-line); border-top: 0; border-radius: 0 0 8px 8px; background: #fff; }
+#agent-browser-host { width: 100%; height: 100%; background: #fff; }
+.chat-head { flex: 0 0 auto; display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
+.chat-title { font-size: 23px; font-weight: 650; }
+.chat-subtitle { margin-top: 5px; color: #80858b; font-size: 11px; }
+.messages { min-width: 0; min-height: 0; max-height: 100%; overflow-x: hidden; overflow-y: auto; padding: 8px 8px 16px 0; scroll-behavior: auto; scroll-padding-bottom: 16px; scrollbar-gutter: stable; overscroll-behavior: contain; overflow-anchor: none; }
+.messages::-webkit-scrollbar, .tool-card pre::-webkit-scrollbar { width: 7px; height: 7px; }
+.messages::-webkit-scrollbar-thumb, .tool-card pre::-webkit-scrollbar-thumb { border-radius: 99px; background: #d7dade; }
+.empty { height: 100%; display: grid; place-items: center; text-align: center; color: #777d83; }
+.empty strong { display: block; margin-bottom: 7px; color: #34373b; font-size: 18px; }
+.message { display: flex; gap: 9px; max-width: 820px; margin: 0 auto 10px; }
+.message.user { flex-direction: row-reverse; }
+.message-body { min-width: 0; max-width: min(770px, calc(100% - 37px)); }
+.message-bubble { max-width: 100%; padding: 9px 12px; border-radius: 11px; background: var(--anyu-bubble); line-height: 1.54; white-space: pre-wrap; word-break: break-word; }
+.message.user .message-bubble { background: var(--anyu-accent-soft); color: var(--anyu-accent-ink); }
+.message-role { margin: 0 0 3px; color: #7a8087; font-size: 11px; }
+.message.user .message-role { text-align: right; }
+.message-meta { display: flex; align-items: center; justify-content: space-between; gap: 10px; min-height: 18px; margin-top: 3px; color: #949aa1; font-size: 10px; }
+.message.user .message-meta { justify-content: flex-end; }
+.message-actions { display: inline-flex; gap: 4px; opacity: 0; transition: opacity .15s ease; }
+.message:hover .message-actions, .message:focus-within .message-actions { opacity: 1; }
+.message-actions button { padding: 2px 5px; border: 1px solid #e1e4e7; border-radius: 5px; background: #fff; color: #70777e; font-size: 10px; }
+.message-actions button:hover { background: #f4f5f6; color: #202124; }
+.tool-message > .message-time { align-self: end; margin-left: 5px; }
+.tool-message { max-width: 820px; }
+.tool-avatar { background: #f1f3f4; color: #5f6368; }
+.tool-card { width: 100%; max-width: 760px; min-width: 0; padding: 0; border: 1px solid #e1e3e6; border-radius: 8px; background: #fafafa; }
+.tool-card summary, .thinking-card summary { display: flex; align-items: center; gap: 7px; min-height: 38px; padding: 8px 11px; list-style: none; cursor: pointer; user-select: none; }
+.tool-card summary::-webkit-details-marker, .thinking-card summary::-webkit-details-marker { display: none; }
+.tool-card[open] summary { border-bottom: 1px solid #e8eaed; }
+.tool-chevron { display: inline-block; color: #8a9097; font-size: 19px; line-height: 1; transition: transform .16s ease; }
+details[open] > summary .tool-chevron { transform: rotate(90deg); }
+.tool-card .message-role { flex: 1; margin: 0; }
+.tool-duration { color: #979da3; font-size: 10px; white-space: nowrap; }
+.tool-status { margin-left: auto; color: #7a8087; font-size: 11px; }
+.tool-status.running { color: #315f9f; }
+.tool-status.running::before { content: ''; display: inline-block; width: 6px; height: 6px; margin-right: 5px; border-radius: 50%; background: currentColor; vertical-align: 1px; }
+.tool-status.failed { color: #c5221f; }
+.tool-section { margin: 0; padding: 0 12px; }
+.tool-section:last-of-type { padding-bottom: 11px; }
+.tool-progress { display: flex; align-items: center; gap: 7px; padding: 10px 12px 2px; color: #7a8087; font-size: 11px; }
+.tool-progress span { width: 6px; height: 6px; border-radius: 50%; background: #65717c; }
+.tool-section summary { min-height: 30px; padding: 7px 0 2px; color: #8a9097; font-size: 10px; list-style: none; cursor: pointer; }
+.tool-section summary::-webkit-details-marker { display: none; }
+.tool-section summary::before { content: '›'; display: inline-block; margin-right: 5px; color: #8a9097; font-size: 14px; transition: transform .16s ease; }
+.tool-section[open] summary::before { transform: rotate(90deg); }
+.tool-card pre { max-height: 190px; margin: 6px 0 0; overflow: auto; color: #4f565d; font: 12px/1.55 ui-monospace, SFMono-Regular, Consolas, monospace; white-space: pre-wrap; word-break: break-word; }
+.thinking-card { margin: 0; border: 0; border-radius: 7px; background: transparent; color: #737981; font-size: 11px; }
+.thinking-card summary { min-height: 28px; padding: 4px 6px; }
+.thinking-card.is-live { border-color: #e5e8eb; }
+.thinking-card > div { max-height: 180px; overflow: auto; margin: 0 5px 5px 22px; padding: 6px 9px; border-left: 1px solid var(--anyu-line); white-space: pre-wrap; line-height: 1.5; }
+.thinking-card > div:empty { display: none; }
+.media-planning-card { width: min(560px, 100%); margin: 0; padding: 8px 10px; border: 1px solid #dfe7e4; border-radius: 9px; background: #f8fbfa; color: #53615e; font-size: 11px; }
+.media-planning-card.is-live { border-color: #b9d8ce; box-shadow: 0 3px 12px #6d9e8b18; }
+.media-planning-card.is-error { border-color: #e5b8b8; background: #fff9f9; }
+.media-planning-head { display: flex; align-items: center; gap: 7px; min-height: 22px; }
+.media-planning-icon { display: grid; width: 18px; height: 18px; place-items: center; border-radius: 50%; background: #d8ebe4; color: #2d7763; font-size: 11px; }
+.media-planning-head strong { color: #315e52; font-size: 12px; }
+.media-planning-phase { margin-left: auto; color: #7d918b; font-size: 10px; }
+.media-planning-steps { display: grid; gap: 5px; margin-top: 8px; }
+.media-plan-step { display: flex; align-items: center; gap: 7px; min-height: 20px; color: #86918e; }
+.media-plan-step.done { color: #4c7368; }
+.media-plan-step.active { color: #315e52; }
+.media-plan-dot { display: grid; width: 16px; height: 16px; flex: 0 0 16px; place-items: center; border: 1px solid #cbd9d5; border-radius: 50%; color: #4b8b77; font-size: 10px; }
+.media-plan-step.active .media-plan-dot { border-color: #69a993; background: #e1f1eb; animation: activity-pulse 1.2s ease-in-out infinite alternate; }
+.media-planning-summary { margin-top: 8px; padding-top: 7px; border-top: 1px solid #e4eeea; color: #64756f; line-height: 1.5; }
+.business-skill-card { width: min(620px, 100%); margin: 0; padding: 8px 10px; border: 1px solid #dfe7e4; border-radius: 9px; background: #fbfcfc; color: #53615e; font-size: 11px; }
+.business-skill-card.is-live { border-color: #b9d8ce; box-shadow: 0 3px 12px #6d9e8b18; }
+.business-skill-card.is-error { border-color: #e5b8b8; background: #fff9f9; }
+.business-skill-head { display: flex; align-items: center; gap: 7px; min-height: 22px; }
+.business-skill-icon { display: grid; width: 18px; height: 18px; place-items: center; border-radius: 50%; background: #e2eee9; color: #2d7763; font-size: 11px; }
+.business-skill-head strong { color: #315e52; font-size: 12px; }
+.business-skill-phase { margin-left: auto; color: #657b74; }
+.business-skill-status { color: #91a09b; font-size: 10px; }
+.business-summary { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.business-summary span { padding: 3px 7px; border-radius: 999px; background: #eef5f2; color: #55766b; }
+.business-artifacts { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 9px; }
+.artifact-link { display: inline-flex; align-items: center; gap: 5px; border: 1px solid #d7e5df; border-radius: 6px; padding: 5px 8px; background: #fff; color: #356957; cursor: pointer; font: inherit; }
+.artifact-link:hover { border-color: #9fc7b8; background: #f5faf7; }
+.artifact-icon { font-size: 11px; }
+.business-assets { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 9px; }
+.business-assets img { width: 92px; height: 72px; object-fit: cover; border-radius: 6px; border: 1px solid #e0e8e5; background: #f4f7f6; }
+.turn-status, .agent-activity { display: flex; align-items: center; gap: 8px; min-height: 32px; color: #69717a; font-size: 12px; }
+.agent-activity { display: flex; gap: 10px; max-width: 820px; margin: 0 auto 18px; }
+.agent-activity .message-body { min-width: 140px; }
+.activity-dot { flex: 0 0 6px; width: 6px; height: 6px; border-radius: 50%; background: #6b8580; animation: activity-pulse 1.6s ease-in-out infinite alternate; }
+.activity-elapsed { margin-left: 2px; color: #9aa1a7; font-variant-numeric: tabular-nums; }
+@media (prefers-reduced-motion: reduce) { .activity-dot { animation: none; } }
+.message-link { color: #245da8; text-decoration: underline; text-underline-offset: 2px; cursor: pointer; }
+.message-file-link { display: inline; margin: 0; padding: 0; border: 0; background: transparent; color: #245da8; font: inherit; text-decoration: underline; text-underline-offset: 2px; cursor: pointer; }
+.agent-browser-bar { position: relative; z-index: 5; box-sizing: border-box; display: flex; align-items: center; gap: 8px; min-width: 0; height: 34px; padding: 0 12px; border: 1px solid var(--anyu-line); border-radius: 8px 8px 0 0; background: var(--anyu-chrome); color: var(--anyu-ink); }
+.agent-browser-bar strong { max-width: 170px; overflow: hidden; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.agent-browser-bar small { min-width: 0; flex: 1; overflow: hidden; color: var(--anyu-ink-soft); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.agent-browser-bar button { width: 24px; height: 24px; border: 0; border-radius: 6px; background: transparent; color: var(--anyu-ink-soft); cursor: pointer; }
+.agent-browser-bar button:hover { background: var(--anyu-chrome-active); color: var(--anyu-ink); }
+.agent-browser-dot { width: 7px; height: 7px; border-radius: 50%; background: #55a66a; box-shadow: 0 0 0 3px #55a66a1f; }
+.agent-browser-bar small:empty { display: none; }
+.message-bubble code { padding: 1px 4px; border-radius: 4px; background: #eceff1; font: .92em ui-monospace, SFMono-Regular, Consolas, monospace; }
+.assistant-turn .message-body { width: min(770px, calc(100% - 37px)); max-width: none; }
+.assistant-turn .avatar { margin-top: 1px; background: var(--anyu-accent-soft); color: var(--anyu-accent-ink); }
+.assistant-turn .message-bubble { padding: 2px 1px; border-radius: 0; background: transparent; }
+.turn-heading { display: flex; align-items: center; gap: 10px; min-height: 24px; margin-bottom: 2px; }
+.turn-heading .message-role { margin: 0; color: #454b52; font-weight: 600; }
+.turn-completion { display: inline-flex; align-items: center; gap: 5px; color: #9aa0a6; font-size: 10px; font-variant-numeric: tabular-nums; }
+.turn-completion.is-running { color: #6c777e; }
+.turn-completion .activity-dot { width: 5px; height: 5px; flex-basis: 5px; }
+.turn-content { display: grid; gap: 5px; min-width: 0; }
+.turn-activities { display: grid; gap: 2px; min-width: 0; }
+.turn-activity { min-width: 0; border: 0; border-radius: 7px; background: #f7f8f8; color: #6f767d; }
+.turn-activity[open] { border: 1px solid var(--anyu-line); background: #fafafa; }
+.turn-activity > summary { display: flex; align-items: center; gap: 6px; min-height: 29px; padding: 3px 7px; overflow: hidden; list-style: none; cursor: pointer; user-select: none; }
+.turn-activity > summary::-webkit-details-marker { display: none; }
+.turn-activity > summary .tool-chevron { flex: 0 0 auto; font-size: 16px; }
+.turn-activity-icon { display: grid; width: 17px; height: 17px; flex: 0 0 17px; place-items: center; border-radius: 5px; background: #eceeef; color: #6f767d; font-size: 10px; }
+.turn-activity strong { min-width: 0; overflow: hidden; color: #60676e; font-size: 11px; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
+.turn-activity .tool-status { margin-left: auto; flex: 0 0 auto; font-size: 10px; }
+.turn-activity-body { min-width: 0; padding-bottom: 5px; }
+.turn-activity .tool-section { padding: 0 9px; }
+.turn-activity .tool-section:last-child { padding-bottom: 5px; }
+.turn-activity .tool-progress { padding: 5px 10px; }
+.thinking-card small { margin-left: auto; color: #a0a5aa; font-size: 10px; }
+.turn-artifacts { display: grid; gap: 5px; min-width: 0; margin-top: 2px; }
+.artifact-card { display: flex; align-items: center; gap: 9px; min-width: 0; min-height: 54px; padding: 7px 8px; border: 1px solid var(--anyu-line); border-radius: 9px; background: var(--anyu-bubble); }
+.artifact-card-icon { display: grid; width: 30px; height: 30px; flex: 0 0 30px; place-items: center; border-radius: 8px; background: var(--anyu-accent-soft); color: var(--anyu-accent-ink); font-size: 16px; }
+.artifact-card-copy { display: grid; min-width: 0; flex: 1; gap: 2px; }
+.artifact-card-copy strong { overflow-wrap: anywhere; color: #3d4248; font-size: 12px; font-weight: 600; }
+.artifact-card-copy span { color: #92979c; font-size: 10px; }
+.artifact-card-actions { display: flex; align-items: center; flex: 0 0 auto; gap: 4px; }
+.artifact-card-actions button { min-height: 27px; padding: 4px 8px; border: 1px solid var(--anyu-line-strong); border-radius: 7px; background: #fff; color: #626970; font-size: 10px; white-space: nowrap; }
+.artifact-card-actions button:hover { border-color: var(--anyu-accent); color: var(--anyu-accent-ink); }
+.artifact-card-actions .artifact-more { width: 27px; padding: 0; }
+.code-result { margin: 3px 0; overflow: hidden; border: 1px solid var(--anyu-line); border-radius: 8px; background: #f7f8f8; }
+.code-result summary { display: flex; align-items: center; gap: 6px; min-height: 31px; padding: 4px 8px; list-style: none; color: #596168; cursor: pointer; }
+.code-result summary::-webkit-details-marker { display: none; }
+.code-result summary small { margin-left: auto; color: #969ca2; font-size: 10px; }
+.code-result pre { max-height: 360px; margin: 0; overflow: auto; padding: 10px 12px; border-top: 1px solid var(--anyu-line); background: #f4f5f6; white-space: pre; }
+.code-result pre code { padding: 0; background: transparent; color: #3e464d; font: 11px/1.55 ui-monospace, SFMono-Regular, Consolas, monospace; }
+.message-attachments { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 7px; }
+@keyframes message-enter { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
+@keyframes loading-bars { from { height: 6px; opacity: .42; } to { height: 14px; opacity: 1; } }
+@keyframes orbit { to { transform: rotate(360deg); } }
+@keyframes soft-pulse { 50% { opacity: .35; transform: scale(.72); } }
+@keyframes activity-pulse { 0%, 45% { opacity: .4; } 55%, 100% { opacity: 1; } }
+.tool-error { color: #c5221f; }
+.composer { width: min(820px, 100%); min-width: 0; max-height: min(42vh, 342px); margin: 0 auto; padding-top: 6px; }
+.queued-tasks { position: relative; max-height: min(27vh, 226px); margin: 0 0 8px; border: 1px solid #e4e7ea; border-radius: 12px; background: #fff; box-shadow: 0 8px 20px #00000009; overflow: auto; }
+.queued-tasks-head { display: flex; align-items: center; justify-content: space-between; min-height: 31px; padding: 5px 10px 4px; border-bottom: 1px solid #eef0f2; color: #70777e; font-size: 11px; }
+.queued-tasks-head > span { display: inline-flex; align-items: center; gap: 6px; }
+.queue-head-icon { color: #8a9299; font-size: 15px; line-height: 1; }
+.queue-count { display: inline-grid; min-width: 18px; height: 18px; place-items: center; padding: 0 5px; border-radius: 99px; background: #f0f2f4; color: #4d555d; font-size: 10px; font-weight: 600; }
+.queue-clear { padding: 3px 5px; border-radius: 5px; background: transparent; color: #92989e; font-size: 10px; }
+.queue-clear:hover { background: #f4f5f6; color: #4b5259; }
+.queued-task { position: relative; display: flex; align-items: center; gap: 8px; min-height: 46px; padding: 6px 8px 6px 10px; border-bottom: 1px solid #f0f1f2; }
+.queued-task:last-child { border-bottom: 0; }
+.queued-task:hover, .queued-task.menu-open { background: #fbfcfd; }
+.queue-grip { flex: 0 0 11px; color: #b0b6bc; font-size: 13px; line-height: 1; }
+.queued-task-main { min-width: 0; flex: 1; }
+.queued-task-text { overflow: hidden; color: #454b52; font-size: 12px; line-height: 1.4; text-overflow: ellipsis; white-space: nowrap; }
+.queued-task-meta { display: flex; align-items: center; gap: 9px; margin-top: 2px; color: #a0a6ac; font-size: 10px; }
+.queue-attachments { color: #858d95; }
+.queued-task-actions { display: flex; align-items: center; gap: 2px; flex: 0 0 auto; }
+.queue-action, .queue-icon { display: inline-flex; align-items: center; justify-content: center; border-radius: 6px; color: #8a9198; }
+.queue-action { gap: 3px; min-height: 27px; padding: 3px 6px; font-size: 14px; }
+.queue-action span { font-size: 10px; white-space: nowrap; }
+.queue-action:hover { background: #eef1f3; color: #424950; }
+.queue-icon { width: 27px; height: 27px; font-size: 16px; line-height: 1; }
+.queue-icon:hover { background: #eef1f3; color: #424950; }
+.queue-menu { position: absolute; z-index: 12; right: 8px; bottom: 38px; width: 176px; padding: 5px; border: 1px solid #dfe2e5; border-radius: 10px; background: #fff; box-shadow: 0 12px 28px #0000001c; }
+.queue-menu button { display: flex; align-items: center; width: 100%; gap: 9px; padding: 8px 9px; border-radius: 7px; background: transparent; color: #454b52; font-size: 11px; text-align: left; white-space: nowrap; }
+.queue-menu button:hover { background: #f1f3f4; }
+.queue-menu button > span { display: inline-grid; width: 17px; place-items: center; color: #7a838b; font-size: 14px; }
+.composer-tools { position: relative; display: flex; align-items: center; gap: 7px; margin-bottom: 8px; }
+.picker-button, .permission-button { display: flex; align-items: center; gap: 7px; max-width: 260px; padding: 8px 10px; border: 1px solid #d7dbe0; border-radius: 9px; background: #fff; color: #454a50; }
+.picker-button:hover, .permission-button:hover { background: #f7f8f9; }
+.auto-route-badge { display: flex; align-items: center; gap: 7px; min-height: 42px; padding: 0 10px; border: 1px solid #d7dbe0; border-radius: 9px; background: #f7f8f9; color: #454a50; white-space: nowrap; }
+.picker-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.picker-icon { color: #5f6368; font-size: 17px; }
+.picker-chevron { color: #7b8086; }
+.model-picker-wrap { position: relative; min-width: 0; flex: 0 1 320px; }
+.group-picker-wrap { position: relative; min-width: 0; flex: 0 1 220px; }
+.group-picker-button { display: flex; align-items: center; justify-content: space-between; gap: 7px; width: 100%; min-width: 0; height: 36px; min-height: 36px; padding: 4px 9px; border: 1px solid #d7dbe0; border-radius: 8px; background: #f7faf9; color: #30363b; text-align: left; }
+.group-picker-button:hover { background: #eef6f2; }
+.group-picker-mark { display: grid; width: 21px; height: 21px; flex: 0 0 21px; place-items: center; border: 1px solid #b9e3d2; border-radius: 6px; background: #edfaf4; color: #16835d; font-size: 12px; }
+.group-menu { width: min(760px, calc(100vw - 24px)); padding: 0; border-radius: 14px; }
+.group-catalog-heading { display: flex; align-items: center; justify-content: space-between; padding: 15px 18px 10px; border-bottom: 1px solid #edf0f2; color: #27323a; }
+.group-catalog-heading strong { font-size: 13px; font-weight: 700; }
+.group-catalog-heading small { color: #7b858c; font-size: 10px; }
+.group-menu .model-search { margin: 8px 12px; }
+.group-pool-tabs { display: flex; align-items: stretch; border-bottom: 1px solid #edf0f2; }
+.group-pool-tabs button, .group-provider-tabs button { background: transparent; color: #8190a0; font-size: 11px; }
+.group-pool-tabs button { flex: 1; padding: 11px 10px; border-bottom: 2px solid transparent; }
+.group-pool-tabs button.active { border-bottom-color: #6f63ff; color: #6d5df4; }
+.group-pool-tabs button small { margin-left: 3px; color: inherit; }
+.group-provider-tabs { display: flex; align-items: center; gap: 3px; padding: 8px 12px; border-bottom: 1px solid #edf0f2; overflow-x: auto; }
+.group-provider-tabs button { padding: 6px 9px; border-radius: 6px; white-space: nowrap; }
+.group-provider-tabs button.active { background: #f0f2f4; color: #30363b; }
+.group-table-head { display: grid; grid-template-columns: minmax(230px, 1.15fr) minmax(160px, .8fr) minmax(130px, .6fr); gap: 12px; padding: 9px 17px; color: #8a96a6; font-size: 10px; }
+.group-table-head span:nth-child(n+2) { text-align: right; }
+.group-menu .model-group-list { max-height: min(360px, 54vh); overflow: auto; padding: 0 8px 8px; }
+.group-menu .model-group-option { grid-template-columns: 30px minmax(150px, 1.15fr) minmax(110px, .8fr) auto; min-height: 62px; border-top: 1px solid #f0f2f3; border-radius: 0; }
+.group-menu .model-group-option:hover, .group-menu .model-group-option.selected { background: #eef8f4; }
+.group-row-arrow { color: #7c858c; font-size: 18px; }
+.rate-display { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
+.rate-display s { color: #8b9499; text-decoration-color: #b4bcc1; }
+.rate-display strong { color: #086c54; font-weight: 700; }
+.rate-display em { color: #c56a00; font-size: 9px; font-style: normal; }
+.model-picker-button { display: flex; align-items: center; justify-content: space-between; gap: 12px; width: 100%; min-width: 0; min-height: 42px; padding: 6px 11px; border: 1px solid #d7dbe0; border-radius: 8px; background: #fff; color: #30363b; text-align: left; }
+.model-picker-button:hover { background: #f7f8f9; }
+.model-picker-copy { display: grid; min-width: 0; gap: 2px; }
+.model-picker-copy strong { overflow: hidden; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.model-picker-copy small { color: #727981; font-size: 10px; }
+.model-menu { position: absolute; z-index: 12; bottom: calc(100% + 8px); left: 0; box-sizing: border-box; width: min(520px, calc(100vw - 24px)); max-height: min(480px, 62vh); overflow: auto; padding: 7px; border: 1px solid #d8dde1; border-radius: 8px; background: #fff; box-shadow: 0 14px 32px #0002; }
+.model-menu-heading { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 8px 9px 7px; border-bottom: 1px solid #edf0f2; color: #31383e; }
+.model-menu-heading strong { display: block; font-size: 12px; font-weight: 650; }
+.model-menu-heading small { display: block; margin-top: 2px; color: #7b858c; font-size: 10px; }
+.model-menu-heading-detail { justify-content: flex-start; }
+.model-menu-back { display: grid; width: 26px; height: 26px; place-items: center; border: 1px solid #dfe4e7; border-radius: 7px; background: #f7f9fa; color: #52616a; font-size: 20px; line-height: 1; }
+.model-menu-back:hover { background: #edf3f5; }
+.model-search { display: flex; align-items: center; gap: 7px; margin: 7px 2px; padding: 7px 9px; border: 1px solid #dfe4e7; border-radius: 7px; background: #fafbfc; color: #7e8a92; }
+.model-search input { width: 100%; min-width: 0; border: 0; outline: 0; background: transparent; color: #30363b; font-size: 11px; }
+.model-group-list, .model-model-list { display: grid; gap: 3px; padding-top: 4px; }
+.model-group-option { display: grid; grid-template-columns: 28px minmax(0, 1fr) auto; align-items: center; gap: 9px; width: 100%; min-height: 54px; padding: 7px 9px; border-radius: 7px; background: transparent; color: #30363b; text-align: left; }
+.model-group-option:hover, .model-group-option.selected { background: #eef5f3; }
+.model-group-icon { display: grid; width: 25px; height: 25px; place-items: center; border: 1px solid #b9e3d2; border-radius: 7px; background: #edfaf4; color: #16835d; font-size: 13px; }
+.model-group-copy { display: grid; min-width: 0; gap: 3px; }
+.model-group-copy strong { overflow: hidden; font-size: 12px; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
+.model-group-copy strong em { margin-left: 6px; padding: 2px 5px; border-radius: 4px; background: #dff5eb; color: #16835d; font-size: 9px; font-style: normal; font-weight: 600; }
+.model-group-copy small { overflow: hidden; color: #7a858d; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.model-group-rate { display: flex; align-items: center; gap: 9px; color: #7a858d; white-space: nowrap; }
+.model-group-rate small { font-size: 10px; }
+.model-group-rate span { color: #87939a; font-size: 18px; }
+.model-provider-group + .model-provider-group { margin-top: 7px; padding-top: 6px; border-top: 1px solid #eceff1; }
+.model-provider-group h4 { margin: 2px 8px 4px; color: #64717a; font-size: 11px; font-weight: 600; }
+.model-option { display: flex; align-items: center; justify-content: space-between; gap: 12px; width: 100%; min-width: 0; min-height: 46px; padding: 6px 9px; border-radius: 6px; background: transparent; color: #30363b; text-align: left; }
+.model-option:hover, .model-option.selected { background: #eef3f5; }
+.model-option-main { display: grid; min-width: 0; gap: 2px; }
+.model-option-main strong { overflow: hidden; font-size: 11px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.model-option-main small, .model-option-rate small { color: #747d84; font-size: 10px; white-space: nowrap; }
+.model-option-rate { display: flex; flex: 0 0 auto; gap: 9px; }
+.permission-button.full { border-color: #8ab4f8; background: #e8f0fe; color: #174ea6; }
+/* 顶部两个上下文控件采用同一高度，保持输入区上方的苹果风紧凑节奏。 */
+.composer-tools .cwd-button { display: inline-flex; align-items: center; box-sizing: border-box; height: 36px; min-height: 36px; max-width: 180px; padding: 0 10px; border-radius: 8px; font-size: 11px; line-height: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.key-picker-wrap { position: relative; min-width: 0; flex: 0 1 auto; }
+.key-menu { position: absolute; z-index: 8; bottom: calc(100% + 8px); left: 0; box-sizing: border-box; width: min(500px, calc(100vw - 24px)); min-width: 360px; max-height: min(420px, 55vh); overflow-x: hidden; overflow-y: auto; scrollbar-gutter: stable; padding: 7px; border: 1px solid #dadce0; border-radius: 12px; background: #fff; box-shadow: 0 14px 32px #0002; }
+.menu-caption { display: flex; justify-content: space-between; padding: 7px 9px; color: #777d83; font-size: 11px; }
+.key-option { display: grid; grid-template-columns: 8px minmax(0, 1fr) auto; align-items: center; column-gap: 9px; width: 100%; min-width: 0; min-height: 42px; box-sizing: border-box; padding: 9px 12px; border-radius: 8px; background: #fff; appearance: none; overflow: hidden; text-align: left; font-size: 12px; line-height: 20px; white-space: nowrap; }
+.key-option:hover, .key-option.selected { background: #e8f0fe; }
+.key-option-label { display: block; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; line-height: 20px; }
+.key-option-status { min-width: 40px; color: #73777d; font-size: 11px; line-height: 20px; text-align: right; white-space: nowrap; }
+.menu-empty { padding: 12px 9px; }
+.dot { display: inline-block; width: 7px; height: 7px; flex: 0 0 7px; border-radius: 50%; background: #1e8e3e; }
+.dot.off { background: #d93025; }
+.attachments-strip { display: flex; flex-wrap: wrap; gap: 8px; max-height: 138px; margin: 0 0 8px; overflow: auto; padding: 1px; }
+.attachment-preview { position: relative; display: flex; align-items: center; gap: 7px; min-width: 0; border: 1px solid #e0e3e6; border-radius: 9px; background: #fafbfc; color: #4d545b; font-size: 11px; }
+.attachment-preview.image-attachment { width: 94px; height: 70px; overflow: hidden; }
+.image-attachment img { width: 100%; height: 100%; object-fit: cover; }
+.image-attachment > span { position: absolute; right: 0; bottom: 0; left: 0; overflow: hidden; padding: 12px 5px 4px; color: #fff; font-size: 9px; text-overflow: ellipsis; white-space: nowrap; background: linear-gradient(transparent, #000a); }
+.attachment-preview.file-attachment { max-width: 250px; min-height: 40px; padding: 7px 28px 7px 9px; }
+.file-icon { color: #5c6670; font-size: 16px; }
+.attachment-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.file-attachment small { flex: 0 0 auto; color: #8a9097; }
+.attachment-remove { position: absolute; top: 4px; right: 4px; z-index: 1; width: 18px; height: 18px; border-radius: 50%; background: #333b; color: #fff; font-size: 15px; line-height: 16px; }
+.attachment-remove:hover { background: #202124; }
+.attachment-download { position: absolute; top: 4px; right: 27px; z-index: 1; display: grid; width: 18px; height: 18px; place-items: center; border-radius: 50%; background: #333b; color: #fff; font-size: 13px; line-height: 1; }
+.attachment-preview:not(:has(.attachment-remove)) .attachment-download { right: 4px; }
+.attachment-download:hover { background: #202124; }
+.message-attachments .attachment-preview { cursor: zoom-in; }
+.message-attachments .attachment-preview.image-attachment { width: 120px; height: 84px; }
+/* 输入框容器：文本域在上、工具条在下。边框与聚焦描边都放在容器上，
+   这样底部工具条也落在同一个视觉框里（参考图的结构）。 */
+.composer-box { position: relative; display: flex; flex-direction: column; border: 1px solid #d9dce0; border-radius: 12px; background: #fff; }
+.composer-box:focus-within { border-color: #9aa0a6; box-shadow: 0 0 0 3px #00000008; }
+
+/* 底部工具条：附件、权限、思考强度 …… 模型、发送。 */
+.composer-bar { display: flex; align-items: center; gap: 6px; padding: 2px 10px 9px; }
+.composer-bar-gap { flex: 1 1 auto; min-width: 4px; }
+.bar-picker { position: relative; flex: 0 0 auto; min-width: 0; }
+/* pill 的最小可读高度与发送按钮对齐，保证整行基线一致。 */
+.bar-pill { display: inline-flex; align-items: center; gap: 5px; min-height: 29px; max-width: 176px; padding: 3px 8px; border: 1px solid var(--anyu-line-strong); border-radius: 8px; background: var(--anyu-canvas); color: var(--anyu-ink-soft); font-size: 11px; line-height: 1; white-space: nowrap; }
+.bar-pill:hover:not(:disabled) { background: var(--anyu-chrome-active); color: var(--anyu-ink); }
+.bar-pill:disabled { opacity: .45; }
+.bar-pill-icon { display: grid; width: 14px; flex: 0 0 14px; place-items: center; font-size: 12px; line-height: 1; }
+.bar-pill-label { overflow: hidden; text-overflow: ellipsis; }
+/* 完整访问是需要用户留意的状态：用警示色把它和普通设置区分开。 */
+.bar-pill.is-warning { border-color: var(--anyu-caution); background: var(--anyu-caution-soft); color: var(--anyu-caution-ink); }
+.bar-pill.is-warning:hover:not(:disabled) { background: var(--anyu-caution-soft); }
+.bar-pill.is-muted { color: var(--anyu-ink-muted); }
+
+/* pill 的下拉菜单统一向上展开，因为工具条就在输入框下沿。 */
+.bar-menu { position: absolute; z-index: 14; bottom: calc(100% + 8px); left: 0; box-sizing: border-box; width: 272px; max-height: min(430px, 64vh); overflow: auto; padding: 6px; border: 1px solid var(--anyu-line-strong); border-radius: 12px; background: var(--anyu-canvas); box-shadow: 0 14px 32px #0002; }
+.bar-menu-heading { padding: 6px 9px 5px; }
+.bar-menu-heading strong { display: block; color: var(--anyu-ink); font-size: 11px; font-weight: 650; }
+.bar-menu-heading small { display: block; margin-top: 2px; color: var(--anyu-ink-muted); font-size: 10px; line-height: 1.35; }
+.bar-menu-divider { height: 1px; margin: 5px 4px; background: var(--anyu-line); }
+.bar-menu-item { display: flex; align-items: center; width: 100%; gap: 9px; padding: 7px 9px; border-radius: 8px; background: transparent; color: var(--anyu-ink); text-align: left; }
+.bar-menu-item:hover { background: var(--anyu-chrome-active); }
+.bar-menu-item.selected { background: var(--anyu-accent-soft); color: var(--anyu-accent-ink); }
+.bar-menu-icon { display: grid; width: 20px; flex: 0 0 20px; place-items: center; font-size: 13px; line-height: 1; }
+.bar-menu-copy { min-width: 0; flex: 1 1 auto; }
+.bar-menu-copy strong { display: block; font-size: 11px; font-weight: 600; }
+.bar-menu-copy small { display: block; margin-top: 1px; color: var(--anyu-ink-muted); font-size: 10px; line-height: 1.35; }
+.bar-menu-item.selected .bar-menu-copy small { color: var(--anyu-accent-ink); opacity: .8; }
+.bar-menu-check { flex: 0 0 auto; color: var(--anyu-accent); font-size: 11px; }
+.bar-menu-note { display: flex; align-items: center; gap: 9px; padding: 7px 9px; color: var(--anyu-ink-muted); }
+.bar-menu-note .bar-menu-copy strong { color: var(--anyu-ink-soft); }
+
+/* 工具条里的模型选择器改成单行紧凑形态，与左右 pill 同高。 */
+.composer-bar .model-picker-wrap { flex: 0 1 auto; max-width: 250px; }
+.composer-bar .model-picker-button { min-height: 29px; padding: 3px 9px; gap: 8px; border-radius: 8px; }
+.composer-bar .model-picker-copy { display: flex; align-items: center; }
+.composer-bar .model-picker-copy strong { font-size: 11px; }
+/* 分组与协议信息在工具条里放不下，移进菜单标题显示。 */
+.composer-bar .model-picker-copy small { display: none; }
+/* 模型选择器位于行尾，菜单必须右对齐，否则会顶出窗口右边界。 */
+.composer-bar .model-menu { left: auto; right: 0; }
+.image-reference-menu { position: absolute; z-index: 11; left: 45px; bottom: calc(100% + 6px); width: min(300px, 78vw); max-height: 260px; overflow: auto; padding: 7px; border: 1px solid #d9dce0; border-radius: 12px; background: #fff; box-shadow: 0 14px 32px #0002; }
+.image-reference-option { display: flex; align-items: center; width: 100%; gap: 9px; padding: 7px; border-radius: 8px; background: transparent; color: #444b52; text-align: left; }
+.image-reference-option:hover { background: #f1f3f4; }
+.image-reference-option img { width: 38px; height: 30px; flex: 0 0 auto; border-radius: 5px; object-fit: cover; }
+.image-reference-option span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.skill-menu { position: absolute; z-index: 12; left: 0; right: 0; bottom: calc(100% + 6px); box-sizing: border-box; width: 100%; max-height: min(380px, 52vh); overflow: hidden; padding: 7px; border: 1px solid #d9dce0; border-radius: 12px; background: #fff; box-shadow: 0 14px 32px #0002; }
+.skill-menu-search { display: flex; align-items: center; gap: 7px; height: 30px; margin: 1px 1px 5px; padding: 0 9px; border: 1px solid #e1e4e7; border-radius: 8px; background: #fafbfc; color: #8a9096; }
+.skill-menu-search:focus-within { border-color: #aab1b8; background: #fff; box-shadow: 0 0 0 2px #00000008; }
+.skill-menu-search > span { flex: 0 0 auto; font-size: 17px; line-height: 1; }
+.skill-menu-search input { min-width: 0; width: 100%; height: 100%; padding: 0; border: 0; outline: 0; background: transparent; color: #34383d; font-size: 12px; }
+.skill-menu-list { max-height: 285px; overflow: auto; overscroll-behavior: contain; }
+.skill-menu-item { display: flex; align-items: center; width: 100%; gap: 9px; padding: 8px 9px; border-radius: 8px; background: transparent; color: #34383d; text-align: left; }
+.skill-menu-item:hover, .skill-menu-item.active { background: #f1f3f4; }
+.skill-menu-item strong, .skill-menu-item small { display: block; }
+.skill-menu-item strong { font-size: 12px; font-weight: 600; }
+.skill-menu-item small { margin-top: 2px; color: #7a8086; font-size: 10px; line-height: 1.35; }
+.skill-menu-copy { min-width: 0; flex: 1 1 auto; }
+.skill-menu-copy small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.skill-menu-icon { display: grid; width: 26px; height: 26px; place-items: center; border: 1px solid #e0e3e6; border-radius: 8px; color: #4f5962; }
+.skill-market-block { margin-top: 22px; }
+.setting-label-row { display: flex; align-items: center; justify-content: space-between; }
+.setting-label-row .ghost { width: auto; margin: 0; padding: 6px 9px; font-size: 11px; }
+.skills-market { display: grid; gap: 12px; }
+.market-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.market-heading h4 { margin: 4px 0 4px; font-size: 17px; }
+.market-heading p { margin: 0; color: #747a80; font-size: 11px; line-height: 1.45; }
+.market-status { flex: 0 0 auto; color: #6e757d; font-size: 10px; }
+.skill-grid { display: grid; gap: 8px; }
+.skill-card { display: flex; align-items: center; gap: 10px; padding: 10px; border: 1px solid #e0e3e6; border-radius: 10px; background: #fbfcfd; }
+.skill-card-icon { display: grid; width: 31px; height: 31px; flex: 0 0 31px; place-items: center; border-radius: 9px; background: #eef1f3; color: #343a40; }
+.skill-card-icon.video { background: #edf3f1; }
+.skill-card-copy { min-width: 0; flex: 1; }
+.skill-card-copy strong, .skill-card-copy span, .skill-card-copy small { display: block; }
+.skill-card-copy strong { font-size: 12px; }
+.skill-card-copy span { margin-top: 2px; color: #737a81; font-size: 10px; line-height: 1.35; }
+.skill-card-copy small { margin-top: 4px; overflow: hidden; color: #555d65; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.skill-installed { color: #238636; font-size: 10px; }
+.skill-toggle { flex: 0 0 auto; padding: 6px 8px; border: 1px solid #d9dfe3; border-radius: 7px; background: #fff; color: #5c6670; font-size: 10px; }
+.skill-toggle.enabled { border-color: #b8d9c0; background: #f1faf3; color: #238636; }
+.skill-config { display: grid; gap: 9px; padding-top: 6px; border-top: 1px solid #edf0f2; }
+.config-title { color: #555c63; font-size: 11px; font-weight: 600; }
+.config-row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.config-row label { display: grid; gap: 5px; color: #6d737a; font-size: 10px; }
+.config-row select { min-width: 0; padding: 8px; border: 1px solid #d8dadd; border-radius: 8px; background: #fff; color: #353a3f; font-size: 11px; outline: 0; }
+.video-attachment { width: 180px; min-height: 108px; overflow: hidden; flex-direction: column; align-items: stretch; gap: 0; }
+.video-attachment video { display: block; width: 100%; height: 86px; object-fit: cover; background: #111; }
+.video-attachment span { overflow: hidden; padding: 5px 7px; text-overflow: ellipsis; white-space: nowrap; }
+.generated-video { display: grid; width: min(520px, 100%); gap: 6px; margin-top: 8px; }
+.generated-video video { display: block; width: 100%; max-height: 340px; border: 1px solid #e0e3e6; border-radius: 10px; background: #111; }
+.media-download { justify-self: start; padding: 5px 9px; border: 1px solid #dfe3e7; border-radius: 7px; background: #fff; color: #4c5964; font-size: 11px; }
+.media-download:hover { border-color: #b8c0c8; background: #f7f8f9; }
+.image-lightbox { position: fixed; inset: 0; z-index: 30; display: grid; place-items: center; padding: 28px; background: #111a; }
+.image-lightbox-inner { position: relative; display: grid; max-width: min(1000px, 92vw); max-height: 90vh; gap: 9px; padding: 12px; border: 1px solid #ffffff33; border-radius: 14px; background: #fff; box-shadow: 0 20px 60px #0005; }
+.image-lightbox-inner img { display: block; width: auto; max-width: min(960px, 88vw); height: auto; max-height: 78vh; object-fit: contain; }
+.image-lightbox-inner > div:last-child { overflow: hidden; color: #555b61; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.image-lightbox-close { position: absolute; z-index: 1; top: 6px; right: 6px; width: 28px; height: 28px; border-radius: 50%; background: #202124cc; color: #fff; font-size: 18px; line-height: 1; }
+.image-lightbox-close:hover { background: #000; }
+.lightbox-download { justify-self: end; }
+.composer textarea { display: block; width: 100%; min-height: 68px; max-height: 180px; resize: none; padding: 13px 14px 4px; border: 0; border-radius: 12px 12px 0 0; background: transparent; outline: 0; line-height: 1.5; }
+/* 描边统一由 .composer-box:focus-within 负责，文本域自身不再画边框。 */
+.composer textarea:focus { border: 0; box-shadow: none; }
+.composer-box.is-dragging { border-color: #6f7780; box-shadow: 0 0 0 3px #0000000d; }
+.attach-button { display: grid; width: 29px; height: 29px; flex: 0 0 29px; place-items: center; border: 1px solid #d9dce0; border-radius: 8px; background: #fff; color: #59616a; font-size: 20px; line-height: 1; }
+.attach-button:hover { border-color: #bfc4c9; background: #f6f7f8; color: #202124; }
+.attachment-menu { position: absolute; z-index: 9; bottom: calc(100% + 8px); left: 0; width: 225px; padding: 6px; border: 1px solid #d9dce0; border-radius: 10px; background: #fff; box-shadow: 0 12px 30px #00000017; }
+.attachment-menu button { display: flex; align-items: center; width: 100%; gap: 10px; padding: 9px; border-radius: 7px; background: transparent; color: #444b52; text-align: left; }
+.attachment-menu button:hover { background: #f2f4f5; }
+.attachment-menu button > span:first-child { display: grid; width: 24px; height: 24px; place-items: center; border: 1px solid #e1e4e7; border-radius: 6px; color: #5e6872; }
+.attachment-menu strong, .attachment-menu small { display: block; }
+.attachment-menu strong { font-size: 12px; font-weight: 600; }
+.attachment-menu small { margin-top: 2px; color: #838991; font-size: 10px; }
+.send { width: 31px; height: 31px; flex: 0 0 31px; border-radius: 8px; background: var(--anyu-primary); color: var(--anyu-primary-ink); font-weight: 800; }
+.send:hover { background: var(--anyu-primary-hover); }
+.send.stop { border: 1px solid #d9dce0; background: #fff; color: #4e555c; font-size: 12px; }
+.send.stop:hover { border-color: #aeb4ba; background: #f5f6f7; }
+.composer-meta { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 7px; color: #8a8f94; font-size: 11px; }
+.modal-backdrop { position: fixed; inset: 0; z-index: 10; display: grid; place-items: center; background: #20212433; }
+.permission-modal { width: min(440px, calc(100vw - 36px)); max-height: calc(100vh - 36px); overflow: auto; padding: 23px; border: 1px solid #dadce0; border-radius: 14px; background: #fff; box-shadow: 0 15px 45px #0002; }
+.modal-kicker { color: #5f6368; font-size: 10px; letter-spacing: .8px; }
+.permission-modal h3 { margin: 9px 0 7px; font-size: 19px; }
+.permission-modal p { margin: 0; color: #5f6368; line-height: 1.5; }
+.permission-details { margin-top: 14px; border: 1px solid #e4e6e8; border-radius: 8px; background: #fafbfc; }
+.permission-details summary { cursor: pointer; padding: 8px 10px; color: #626970; font-size: 11px; }
+.permission-details pre { max-height: 180px; overflow: auto; margin: 0; padding: 0 10px 10px; color: #454b52; font: 11px/1.45 ui-monospace, SFMono-Regular, Consolas, monospace; white-space: pre-wrap; }
+.modal-actions, .settings-actions { display: flex; justify-content: flex-end; gap: 9px; margin-top: 20px; }
+.modal-primary { width: auto; margin-top: 0; }
+.select-options { display: grid; gap: 7px; margin-top: 16px; }
+.option { width: 100%; text-align: left; }
+.modal-input { width: 100%; margin-top: 14px; padding: 11px; border: 1px solid #d8dadd; border-radius: 8px; outline: 0; }
+.settings-head { display: flex; align-items: flex-start; justify-content: space-between; }
+.setting-block { display: grid; gap: 8px; margin-top: 19px; }
+.setting-block label { color: #51555b; font-size: 12px; }
+.setting-block select { padding: 10px; border: 1px solid #d8dadd; border-radius: 8px; background: #fff; outline: 0; }
+.setting-block p { margin: 0; color: #73777d; font-size: 11px; line-height: 1.5; }
+.setting-value { color: #34373b; font-size: 13px; word-break: break-all; }
+.settings-actions .ghost { margin-right: auto; }
+.setting-label-row { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.setting-label-row > div { min-width: 0; }
+.settings-plugin-market-section { width: min(1040px, 100%); }
+.plugin-market-panel { min-width: 0; }
+.plugin-market-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; padding: 0 0 18px; border-bottom: 1px solid #edf0f2; }
+.plugin-market-head h2 { margin: 0 0 5px; font-size: 18px; }
+.plugin-market-head p { max-width: 650px; margin: 0; color: #73777d; font-size: 12px; line-height: 1.5; }
+.plugin-market-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 14px 0; border-bottom: 1px solid #edf0f2; }
+.plugin-market-filters { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; min-width: 0; }
+.plugin-tabs { display: flex; align-items: center; gap: 4px; min-width: 0; }
+.plugin-tab { padding: 8px 11px; border-radius: 7px; background: transparent; color: #73777d; font-size: 12px; white-space: nowrap; }
+.plugin-tab:hover { background: #f4f5f6; color: #34373b; }
+.plugin-tab.active { background: var(--anyu-primary); color: var(--anyu-primary-ink); }
+.plugin-tab span { display: inline-block; min-width: 16px; margin-left: 5px; color: inherit; font-size: 10px; opacity: .72; }
+.plugin-category-tabs { display: flex; align-items: center; gap: 2px; padding: 3px; border: 1px solid #e1e4e7; border-radius: 8px; background: #f7f8f9; }
+.plugin-category-tab { padding: 5px 10px; border-radius: 6px; background: transparent; color: #73777d; font-size: 11px; white-space: nowrap; }
+.plugin-category-tab:hover { color: #34373b; }
+.plugin-category-tab.active { background: #fff; color: #202124; box-shadow: 0 1px 3px #00000012; }
+.plugin-tools { display: flex; align-items: center; gap: 8px; min-width: 270px; }
+.plugin-tools input { width: 100%; min-width: 0; padding: 8px 10px; border: 1px solid #d8dadd; border-radius: 8px; outline: 0; background: #fff; font-size: 12px; }
+.plugin-tools input:focus { border-color: #9aa0a6; box-shadow: 0 0 0 3px #00000008; }
+.plugin-tools .ghost { flex: 0 0 auto; white-space: nowrap; }
+.plugin-market-content { min-height: 260px; padding: 22px 0; }
+.plugin-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.plugin-card { min-width: 0; display: flex; flex-direction: column; justify-content: space-between; gap: 15px; padding: 15px; border: 1px solid #e1e4e7; border-radius: 10px; background: #fff; }
+.plugin-card:hover { border-color: #c8cdd2; box-shadow: 0 5px 16px #0000000d; }
+.plugin-card-top { display: flex; gap: 12px; min-width: 0; }
+.plugin-icon { flex: 0 0 38px; width: 38px; height: 38px; display: grid; place-items: center; border: 1px solid #dfe3e6; border-radius: 9px; background: #f4f5f6; color: #454b52; font-size: 16px; font-weight: 700; }
+.plugin-card-main { min-width: 0; }
+.plugin-card-title { display: flex; align-items: center; flex-wrap: wrap; gap: 7px; }
+.plugin-card-title strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; }
+.plugin-card-main p { display: -webkit-box; overflow: hidden; margin: 6px 0 10px; color: #73777d; font-size: 11px; line-height: 1.45; -webkit-box-orient: vertical; -webkit-line-clamp: 3; }
+.plugin-badge, .plugin-chip { display: inline-flex; align-items: center; width: max-content; padding: 3px 6px; border: 1px solid #e1e4e7; border-radius: 5px; color: #73777d; font-size: 10px; line-height: 1; }
+.plugin-badge.verified { border-color: #b7dec4; background: #eff8f1; color: #23733a; }
+.plugin-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; color: #8a8f94; font-size: 10px; }
+.plugin-chip { background: #f7f8f9; }
+.plugin-card-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 9px; border-top: 1px solid #f0f1f2; padding-top: 12px; }
+.plugin-action { min-width: 64px; padding: 7px 10px; border: 1px solid #d5d9dd; border-radius: 7px; background: #fff; color: #4f565d; font-size: 11px; }
+.plugin-action:hover { background: #f5f6f7; }
+.plugin-action.active { border-color: #202124; background: #202124; color: #fff; }
+.plugin-operation-banner { display: flex; align-items: center; gap: 8px; margin: 14px 0 0; padding: 8px 10px; border: 1px solid #e3e7e5; border-radius: 8px; background: #fbfdfc; }
+.plugin-operation-dot { width: 6px; height: 6px; flex: 0 0 6px; border-radius: 50%; background: #4f8d7b; animation: activity-pulse 1.2s ease-in-out infinite alternate; }
+.plugin-progress { min-width: 0; width: 100%; margin-top: 8px; }
+.plugin-operation-banner .plugin-progress { margin-top: 0; }
+.plugin-progress-track { height: 4px; overflow: hidden; border-radius: 99px; background: #e8ecea; }
+.plugin-progress-track span { display: block; height: 100%; border-radius: inherit; background: #5a9b88; transition: width .22s ease; }
+.plugin-progress-copy { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 4px; color: #7a8580; font-size: 10px; line-height: 1.2; }
+.plugin-progress-copy strong { color: #4c7165; font-size: 10px; font-weight: 600; }
+.plugin-progress.is-compact { margin-top: 8px; }
+.plugin-progress.is-error .plugin-progress-track span { background: #c66a6a; }
+.plugin-progress.is-error .plugin-progress-copy, .plugin-progress.is-error .plugin-progress-copy strong { color: #a94c4c; }
+.plugin-progress.is-complete .plugin-progress-track span { background: #6da886; }
+.plugin-text-action { padding: 6px 2px; background: transparent; color: #858b92; font-size: 11px; }
+.plugin-text-action:hover { color: #c5221f; }
+.plugin-market-empty { min-height: 260px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 9px; color: #858b92; text-align: center; font-size: 12px; }
+.plugin-market-empty strong { color: #454b52; font-size: 14px; font-weight: 600; }
+.plugin-market-empty .primary { width: auto; margin-top: 8px; }
+.plugin-market-error { margin: 14px 0 0; padding: 9px 11px; border: 1px solid #f1c4c4; border-radius: 8px; background: #fff7f7; color: #a50e0e; font-size: 11px; }
+.plugin-market-foot { display: flex; justify-content: space-between; gap: 12px; padding: 11px 0; border-top: 1px solid #edf0f2; color: #8a8f94; font-size: 10px; }
+.settings-core-skills .skill-market-block { margin-top: 0; }
+.plugin-publish-backdrop { z-index: 50; padding: 20px; background: #20212466; }
+.plugin-publish-modal { width: min(480px, calc(100vw - 36px)); }
+.plugin-form-label { display: block; margin-top: 16px; color: #51555b; font-size: 12px; }
+.plugin-publish-modal .modal-input { box-sizing: border-box; margin-top: 7px; }
+.plugin-publish-modal .modal-actions { margin-top: 22px; }
+.plugin-publish-state { color: #23733a; font-size: 11px; }
+@media (max-width: 850px) {
+  .settings-page-layout { grid-template-columns: 220px minmax(0, 1fr); }
+  .settings-page-header { padding-left: 22px; padding-right: 22px; }
+  .settings-page-content { padding-right: 28px; padding-left: 28px; }
+  .settings-row { align-items: flex-start; flex-direction: column; gap: 12px; }
+  .settings-row select { width: 100%; max-width: none; }
+  .settings-row-actions { width: 100%; justify-content: space-between; }
+  .settings-value { max-width: calc(100% - 78px); }
+}
+@media (max-width: 620px) {
+  .settings-page-layout { display: flex; flex-direction: column; }
+  .settings-sidebar { flex: 0 0 auto; overflow: visible; padding: 12px 12px 10px; border-right: 0; border-bottom: 1px solid #e8eaed; }
+  .settings-back { width: auto; margin-bottom: 10px; }
+  .settings-nav { display: flex; align-items: center; gap: 4px; overflow-x: auto; padding-bottom: 2px; }
+  .settings-nav-item { flex: 0 0 auto; width: auto; white-space: nowrap; }
+  .settings-page-header { min-height: 61px; padding: 16px 16px 10px; }
+  .settings-page-header h1 { font-size: 20px; }
+  .settings-page-content { padding: 24px 16px 44px; }
+  .settings-section { margin-bottom: 26px; }
+  .settings-section h2 { font-size: 13px; }
+  .settings-row-actions { align-items: flex-start; flex-direction: column; gap: 8px; }
+  .settings-value { max-width: 100%; }
+  .settings-row-actions .ghost { align-self: flex-start; }
+  .setting-label-row { align-items: flex-start; flex-direction: column; }
+}
+@media (max-width: 850px) {
+  .app-shell { grid-template-columns: 210px minmax(0, 1fr); }
+  .conversation { padding: 18px 16px; }
+  .conversation.browser-layout { grid-template-columns: minmax(0, 1.12fr) minmax(270px, .88fr); gap: 10px; padding: 12px; }
+  .topbar { padding: 0 16px; }
+  .composer-tools { flex-wrap: wrap; }
+  .cwd-button { display: none; }
+  /* 工具条放不下时换行，而不是把模型选择器挤没。 */
+  .composer-bar { flex-wrap: wrap; }
+  .composer-bar .model-picker-wrap { flex: 1 1 150px; max-width: none; }
+  .chat-title { font-size: 19px; }
+}
+@media (max-width: 620px) {
+  .app-shell { grid-template-columns: 0 minmax(0, 1fr); }
+  .sidebar { display: none; }
+  .topbar { padding: 0 12px; }
+  .conversation { padding: 12px; }
+  .conversation.browser-layout { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(300px, 1fr) minmax(240px, .8fr); overflow-y: auto; }
+  .browser-layout .chat-panel { min-height: 300px; }
+  .chat-head { margin-bottom: 7px; }
+  .chat-subtitle { max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .composer-tools { gap: 5px; }
+  .picker-button { max-width: 172px; }
+  .composer-bar { gap: 5px; }
+  /* 窄屏优先保证模型名可读，两个 pill 收紧到图标+短标签。 */
+  .bar-pill { max-width: 124px; padding: 3px 7px; }
+  .composer-bar .model-picker-wrap { flex-basis: auto; }
+  .message { gap: 7px; margin-bottom: 13px; }
+  .message-body { max-width: calc(100% - 35px); }
+  .avatar { width: 24px; height: 24px; }
+  .assistant-turn .message-body { width: calc(100% - 31px); }
+  .artifact-card { align-items: flex-start; flex-wrap: wrap; }
+  .artifact-card-actions { width: 100%; padding-left: 39px; }
+}
+@media (max-width: 680px) {
+  .key-menu { width: min(360px, calc(100vw - 24px)); min-width: 0; }
+  .model-menu { width: min(480px, calc(100vw - 24px)); }
+  .plugin-market-toolbar { align-items: stretch; flex-direction: column; }
+  .plugin-market-filters { align-items: stretch; flex-direction: column; }
+  .plugin-tabs, .plugin-category-tabs { overflow-x: auto; }
+  .plugin-category-tabs { align-self: flex-start; max-width: 100%; }
+  .plugin-tabs { overflow-x: auto; padding-bottom: 2px; }
+  .plugin-tools { min-width: 0; }
+  .plugin-grid { grid-template-columns: 1fr; }
+  .plugin-market-foot { flex-direction: column; gap: 4px; }
+  .plugin-publish-backdrop { padding: 10px; }
+}
+
+/* ===== 外观主题画廊 ===== */
+.appearance-legend { margin: -4px 0 16px; color: var(--anyu-ink-muted); font-size: 11px; line-height: 1.5; }
+.appearance-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(154px, 1fr)); gap: 16px; }
+.appearance-card { display: grid; gap: 9px; padding: 0; border: 0; background: transparent; text-align: center; }
+.appearance-card:focus-visible { outline: 2px solid var(--anyu-accent); outline-offset: 4px; border-radius: 14px; }
+.appearance-thumb {
+  position: relative;
+  display: block;
+  overflow: hidden;
+  aspect-ratio: 4 / 3;
+  border: 1px solid var(--anyu-line-strong);
+  border-radius: 12px;
+  background: var(--thumb-canvas);
+  transition: border-color .15s ease, box-shadow .15s ease;
+}
+.appearance-card:hover .appearance-thumb { border-color: var(--thumb-accent); }
+.appearance-card.active .appearance-thumb { border-color: var(--thumb-accent); box-shadow: 0 0 0 2px var(--thumb-accent-soft); }
+.appearance-thumb-side {
+  position: absolute;
+  inset: 0 auto 0 0;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  width: 31%;
+  padding: 12px 8px;
+  border-right: 1px solid var(--thumb-line);
+  background: var(--thumb-chrome);
+}
+.appearance-thumb-side span { display: block; height: 3px; border-radius: 99px; background: var(--thumb-line-strong); }
+.appearance-thumb-side span:first-child { width: 62%; height: 7px; border-radius: 3px; background: var(--thumb-accent); }
+.appearance-thumb-body { position: absolute; inset: 0 0 0 31%; display: flex; flex-direction: column; gap: 7px; padding: 12px 10px; }
+.appearance-thumb-body span { display: block; height: 3px; border-radius: 99px; }
+.appearance-thumb-line { background: var(--thumb-line-strong); }
+.appearance-thumb-line.short { width: 58%; }
+.appearance-thumb-bubble { width: 76%; height: 12px; border-radius: 4px; background: var(--thumb-bubble); }
+.appearance-thumb-bubble.user { align-self: flex-end; width: 56%; background: var(--thumb-accent-soft); }
+.appearance-thumb-check {
+  position: absolute;
+  top: 7px;
+  right: 7px;
+  display: grid;
+  width: 18px;
+  height: 18px;
+  place-items: center;
+  border-radius: 50%;
+  background: var(--thumb-accent);
+  color: #fff;
+  font-size: 11px;
+  line-height: 1;
+  opacity: 0;
+}
+.appearance-card.active .appearance-thumb-check { opacity: 1; }
+.appearance-card-name { display: block; color: var(--anyu-ink); font-size: 12px; font-weight: 600; }
+.appearance-card-hint { display: block; margin-top: 2px; color: var(--anyu-ink-muted); font-size: 10px; }
+
+/* 缩略图配色与 :root[data-anyu-theme] 的令牌一一对应，仅用于预览，不参与实际渲染。 */
+.appearance-card[data-appearance-theme="cloud"] { --thumb-canvas: #ffffff; --thumb-chrome: #fafafa; --thumb-line: #e8eaed; --thumb-line-strong: #d8dadd; --thumb-bubble: #f1f3f4; --thumb-accent: #174ea6; --thumb-accent-soft: #e8f0fe; }
+.appearance-card[data-appearance-theme="rice"] { --thumb-canvas: #fbf7ee; --thumb-chrome: #f4eee0; --thumb-line: #e6dcc7; --thumb-line-strong: #d8caae; --thumb-bubble: #f1ead9; --thumb-accent: #a8452f; --thumb-accent-soft: #f3e6d3; }
+.appearance-card[data-appearance-theme="celadon"] { --thumb-canvas: #f3f8f5; --thumb-chrome: #e8f1ec; --thumb-line: #d6e6dd; --thumb-line-strong: #bfd6ca; --thumb-bubble: #e6f1ea; --thumb-accent: #2c6e5b; --thumb-accent-soft: #dcede5; }
+.appearance-card[data-appearance-theme="navy"] { --thumb-canvas: #f4f6fb; --thumb-chrome: #e9edf7; --thumb-line: #dde3f0; --thumb-line-strong: #c5cfe6; --thumb-bubble: #e7ecf8; --thumb-accent: #2a4c8f; --thumb-accent-soft: #dee6f7; }
+.appearance-card[data-appearance-theme="bamboo"] { --thumb-canvas: #f4f7ef; --thumb-chrome: #e9f0e1; --thumb-line: #dce6cd; --thumb-line-strong: #c6d5b3; --thumb-bubble: #e8f0dd; --thumb-accent: #3f6b2e; --thumb-accent-soft: #e2ecd6; }
+.appearance-card[data-appearance-theme="ochre"] { --thumb-canvas: #fbf4ec; --thumb-chrome: #f4e8da; --thumb-line: #ecdcca; --thumb-line-strong: #d9c0a4; --thumb-bubble: #f4e8d9; --thumb-accent: #b0552f; --thumb-accent-soft: #f6e3d3; }
+.appearance-card[data-appearance-theme="rouge"] { --thumb-canvas: #fbf4f6; --thumb-chrome: #f5e8ec; --thumb-line: #eedde2; --thumb-line-strong: #dcbfc8; --thumb-bubble: #f5e6eb; --thumb-accent: #a63d63; --thumb-accent-soft: #f6dfe8; }
+.appearance-card[data-appearance-theme="frost"] { --thumb-canvas: #f5f6f8; --thumb-chrome: #eceef1; --thumb-line: #e2e5e9; --thumb-line-strong: #ccd1d8; --thumb-bubble: #e9ecf0; --thumb-accent: #4a5568; --thumb-accent-soft: #e4e8ef; }
+
+body { display: block; padding: 24px; } .messages { height: 440px; width: 100%; }
+</style><div id="messages" class="messages"></div><script>
+const state = { messages: [], loading: true, streamingMessage: null, runStartedAt: 0, queuedTasks: [], attachments: [], user: { email: 'test' } }
+  const esc = (value) => String(value ?? '').replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]))
+  function renderInlineMessageContent(value) {
+    const source = String(value || '')
+    const filePattern = /^(?:[A-Za-z]:[\\/]|\.\.?[\\/])?[\w.\\/-]+\.(?:js|cjs|mjs|ts|tsx|jsx|json|md|html?|css|go|py|ya?ml|txt|sql)$/i
+    const tokenPattern = /\[([^\]\r\n]+)\]\((https?:\/\/[^\s)]+)\)|`([^`\r\n]+)`|https?:\/\/[^\s<>()]+|(?:[\w.-]+[\\/])*[\w.-]+\.(?:js|cjs|mjs|ts|tsx|jsx|json|md|html?|css|go|py|ya?ml|txt|sql)\b/gi
+    const link = (url, label) => {
+      try {
+        const parsed = new URL(url)
+        if (!['http:', 'https:'].includes(parsed.protocol)) return esc(label)
+        return `<a class="message-link" href="${esc(parsed.href)}" data-external-url="${esc(parsed.href)}" rel="noreferrer">${esc(label)}</a>`
+      } catch { return esc(label) }
+    }
+    let cursor = 0
+    let html = ''
+    for (const match of source.matchAll(tokenPattern)) {
+      html += esc(source.slice(cursor, match.index))
+      if (match[1]) html += link(match[2], match[1])
+      else if (match[3]) html += filePattern.test(match[3]) ? `<button type="button" class="message-file-link" data-file-path="${esc(match[3])}">${esc(match[3])}</button>` : `<code>${esc(match[3])}</code>`
+      else if (/^https?:\/\//i.test(match[0])) html += link(match[0], match[0])
+      else html += `<button type="button" class="message-file-link" data-file-path="${esc(match[0])}">${esc(match[0])}</button>`
+      cursor = match.index + match[0].length
+    }
+    return html + esc(source.slice(cursor))
+  }
+  function renderMessageContent(value) {
+    const source = String(value || '')
+    const fenced = /```([\w.+-]*)[^\S\r\n]*\r?\n([\s\S]*?)```/g
+    let cursor = 0
+    let codeIndex = 0
+    let result = ''
+    for (const match of source.matchAll(fenced)) {
+      result += renderInlineMessageContent(source.slice(cursor, match.index))
+      const language = String(match[1] || '').trim() || '代码'
+      const code = String(match[2] || '').replace(/\s+$/, '')
+      const lines = code ? code.split(/\r?\n/).length : 0
+      result += `<details class="code-result" data-detail-key="code-${codeIndex++}"><summary><span class="tool-chevron">›</span><span>${esc(language)}</span><small>${lines} 行</small></summary><pre><code>${esc(code)}</code></pre></details>`
+      cursor = Number(match.index || 0) + match[0].length
+    }
+    result += renderInlineMessageContent(source.slice(cursor))
+    // 模型偶尔会不加 Markdown 围栏直接返回整页 HTML，仍默认折叠，避免源码铺满对话。
+    if (!codeIndex && /^\s*(?:<!doctype\s+html|<html\b)/i.test(source) && source.split(/\r?\n/).length > 8) {
+      const lines = source.split(/\r?\n/).length
+      return `<details class="code-result" data-detail-key="code-html"><summary><span class="tool-chevron">›</span><span>HTML</span><small>${lines} 行</small></summary><pre><code>${esc(source)}</code></pre></details>`
+    }
+    return result
+  }
+
+const initials = () => 'T'; const formatTimestamp = () => ''; const formatDuration = () => '1 秒'; const formatBytes = () => '1 KB'
+const attachmentMarkup = () => ''; const mediaSourceUrl = () => ''; const businessAssetMarkup = () => ''; const businessArtifactsMarkup = () => ''
+const mediaActivityForSession = () => []; const bindMessageEvents = () => {}
+const inspectMessageArtifacts = async () => []; const effectiveWorkspace = () => ''
+const timestampValue = (value) => Number(value) || 0
+const thinkingOf = (parts) => (parts || []).filter((part) => part.type === 'thinking').map((part) => part.thinking).join('')
+const textOf = (parts) => (parts || []).filter((part) => part.type === 'text').map((part) => part.text).join('')
+const THINKING_LEVELS = []
+  function orderTimeline(messages) {
+    // 排序只重排引用，流式事件与时间线必须指向同一个消息对象。
+    const merged = (Array.isArray(messages) ? messages : []).map((message, index) => ({ message, index }))
+    merged.sort((left, right) => {
+      const leftTime = Number(left.message.createdAt || left.message.timestamp || 0); const rightTime = Number(right.message.createdAt || right.message.timestamp || 0)
+      if (leftTime !== rightTime) return leftTime - rightTime
+      return left.index - right.index
+    })
+    return merged.map(({ message }) => message)
+  }
+
+  function insertTimelineMessage(message) {
+    state.messages = orderTimeline([...state.messages, message])
+  }
+
+  function hasRenderableMessageContent(message) {
+    if (!message) return false
+    if (message.role === 'tool' || message.role === 'user') return true
+    const text = String(message.content || '').trim()
+    const errorTextValue = String(message.errorMessage || message.error || '').trim()
+    const hasAttachments = Array.isArray(message.attachments) && message.attachments.length > 0
+    const hasMedia = Boolean(message.media && (message.media.kind || message.media.url || message.media.data || message.media.path))
+    return Boolean(text || errorTextValue || hasAttachments || hasMedia || (message.role === 'assistant' && message.isStreaming))
+  }
+  function visibleTimelineMessages() {
+    return state.messages.filter(hasRenderableMessageContent)
+  }
+  function stableMessageIdentity(message, index = 0) {
+    const id = String(message?.id || message?.messageId || message?.toolCallId || '').trim()
+    if (id) return id
+    return `${message?.role || 'message'}:${timestampValue(message?.createdAt || message?.timestamp) || 0}:${index}`
+  }
+  function conversationTimeline(messages = state.messages) {
+    const ordered = orderTimeline(Array.isArray(messages) ? messages : [])
+    const entries = []
+    let activeTurn = null
+    let userIndex = 0
+    ordered.forEach((message, index) => {
+      if (!hasRenderableMessageContent(message)) return
+      if (message.role === 'user') {
+        const identity = stableMessageIdentity(message, userIndex++)
+        entries.push({ kind: 'user', key: `message:${identity}`, message, sourceIndex: state.messages.indexOf(message) })
+        activeTurn = { kind: 'turn', key: `turn:${identity}`, user: message, messages: [], sourceIndex: index }
+        entries.push(activeTurn)
+        return
+      }
+      if (!activeTurn) {
+        const identity = stableMessageIdentity(message, index)
+        activeTurn = { kind: 'turn', key: `turn:orphan:${identity}`, user: null, messages: [], sourceIndex: index }
+        entries.push(activeTurn)
+      }
+      activeTurn.messages.push(message)
+    })
+    const turns = entries.filter((entry) => entry.kind === 'turn')
+    const lastTurn = turns.at(-1)
+    if (state.loading && !lastTurn) {
+      entries.push({ kind: 'turn', key: 'turn:active', user: null, messages: [], sourceIndex: ordered.length, isActive: true })
+    } else if (state.loading && lastTurn) lastTurn.isActive = true
+    return entries.filter((entry) => entry.kind !== 'turn' || entry.messages.length || entry.isActive)
+  }
+  function assistantMessagesForTurn(turn) { return (turn?.messages || []).filter((message) => message.role === 'assistant') }
+  function toolMessagesForTurn(turn) { return (turn?.messages || []).filter((message) => message.role === 'tool') }
+  function turnContent(turn) {
+    const assistants = assistantMessagesForTurn(turn)
+    // 重试成功后只渲染有效回复；失败原因留在同一轮的紧凑活动行中。
+    const successful = assistants.filter((message) => !message.isError)
+    const visible = successful.some((message) => message.isStreaming || String(message.content || '').trim()) ? successful : assistants.filter((message) => message.isError).slice(-1)
+    const chunks = []
+    for (const message of visible) {
+      const text = String(message.content || '').trim()
+      if (text && chunks.at(-1) !== text) chunks.push(text)
+    }
+    return chunks.join('\n\n')
+  }
+  function turnThinking(turn) {
+    const chunks = []
+    for (const message of assistantMessagesForTurn(turn).filter((message) => !message.isError)) {
+      const text = String(message.thinking || '').trim()
+      if (text && !chunks.includes(text)) chunks.push(text)
+    }
+    return chunks.join('\n\n')
+  }
+  function turnArtifacts(turn) {
+    const unique = new Map()
+    for (const message of turn?.messages || []) {
+      for (const artifact of [...(message.artifacts || []), ...(message.discoveredArtifacts || [])]) {
+        const artifactPath = String(artifact?.path || artifact?.name || '').trim()
+        if (!artifactPath) continue
+        const key = artifactPath.replace(/\\/g, '/').toLowerCase()
+        unique.set(key, { ...unique.get(key), ...artifact, path: artifactPath, name: artifact?.name || artifactPath.split(/[\\/]/).at(-1) })
+      }
+    }
+    return [...unique.values()]
+  }
+  function turnIsRunning(turn) {
+    return Boolean(turn?.isActive || (turn?.messages || []).some((message) => message.isStreaming || message.mediaPending || message.businessPending))
+  }
+  function turnStartedAt(turn) {
+    const times = [turn?.user, ...(turn?.messages || [])].map((message) => timestampValue(message?.startedAt || message?.createdAt || message?.timestamp)).filter(Boolean)
+    return times.length ? Math.min(...times) : state.runStartedAt || Date.now()
+  }
+  function turnFinishedAt(turn) {
+    const explicit = (turn?.messages || []).map((message) => timestampValue(message?.finishedAt)).filter(Boolean)
+    return explicit.length ? Math.max(...explicit) : 0
+  }
+  function toolStructureSignature(tool) {
+    return JSON.stringify({
+      running: Boolean(tool?.isStreaming),
+      error: Boolean(tool?.isError),
+      output: Boolean(tool?.content),
+      args: tool?.args && Object.keys(tool.args).length ? tool.args : null
+    })
+  }
+  function turnStructureSignature(turn) {
+    return JSON.stringify({
+      running: turnIsRunning(turn),
+      content: Boolean(turnContent(turn)),
+      thinking: Boolean(turnThinking(turn)),
+      artifacts: turnArtifacts(turn).map((artifact) => [artifact.path, artifact.size, artifact.previewable]),
+      assistants: assistantMessagesForTurn(turn).map((message) => [stableMessageIdentity(message), businessRenderSignature(message), message.mediaPhase || '', Boolean(message.media), (message.attachments || []).length]),
+      failures: assistantMessagesForTurn(turn).filter((message) => message.isError).map((message) => [stableMessageIdentity(message), message.content])
+    })
+  }
+  function conversationEntryHtml(entry) {
+    return entry.kind === 'user' ? messageHtml(entry.message, { key: entry.key }) : turnHtml(entry)
+  }
+  const messageKeys = new WeakMap()
+  let nextMessageKey = 0
+  function messageKey(message) {
+    if (!messageKeys.has(message)) messageKeys.set(message, String(++nextMessageKey))
+    return messageKeys.get(message)
+  }
+  // 业务卡片只在结构性状态变化时重建，普通进度文字由增量更新处理。
+  function businessRenderSignature(message) {
+    if (!message?.businessSkill) return ''
+    const result = message.businessResult || {}
+    const assets = Array.isArray(message.businessAssets) ? message.businessAssets : []
+    const artifacts = Array.isArray(message.artifacts) ? message.artifacts : []
+    return JSON.stringify({
+      skill: message.businessSkill,
+      pending: Boolean(message.businessPending),
+      error: Boolean(message.isError),
+      phase: String(message.businessPhase || ''),
+      status: String(message.businessStatus || ''),
+      result: {
+        reviewCount: result.reviewCount,
+        questionCount: result.questionCount,
+        coverage: result.coverage,
+        count: result.count,
+        text: result.text
+      },
+      assets: assets.length,
+      artifacts: artifacts.map((item) => String(item?.path || item?.name || ''))
+    })
+  }
+  function runElapsedMarkup() {
+    return state.runStartedAt ? `<span class="activity-elapsed">${esc(formatDuration(Date.now() - state.runStartedAt))}</span>` : ''
+  }
+  function activityMarkup() {
+    return turnHtml({ kind: 'turn', key: 'turn:active', user: null, messages: [], isActive: true })
+  }
+  function messagesMarkup() {
+    const messages = conversationTimeline().map(conversationEntryHtml).join('')
+    const empty = !messages ? `<div class="empty"><div><strong>准备好开始工作</strong><span>选择密钥和模型，向 LetaAgent 描述任务。</span></div></div>` : ''
+    return `${messages}${empty}`
+  }
+
+  // 只替换结构变化的消息，并沿用用户已展开的过程详情。
+  function replaceMessageNode(box, node, entry, before = null) {
+    const holder = document.createElement('div')
+    holder.innerHTML = conversationEntryHtml(entry)
+    const next = holder.firstElementChild
+    if (!next) return
+    if (node) {
+      const previousDetails = [...node.querySelectorAll('details')]
+      const nextDetails = [...next.querySelectorAll('details')]
+      nextDetails.forEach((detail) => {
+        const detailKey = detail.dataset.detailKey
+        const kind = ['turn-activity', 'tool-card', 'thinking-card', 'tool-args', 'tool-output', 'code-result'].find((name) => detail.classList.contains(name))
+        const previous = detailKey ? previousDetails.find((item) => item.dataset.detailKey === detailKey) : kind ? previousDetails.find((item) => item.classList.contains(kind)) : null
+        if (previous) detail.open = previous.open
+      })
+      node.replaceWith(next)
+    } else box.insertBefore(next, before || null)
+    bindMessageEvents(next)
+    return next
+  }
+
+  function pinMessagesToBottom(box = document.querySelector('#messages')) {
+    if (!box) return
+    box.scrollTop = Math.max(0, box.scrollHeight - box.clientHeight)
+  }
+
+  function settleMessagesAtBottom(box = document.querySelector('#messages')) {
+    if (!box) return
+    // 流式输出每个增量都会调用这里，只做一次同步定位，避免为每个 token
+    // 排队动画帧和延迟定时器，减少布局计算并保持 Pi 原生输出节奏。
+    pinMessagesToBottom(box)
+  }
+
+  function updateLiveUi(forceScroll = false) {
+    const box = document.querySelector('#messages')
+    const wasAtBottom = box ? box.scrollHeight - box.scrollTop - box.clientHeight < 72 : true
+    if (box) {
+      const nodes = [...box.querySelectorAll('.message')]
+      const existing = new Map(nodes.map((node) => [node.dataset.messageKey, node]))
+      const currentNodes = nodes.slice()
+      const visibleEntries = conversationTimeline()
+      visibleEntries.forEach((entry, index) => {
+        const node = existing.get(entry.key)
+        const atIndex = currentNodes[index]
+        if (!node) {
+          currentNodes.splice(index, 0, replaceMessageNode(box, null, entry, atIndex))
+          return
+        }
+        if (node !== atIndex) {
+          box.insertBefore(node, atIndex || null)
+          const oldIndex = currentNodes.indexOf(node)
+          if (oldIndex >= 0) currentNodes.splice(oldIndex, 1)
+          currentNodes.splice(index, 0, node)
+        }
+        const roleMismatch = (entry.kind === 'user') !== node.classList.contains('user') || (entry.kind === 'turn') !== node.classList.contains('assistant-turn')
+        const structureMismatch = entry.kind === 'turn' && node.dataset.turnSignature !== turnStructureSignature(entry)
+        if (roleMismatch || structureMismatch) {
+          currentNodes[index] = replaceMessageNode(box, node, entry)
+          return
+        }
+        if (entry.kind === 'user') {
+          node.dataset.messageIndex = String(entry.sourceIndex)
+        } else {
+          const rawContent = turnContent(entry)
+          const bubble = node.querySelector('.message-bubble')
+          if (bubble) {
+            if (bubble.dataset.raw !== rawContent) {
+              if (turnIsRunning(entry) && rawContent.startsWith(bubble.dataset.raw || '')) {
+                bubble.append(document.createTextNode(rawContent.slice((bubble.dataset.raw || '').length)))
+              } else bubble.innerHTML = rawContent ? renderMessageContent(rawContent) : ''
+              bubble.dataset.raw = rawContent
+            }
+          }
+          const thinking = node.querySelector('.thinking-card div')
+          if (thinking && thinking.textContent !== turnThinking(entry)) thinking.textContent = turnThinking(entry)
+          const thinkingCard = node.querySelector('.thinking-card')
+          if (thinkingCard) thinkingCard.classList.toggle('is-live', turnIsRunning(entry))
+          const expectedTools = toolMessagesForTurn(entry)
+          const turnContentNode = node.querySelector('.turn-content')
+          let activities = node.querySelector('.turn-activities')
+          if (expectedTools.length && !activities && turnContentNode) {
+            activities = document.createElement('div')
+            activities.className = 'turn-activities'
+            const anchor = [...turnContentNode.children].find((child) => !child.classList.contains('thinking-card'))
+            turnContentNode.insertBefore(activities, anchor || null)
+          }
+          const activityNodes = activities ? [...activities.querySelectorAll(':scope > .turn-activity')] : []
+          const activityByKey = new Map(activityNodes.map((item) => [item.dataset.toolKey, item]))
+          expectedTools.forEach((tool, toolIndex) => {
+            const toolKey = stableMessageIdentity(tool, toolIndex)
+            let activity = activityByKey.get(toolKey)
+            const expectedSignature = toolStructureSignature(tool)
+            if (!activity || activity.dataset.toolSignature !== expectedSignature) {
+              const holder = document.createElement('div')
+              holder.innerHTML = turnToolMarkup(tool, toolIndex)
+              const replacement = holder.firstElementChild
+              if (activity) {
+                const openKeys = new Set([...activity.querySelectorAll('details')].filter((detail) => detail.open).map((detail) => detail.dataset.detailKey))
+                if (activity.open) openKeys.add(activity.dataset.detailKey)
+                if (openKeys.has(replacement.dataset.detailKey)) replacement.open = true
+                replacement.querySelectorAll('details').forEach((detail) => { if (openKeys.has(detail.dataset.detailKey)) detail.open = true })
+                activity.replaceWith(replacement)
+              } else activities?.appendChild(replacement)
+              activity = replacement
+            }
+            const currentAtIndex = activities?.children[toolIndex]
+            if (activity && currentAtIndex !== activity) activities.insertBefore(activity, currentAtIndex || null)
+          })
+          activityNodes.filter((activity) => !expectedTools.some((tool, toolIndex) => stableMessageIdentity(tool, toolIndex) === activity.dataset.toolKey)).forEach((activity) => activity.remove())
+          if (!expectedTools.length) activities?.remove()
+          toolMessagesForTurn(entry).forEach((tool, toolIndex) => {
+            const toolKey = stableMessageIdentity(tool, toolIndex)
+            const activity = [...node.querySelectorAll('[data-tool-key]')].find((item) => item.dataset.toolKey === toolKey)
+            const pre = activity?.querySelector('.tool-output pre')
+            if (pre && pre.textContent !== String(tool.content || '')) pre.textContent = String(tool.content || '')
+            const duration = activity?.querySelector('.tool-duration')
+            if (duration && tool.startedAt) duration.textContent = formatDuration((tool.finishedAt || Date.now()) - tool.startedAt)
+          })
+        }
+      })
+      nodes.filter((node) => !visibleEntries.some((entry) => entry.key === node.dataset.messageKey)).forEach((node) => node.remove())
+      box.querySelectorAll('.assistant-turn.is-running .activity-elapsed').forEach((elapsed) => { elapsed.textContent = formatDuration(Date.now() - turnStartedAt(visibleEntries.filter((entry) => entry.kind === 'turn').at(-1))) })
+      if (visibleEntries.length) box.querySelector('.empty')?.remove()
+      else if (!box.querySelector('.empty')) box.innerHTML = messagesMarkup()
+    }
+    const busy = document.querySelector('#busy')
+    const currentMediaActivity = mediaActivityForSession()
+    if (busy) busy.textContent = state.loading ? 'Agent 正在工作…' : currentMediaActivity.length > 0 ? `${currentMediaActivity.length} 个媒体任务生成中` : state.queuedTasks.length ? `${state.queuedTasks.length} 项排队中` : ''
+    const send = document.querySelector('#send')
+    if (send) {
+      send.disabled = state.sessionSwitching
+      send.classList.toggle('stop', state.loading)
+      send.textContent = state.loading ? '■' : '↑'
+      send.title = state.loading ? '停止当前任务' : '发送'
+      send.setAttribute('aria-label', send.title)
+    }
+    // 发送期间只切换现有控件状态，不重建整个应用 DOM。
+    for (const selector of ['#permission-picker', '#thinking-picker', '#attach-trigger', '#choose-cwd']) {
+      const control = document.querySelector(selector)
+      if (control) control.disabled = state.sessionSwitching || state.loading
+    }
+    for (const selector of ['#model-picker', '#group-picker']) {
+      const control = document.querySelector(selector)
+      if (control) control.disabled = state.sessionSwitching || state.switching
+    }
+    const prompt = document.querySelector('#prompt')
+    if (prompt) prompt.disabled = state.sessionSwitching
+    if (!state.attachments.length) document.querySelector('.attachments-strip')?.remove()
+    if (box && (forceScroll || wasAtBottom)) {
+      settleMessagesAtBottom(box)
+    }
+  }
+
+
+const scheduleLiveUi = () => updateLiveUi(false)
+  function finishStreamingMessage(message) {
+    if (!message) return false
+    message.isStreaming = false
+    message.finishedAt = message.finishedAt || Date.now()
+    if (state.streamingMessage === message) state.streamingMessage = null
+    scheduleLiveUi(false)
+    return true
+  }
+
+
+  function artifactCardsMarkup(artifacts = []) {
+    if (!artifacts.length) return ''
+    const previewPattern = /\.(?:html?|json|csv|md|txt|png|jpe?g|webp|gif|svg|pdf)$/i
+    return `<section class="turn-artifacts" aria-label="结果文件">${artifacts.map((artifact) => {
+      const artifactPath = String(artifact.path || artifact.name || '')
+      const name = String(artifact.name || artifactPath.split(/[\\/]/).at(-1) || '结果文件')
+      const extension = String(artifact.extension || name.match(/\.[^.]+$/)?.[0] || '').replace(/^\./, '').toUpperCase() || '文件'
+      const meta = [extension, artifact.lineCount ? `${artifact.lineCount} 行` : '', artifact.size ? formatBytes(artifact.size) : ''].filter(Boolean).join(' · ')
+      const previewable = artifact.previewable !== false && previewPattern.test(artifactPath)
+      return `<article class="artifact-card"><div class="artifact-card-icon">◇</div><div class="artifact-card-copy"><strong title="${esc(artifactPath)}">${esc(name)}</strong><span>${esc(meta)}</span></div><div class="artifact-card-actions">${previewable ? `<button type="button" data-artifact-preview="${esc(artifactPath)}">打开预览</button>` : ''}<button type="button" data-artifact-open="${esc(artifactPath)}">打开文件</button><button type="button" class="artifact-more" data-artifact-copy="${esc(artifactPath)}" title="复制路径" aria-label="复制路径">…</button></div></article>`
+    }).join('')}</section>`
+  }
+  function turnToolMarkup(tool, index) {
+    const key = stableMessageIdentity(tool, index)
+    const status = tool.isStreaming ? '运行中' : tool.isError ? '失败' : '已完成'
+    const duration = tool.startedAt ? `<span class="tool-duration">${esc(formatDuration((tool.finishedAt || Date.now()) - tool.startedAt))}</span>` : ''
+    const args = tool.args && Object.keys(tool.args).length ? `<details class="tool-section tool-args" data-detail-key="${esc(key)}:args"><summary>参数</summary><pre>${esc(JSON.stringify(tool.args, null, 2))}</pre></details>` : ''
+    const output = tool.content ? `<details class="tool-section tool-output" data-detail-key="${esc(key)}:output"><summary>输出</summary><pre>${esc(tool.content)}</pre></details>` : ''
+    return `<details class="turn-activity ${tool.isStreaming ? 'is-running' : ''} ${tool.isError ? 'is-error' : ''}" data-detail-key="tool:${esc(key)}" data-tool-key="${esc(key)}" data-tool-signature="${esc(toolStructureSignature(tool))}"><summary><span class="tool-chevron">›</span><span class="turn-activity-icon">⌘</span><strong>工具 · ${esc(tool.toolName || '执行')}</strong>${duration}<span class="tool-status ${tool.isError ? 'failed' : tool.isStreaming ? 'running' : ''}">${status}</span></summary><div class="turn-activity-body">${tool.isStreaming && !tool.content ? '<div class="tool-progress"><span></span>正在等待工具输出…</div>' : ''}${args}${output}</div></details>`
+  }
+  function turnPlanMarkup(message) {
+    const steps = Array.isArray(message.mediaPlanSteps) ? message.mediaPlanSteps.filter(Boolean) : []
+    if (!steps.length) return ''
+    const completed = Math.max(0, Math.min(steps.length, Number(message.mediaPlanCompleted || 0)))
+    const labels = { planning: '分析需求', 'planning-complete': '规划完成', generating: '生成中', completed: '已完成', failed: '未完成' }
+    return `<section class="media-planning-card ${message.mediaPending ? 'is-live' : ''} ${message.mediaPhase === 'failed' ? 'is-error' : ''}" aria-label="图片生成规划"><div class="media-planning-head"><span class="media-planning-icon">✦</span><strong>${message.mediaPlanSource === 'local' ? '规则整理' : 'AI 规划'}</strong><span class="media-planning-phase">${esc(labels[message.mediaPhase] || '图片规划')}</span></div><div class="media-planning-steps">${steps.map((step, stepIndex) => `<div class="media-plan-step ${stepIndex < completed ? 'done' : stepIndex === completed && message.mediaPending ? 'active' : ''}"><span class="media-plan-dot">${stepIndex < completed ? '✓' : stepIndex === completed && message.mediaPending ? '•' : ''}</span><span>${esc(step)}</span></div>`).join('')}</div>${message.mediaPlanSummary ? `<div class="media-planning-summary">${esc(message.mediaPlanSummary)}</div>` : ''}</section>`
+  }
+  function turnBusinessMarkup(message) {
+    if (!message.businessSkill) return ''
+    const result = message.businessResult || {}
+    const summary = message.businessSkill === 'feedback'
+      ? `<div class="business-summary"><span>${esc(result.reviewCount == null ? '正在采集评价' : `评价 ${result.reviewCount} 条`)}</span><span>${esc(result.questionCount == null ? '问大家整理中' : `问大家 ${result.questionCount} 条`)}</span>${result.coverage ? `<span>覆盖率 ${esc(result.coverage)}</span>` : ''}</div>`
+      : `<div class="business-summary"><span>已分析 ${esc(result.count || 0)} 张图片</span></div>`
+    return `<section class="business-skill-card ${message.businessPending ? 'is-live' : ''} ${message.isError ? 'is-error' : ''}" aria-label="${message.businessSkill === 'feedback' ? '评价分析' : 'AI 测图'}"><div class="business-skill-head"><span class="business-skill-icon">${message.businessSkill === 'feedback' ? '▤' : '◉'}</span><strong>${message.businessSkill === 'feedback' ? '评价分析' : 'AI 测图'}</strong><span class="business-skill-phase">${esc(message.businessPhase || '处理中')}</span>${message.businessStatus ? `<span class="business-skill-status">${esc(message.businessStatus)}</span>` : ''}</div>${summary}${message.businessSkill === 'image-analysis' ? businessAssetMarkup(message.businessAssets) : ''}</section>`
+  }
+  function turnHtml(turn) {
+    const assistants = assistantMessagesForTurn(turn)
+    const tools = toolMessagesForTurn(turn)
+    const content = turnContent(turn)
+    const thinking = turnThinking(turn)
+    const running = turnIsRunning(turn)
+    const failures = assistants.filter((message) => message.isError)
+    const hasError = failures.length > 0 && !assistants.some((message) => !message.isError && (message.isStreaming || String(message.content || '').trim()))
+    const startedAt = turnStartedAt(turn)
+    const finishedAt = turnFinishedAt(turn)
+    const duration = Math.max(0, (running ? Date.now() : finishedAt) - startedAt)
+    const completion = running ? `<span class="turn-completion is-running"><span class="activity-dot"></span>处理中 <span class="activity-elapsed">${esc(formatDuration(duration))}</span></span>` : finishedAt && startedAt && finishedAt >= startedAt ? `<span class="turn-completion">已处理 ${esc(formatDuration(duration))}</span>` : ''
+    const thinkingMarkup = thinking ? `<details class="thinking-card ${running ? 'is-live' : ''}" data-detail-key="thinking"><summary><span class="tool-chevron">›</span><span class="thinking-label">执行过程</span><small>${running ? '进行中' : '已完成'}</small></summary><div>${esc(thinking)}</div></details>` : ''
+    const failuresMarkup = failures.length && !hasError ? `<details class="turn-activity is-error" data-detail-key="attempts"><summary><span class="tool-chevron">›</span><strong>重试 · ${failures.length} 次失败尝试</strong></summary><div class="turn-activity-body"><pre>${esc(failures.map((message) => message.content || '模型请求失败').join('\n'))}</pre></div></details>` : ''
+    const richMarkup = assistants.map((message) => `${turnPlanMarkup(message)}${turnBusinessMarkup(message)}`).join('')
+    const bubble = content ? `<div class="message-bubble ${hasError ? 'tool-error' : ''} ${running ? 'streaming-bubble' : ''}" data-raw="${esc(content)}">${running ? esc(content) : renderMessageContent(content)}</div>` : running && !tools.length && !richMarkup ? '<div class="turn-status" role="status">正在理解需求…</div>' : ''
+    const media = assistants.map((message) => message.media?.kind === 'video' ? `<div class="generated-video"><video src="${esc(mediaSourceUrl(message))}" controls playsinline preload="auto"></video><button type="button" class="media-download" data-download-video="${esc(message.id || '')}" title="下载视频">↓ 下载视频</button></div>` : '').join('')
+    const attachments = assistants.flatMap((message) => message.attachments || [])
+    const lastMessageTime = (turn.messages || []).map((message) => timestampValue(message.createdAt)).filter(Boolean).at(-1)
+    const time = finishedAt || lastMessageTime ? `<time class="message-time">${esc(formatTimestamp(finishedAt || lastMessageTime))}</time>` : ''
+    return `<article class="message assistant-turn ${running ? 'is-running' : ''}" data-message-key="${esc(turn.key)}" data-turn-signature="${esc(turnStructureSignature(turn))}"><div class="avatar">A</div><div class="message-body"><div class="turn-heading"><span class="message-role">LetaAgent</span>${completion}</div><div class="turn-content">${thinkingMarkup}${failuresMarkup}${tools.length ? `<div class="turn-activities">${tools.map(turnToolMarkup).join('')}</div>` : ''}${richMarkup}${bubble}${artifactCardsMarkup(turnArtifacts(turn))}${media}${attachments.length ? `<div class="message-attachments">${attachments.map((attachment) => attachmentMarkup(attachment, false)).join('')}</div>` : ''}</div><div class="message-meta">${time}<span class="message-actions"><button type="button" data-turn-copy title="复制回复">复制</button></span></div></div></article>`
+  }
+  function messageHtml(message, options = {}) {
+    const user = message.role === 'user'; const tool = message.role === 'tool'; const index = state.messages.indexOf(message)
+    const renderKey = String(options.key || messageKey(message))
+    if (!user && !tool && !hasRenderableMessageContent(message) && !message.isStreaming) return ''
+    const time = message.createdAt ? `<time class="message-time">${esc(formatTimestamp(message.createdAt))}</time>` : ''
+    if (tool) {
+      const status = message.isStreaming ? '运行中' : message.isError ? '失败' : '已完成'
+      const expanded = ''
+      const duration = message.startedAt ? `<span class="tool-duration">${esc(formatDuration((message.finishedAt || Date.now()) - message.startedAt))}</span>` : ''
+      const args = message.args && Object.keys(message.args).length ? `<details class="tool-section tool-args" ${expanded}><summary>参数</summary><pre>${esc(JSON.stringify(message.args, null, 2))}</pre></details>` : ''
+      const output = message.content ? `<details class="tool-section tool-output" ${expanded}><summary>输出</summary><pre>${esc(message.content)}</pre></details>` : ''
+      const progress = message.isStreaming && !message.content ? '<div class="tool-progress"><span></span>正在等待工具输出…</div>' : ''
+      return `<article class="message tool-message" data-message-key="${esc(renderKey)}" data-message-index="${index}"><div class="avatar tool-avatar">⌘</div><details class="tool-card" ${expanded}><summary><span class="tool-chevron">›</span><span class="message-role">工具 · ${esc(message.toolName || '执行')}</span>${duration}<span class="tool-status ${message.isError ? 'failed' : message.isStreaming ? 'running' : ''}">${status}</span></summary><div class="tool-card-body">${progress}${args}${output}${message.isError ? '<span class="tool-error">执行失败</span>' : ''}</div></details><time class="message-time">${esc(formatTimestamp(message.createdAt))}</time></article>`
+    }
+    const shouldShowThinking = Boolean(String(message.thinking || '').trim())
+    const thinking = shouldShowThinking ? `<details class="thinking-card ${message.isStreaming ? 'is-live' : ''}"><summary><span class="tool-chevron">›</span><span class="thinking-label">思考过程</span></summary><div>${esc(message.thinking || '')}</div></details>` : ''
+    const planSteps = Array.isArray(message.mediaPlanSteps) ? message.mediaPlanSteps.filter(Boolean) : []
+    const planCompleted = Math.max(0, Math.min(planSteps.length, Number(message.mediaPlanCompleted || 0)))
+    const planPhaseLabels = { planning: '分析需求', 'planning-complete': '规划完成', generating: '生成中', completed: '已完成', failed: '未完成' }
+    const planPhaseLabel = planPhaseLabels[message.mediaPhase] || '图片规划'
+    const planSourceLabel = message.mediaPlanSource === 'local' ? '规则整理' : 'AI 规划'
+    const planMarkup = planSteps.length ? `<section class="media-planning-card ${message.mediaPending ? 'is-live' : ''} ${message.mediaPhase === 'failed' ? 'is-error' : ''}" aria-label="图片生成规划"><div class="media-planning-head"><span class="media-planning-icon">✦</span><strong>${planSourceLabel}</strong><span class="media-planning-phase">${planPhaseLabel}</span></div><div class="media-planning-steps">${planSteps.map((step, stepIndex) => `<div class="media-plan-step ${stepIndex < planCompleted ? 'done' : stepIndex === planCompleted && message.mediaPending ? 'active' : ''}"><span class="media-plan-dot">${stepIndex < planCompleted ? '✓' : stepIndex === planCompleted && message.mediaPending ? '•' : ''}</span><span>${esc(step)}</span></div>`).join('')}</div>${message.mediaPlanSummary ? `<div class="media-planning-summary">${esc(message.mediaPlanSummary)}</div>` : ''}</section>` : ''
+    const businessResult = message.businessResult || {}
+    const businessPhase = String(message.businessPhase || '处理中')
+    const businessStatus = String(message.businessStatus || '')
+    const businessSummary = message.businessSkill === 'feedback'
+      ? `<div class="business-summary"><span>${esc(businessResult.reviewCount == null ? '正在采集评价' : `评价 ${businessResult.reviewCount} 条`)}</span><span>${esc(businessResult.questionCount == null ? '问大家整理中' : `问大家 ${businessResult.questionCount} 条`)}</span>${businessResult.coverage ? `<span>覆盖率 ${esc(businessResult.coverage)}</span>` : ''}</div>`
+      : message.businessSkill === 'image-analysis' ? `<div class="business-summary"><span>已分析 ${esc(businessResult.count || 0)} 张图片</span></div>` : ''
+    const businessMarkup = message.businessSkill ? `<section class="business-skill-card ${message.businessPending ? 'is-live' : ''} ${message.isError ? 'is-error' : ''}" aria-label="${message.businessSkill === 'feedback' ? '评价分析' : 'AI 测图'}"><div class="business-skill-head"><span class="business-skill-icon">${message.businessSkill === 'feedback' ? '▤' : '◉'}</span><strong>${message.businessSkill === 'feedback' ? '评价分析' : 'AI 测图'}</strong><span class="business-skill-phase">${esc(businessPhase)}</span>${businessStatus ? `<span class="business-skill-status">${esc(businessStatus)}</span>` : ''}</div>${businessSummary}${message.businessSkill === 'image-analysis' ? businessAssetMarkup(message.businessAssets) : ''}${businessArtifactsMarkup(message.artifacts)}</section>` : ''
+    const hasText = Boolean(String(message.content || '').trim())
+    const bubble = hasText ? (message.isStreaming ? esc(message.content) : renderMessageContent(message.content)) : ''
+    const bubbleMarkup = bubble ? `<div class="message-bubble ${message.isError ? 'tool-error' : ''} ${message.isStreaming ? 'streaming-bubble' : ''}" data-raw="${esc(message.content || '')}">${bubble}</div>` : message.isStreaming && !user ? `<div class="turn-status" role="status"><span class="activity-dot"></span>处理中${runElapsedMarkup()}</div>` : ''
+    const media = message.media?.kind === 'video' ? `<div class="generated-video"><video src="${esc(mediaSourceUrl(message))}" controls playsinline preload="auto"></video><button type="button" class="media-download" data-download-video="${esc(message.id || '')}" title="下载视频">↓ 下载视频</button></div>` : ''
+    const actions = user ? `<button type="button" data-message-copy title="复制消息">复制</button><button type="button" data-message-edit title="编辑消息">编辑</button><button type="button" data-message-resend title="重发消息">重发</button>` : '<button type="button" data-message-copy title="复制消息">复制</button>'
+    return `<article class="message ${user ? 'user' : ''}" data-message-key="${esc(renderKey)}" data-message-index="${index}" data-business-status="${esc(message.businessStatus || '')}" data-business-phase="${esc(message.businessPhase || '')}" data-business-artifacts="${(message.artifacts || []).length}" data-business-signature="${esc(businessRenderSignature(message))}"><div class="avatar">${user ? initials(state.user?.email) : 'A'}</div><div class="message-body"><div class="message-role">${user ? '你' : 'LetaAgent'}</div>${thinking}${planMarkup}${businessMarkup}${bubbleMarkup}${media}${message.attachments?.length ? `<div class="message-attachments">${message.attachments.map((attachment) => attachmentMarkup(attachment, false)).join('')}</div>` : ''}<div class="message-meta">${time}<span class="message-actions">${actions}</span></div></div></article>`
+  }
+
+  function handlePiEvent(event) {
+    if (!event || event.type === 'response') return
+    if ((event.type === 'thinking_level_changed' || event.type === 'thinking_level_change') && THINKING_LEVELS.includes(event.level)) {
+      state.thinkingLevel = event.level
+      localStorage.setItem(thinkingStorageKey(), event.level)
+      scheduleAppRender()
+      return
+    }
+    if (state.sessionSwitching) return
+    if (event.type === 'message_start') {
+      const message = event.message || event.assistantMessage
+      if (message?.role === 'assistant') {
+        if (state.streamingMessage) finishStreamingMessage(state.streamingMessage)
+        state.streamingMessage = { id: message.id || message.messageId || event.messageId || undefined, role: 'assistant', content: '', thinking: thinkingOf(message.content), createdAt: timestampValue(message.timestamp) || Date.now(), isStreaming: true }
+        insertTimelineMessage(state.streamingMessage)
+        scheduleLiveUi(false)
+      }
+      return
+    }
+    if (event.type === 'message_update') {
+      const update = event.assistantMessageEvent || event.messageEvent || event.delta || event.update
+      let delta = ''
+      if (typeof update === 'string') delta = update
+      else if (update?.type === 'thinking_delta') {
+        if (state.streamingMessage) state.streamingMessage.thinking = `${state.streamingMessage.thinking || ''}${update.delta || ''}`
+        scheduleLiveUi(false); return
+      } else if (update?.type === 'text_delta' || update?.type === 'text') delta = update.delta || update.text || ''
+      else if (typeof update?.delta === 'string') delta = update.delta
+      if (delta && state.streamingMessage) {
+        state.streamingMessage.content += delta
+        scheduleLiveUi(false)
+      }
+      return
+    }
+    if (event.type === 'message_end' && event.message) {
+      if (event.message.role === 'assistant') {
+        const content = textOf(event.message.content) || event.message.errorMessage || ''
+        const hasError = Boolean(event.message.errorMessage)
+        if (state.streamingMessage) {
+          const stream = state.streamingMessage
+          stream.id = stream.id || event.message.id || event.message.messageId
+          const finalThinking = thinkingOf(event.message.content)
+          if (finalThinking && !stream.thinking) stream.thinking = finalThinking
+          stream.content = content || stream.content
+          stream.isError = hasError
+          finishStreamingMessage(stream)
+          void inspectMessageArtifacts(stream).then(() => scheduleLiveUi(false))
+        }
+        else {
+          const completed = { id: event.message.id || event.message.messageId, role: 'assistant', content, thinking: thinkingOf(event.message.content), createdAt: timestampValue(event.message.timestamp) || Date.now(), finishedAt: Date.now(), isError: hasError }
+          insertTimelineMessage(completed)
+          void inspectMessageArtifacts(completed).then(() => scheduleLiveUi(false))
+        }
+        // Pi owns retry policy. Re-sending the prompt here would duplicate a user
+        // request when Pi retries an overloaded upstream provider. The failure
+        // remains visible in the conversation while agent_end decides whether it
+        // is final or will be retried.
+        scheduleLiveUi(false)
+      }
+      return
+    }
+    if (event.type === 'tool_execution_start') {
+      const toolCallId = event.toolCallId || event.id
+      const existing = toolCallId ? [...state.messages].reverse().find((message) => message.role === 'tool' && message.toolCallId === toolCallId) : null
+      if (existing) {
+        if (!existing.finishedAt) Object.assign(existing, { toolName: event.toolName || existing.toolName, args: event.args || existing.args, isStreaming: true, startedAt: existing.startedAt || Date.now() })
+      } else insertTimelineMessage({ id: toolCallId, role: 'tool', toolName: event.toolName, toolCallId, args: event.args || {}, content: '', createdAt: Date.now(), isStreaming: true, startedAt: Date.now() })
+      scheduleLiveUi(false)
+      return
+    }
+    if (event.type === 'tool_execution_update' || event.type === 'tool_execution_end') {
+      const result = event.partialResult || event.result
+      const output = textOf(result?.content || result?.output || '') || (typeof result === 'string' ? result : '')
+      const toolCallId = event.toolCallId || event.id
+      let item = [...state.messages].reverse().find((message) => message.role === 'tool' && ((toolCallId && message.toolCallId === toolCallId) || (!toolCallId && message.isStreaming && message.toolName === event.toolName)))
+      if (!item) {
+        item = { id: toolCallId, role: 'tool', toolName: event.toolName, toolCallId, args: event.args || {}, content: '', createdAt: Date.now(), startedAt: Date.now(), isStreaming: true }
+        insertTimelineMessage(item)
+      }
+      item.args = event.args || item.args
+      item.content = output || item.content
+      item.isError = Boolean(event.isError)
+      item.isStreaming = event.type !== 'tool_execution_end'
+      if (!item.isStreaming) {
+        item.finishedAt = Date.now()
+        void inspectMessageArtifacts(item).then(() => scheduleLiveUi(false))
+      }
+      scheduleLiveUi(false)
+      return
+    }
+    if (event.type === 'extension_ui_request') {
+      if (event.method === 'confirm' && effectivePermissionMode() === 'full') { window.anyu.piUiResponse({ id: event.id, confirmed: true }); return }
+      if (['confirm', 'select', 'input'].includes(event.method)) { state.permission = event; renderApp() }
+      return
+    }
+    if (event.type === 'agent_start' || event.type === 'turn_start') {
+      state.loading = true
+      if (!state.runStartedAt) state.runStartedAt = Date.now()
+      state.runInProgress = true
+      if (!state.runPoll) startRunMonitor()
+      state.retryNotice = ''
+      scheduleLiveUi(false)
+      return
+    }
+    if (event.type === 'agent_end') {
+      if (event.willRetry) {
+        state.retryNotice = '模型服务暂时不可用，Pi 正在自动重试…'
+        state.error = ''
+      } else {
+        state.retryNotice = ''
+        const lastAssistant = [...state.messages].reverse().find((message) => message.role === 'assistant')
+        if (lastAssistant?.isError) state.error = lastAssistant.content || '模型回复失败，请稍后重试或切换模型'
+      }
+      // agent_end 只代表一个底层回合结束，后面可能还有重试、压缩或排队消息。
+      // 必须等 Pi 发出 agent_settled 才释放任务状态，避免输出被提前截断。
+      scheduleLiveUi(false)
+      return
+    }
+    if (event.type === 'auto_retry_start') {
+      state.loading = true
+      state.retryNotice = `模型服务暂时不可用，Pi 正在自动重试（${event.attempt || 1}/${event.maxAttempts || 3}）…`
+      scheduleLiveUi(false)
+      return
+    }
+    if (event.type === 'agent_settled') {
+      finishAgentRun()
+      return
+    }
+    if (event.type === 'session_info_changed') { refreshSessions().then(() => scheduleAppRender()); return }
+  }
+
+window.showWaiting = () => {
+  const box = document.querySelector('#messages')
+  state.messages = [{ role: 'user', content: '检查项目并整理结果' }]
+  handlePiEvent({ type: 'message_start', message: { role: 'assistant', content: [] } })
+  box.innerHTML = messagesMarkup()
+}
+window.check = () => {
+  window.showWaiting()
+  const box = document.querySelector('#messages')
+  const waiting = box.querySelectorAll('.turn-status').length
+  handlePiEvent({ type: 'message_update', assistantMessageEvent: { type: 'thinking_delta', delta: '核对项目脚本与入口。' } })
+  box.querySelector('.thinking-card').open = true
+  handlePiEvent({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: '已检查项目。' } })
+  const bubble = box.querySelector('.streaming-bubble')
+  handlePiEvent({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: '\n正在整理验证结果。' } })
+  const stableDelta = bubble === box.querySelector('.streaming-bubble')
+  handlePiEvent({ type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text: '已检查项目。\n正在整理验证结果。' }] } })
+  const thinkingKept = box.querySelector('.thinking-card').open
+  const tool = { role: 'tool', toolName: 'read', toolCallId: 'one', args: { path: 'package.json' }, content: '', isStreaming: true }
+  state.messages.push(tool)
+  updateLiveUi(false)
+  const settledBubble = box.querySelector('.message-bubble[data-raw^="已检查"]')
+  const card = box.querySelector('.turn-activity')
+  card.open = true
+  box.querySelector('.tool-args').open = true
+  tool.content = '项目脚本已确认'
+  updateLiveUi(false)
+  const argsKept = box.querySelector('.tool-args').open
+  const newOutputCollapsed = !box.querySelector('.tool-output').open
+  box.querySelector('.tool-output').open = true
+  tool.isStreaming = false
+  updateLiveUi(false)
+  const stableToolInsert = settledBubble === box.querySelector('.message-bubble[data-raw^="已检查"]')
+  const detailsKept = box.querySelector('.turn-activity').open
+  const nestedDetailsKept = box.querySelector('.tool-args').open && box.querySelector('.tool-output').open
+  const toolSettled = box.querySelector('.tool-status').textContent === '已完成' && !box.querySelector('.tool-progress')
+  state.messages.splice(1, 0, { role: 'tool', toolName: 'search', content: '找到相关文件', isStreaming: false })
+  updateLiveUi(false)
+  const stableReorder = settledBubble === box.querySelector('.message-bubble[data-raw^="已检查"]')
+  const detailsKeptAfterReorder = [...box.querySelectorAll('.turn-activity')].some((item) => item.open)
+  const longReply = { role: 'assistant', content: '长回答\n'.repeat(100), isStreaming: true }
+  state.messages.push(longReply)
+  state.streamingMessage = longReply
+  updateLiveUi(false)
+  box.scrollTop = 0
+  longReply.content += '新的增量'
+  updateLiveUi(false)
+  const historyScrollKept = box.scrollTop === 0
+  state.messages.pop()
+  state.streamingMessage = null
+  state.loading = false
+  state.messages.find((message) => message.role === 'assistant').discoveredArtifacts = [{ path: 'reports/project-verification-result.html', name: 'project-verification-result.html', extension: '.html', lineCount: 304, size: 18742, previewable: true }]
+  updateLiveUi(false)
+  return { waiting, stableDelta, stableToolInsert, stableReorder, historyScrollKept, detailsKept, detailsKeptAfterReorder, thinkingKept, argsKept, newOutputCollapsed, nestedDetailsKept, toolSettled, duplicate: box.querySelectorAll('.agent-activity, .turn-status').length, text: settledBubble.textContent }
+}
+</script></html>

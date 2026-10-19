@@ -1,4 +1,4 @@
-# AnYuAgent 插件市场规范
+# LetaAgent 插件市场规范
 
 ## 1. 插件包结构
 
@@ -23,30 +23,32 @@ ZIP 可以多包一层目录，安装器会自动定位唯一的插件根目录�
   "name": "my-plugin",
   "displayName": "我的插件",
   "version": "1.0.0",
-  "description": "为 AnYuAgent 提供可复用的摘要 Skill。",
+  "description": "为 LetaAgent 提供可复用的摘要 Skill。",
   "publisher": { "id": "community", "name": "发布者名称", "verified": false },
   "license": "MIT",
-  "categories": ["productivity"],
+  "categories": ["ecommerce"],
   "keywords": ["summary", "notes"],
   "skills": [
     { "name": "summarize", "path": "skills/summarize", "description": "总结长文本" }
   ],
   "permissions": {},
-  "compatibility": { "anyuAgent": ">=1.0.0" }
+  "compatibility": { "letaAgent": ">=1.0.0" }
 }
 ```
 
 必填字段：`id`、`version`、`name`、`displayName`、`description`、至少一个 `skills` 项。`id` 只能使用小写字母、数字、点和连字符；`version` 使用 SemVer。每个 Skill 必须能在声明路径下找到 `SKILL.md`，也支持直接声明 `skills/foo/SKILL.md`。
 
-`image` 和 `video` 是 AnYuAgent 核心 Skill，属于保留名称，插件不能覆盖或替换。
+市场支持一级类目筛选。当前约定使用稳定英文值：`ecommerce`（电商）和 `comic-drama`（漫剧）；也兼容历史数据中的 `e-commerce`、`comic`、`电商` 和 `漫剧` 写法。未设置类目的插件仍会在“全部”中展示。
+
+`image` 和 `video` 是 LetaAgent 核心 Skill，属于保留名称，插件不能覆盖或替换。
 
 ## 3. Skill 编写约定
 
-`SKILL.md` 使用 AnYuAgent 的标准 Skill 格式：用 frontmatter 或标题描述触发条件、输入、步骤、输出和限制。Skill 只能通过提示词和 AnYuAgent 已有工具工作；插件 v1 不加载 Node 扩展、Electron 主进程脚本或 Renderer 脚本。
+`SKILL.md` 使用 LetaAgent 的标准 Skill 格式：用 frontmatter 或标题描述触发条件、输入、步骤、输出和限制。Skill 只能通过提示词和 LetaAgent 已有工具工作；插件 v1 不加载 Node 扩展、Electron 主进程脚本或 Renderer 脚本。
 
 ## 4. 本地导入与生命周期
 
-设置 -> 插件市场 -> 导入插件支持目录和 ZIP。导入流程会校验 manifest、SemVer、路径穿越、符号链接、文件数量和大小，并检查每个 `SKILL.md`。插件按 `userData/plugins/packages/<id>/<version>` 隔离安装，启用后重启 AnYuAgent 生效。
+设置 -> 插件市场 -> 导入插件支持目录和 ZIP。导入流程会校验 manifest、SemVer、路径穿越、符号链接、文件数量和大小，并检查每个 `SKILL.md`。插件按 `userData/plugins/packages/<id>/<version>` 隔离安装，启用后重启 LetaAgent 生效。
 
 市场插件支持安装、更新、启用/禁用和卸载。每个插件最多保留最近 5 个版本，可在已安装列表中切换到历史版本。图片和视频核心 Skill 的执行逻辑不受插件卸载影响。
 

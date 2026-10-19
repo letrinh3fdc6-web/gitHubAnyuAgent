@@ -1,0 +1,203 @@
+:root {
+  color-scheme: light;
+}
+
+html,
+body {
+  overscroll-behavior: none;
+  scrollbar-width: none;
+  touch-action: none;
+}
+
+html::-webkit-scrollbar,
+body::-webkit-scrollbar {
+  display: none;
+}
+
+.anyu-stage-brand {
+  display: inline-block;
+  color: #05090a;
+  font-family: Arial, Helvetica, sans-serif;
+  font-size: clamp(27px, 2.35vw, 39px);
+  font-weight: 900;
+  letter-spacing: 0;
+  line-height: 1;
+}
+
+.Header__logo a {
+  display: inline-flex;
+  min-width: 122px;
+  align-items: center;
+}
+
+.Header__container {
+  padding: 24px 38px;
+  overflow: visible;
+}
+
+.Header__nav {
+  gap: 0;
+  padding: 3px;
+  border: 1px solid rgba(15, 18, 20, 0.08);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.72);
+  box-shadow: 0 8px 24px rgba(10, 18, 20, 0.07);
+  backdrop-filter: saturate(150%) blur(16px);
+  -webkit-backdrop-filter: saturate(150%) blur(16px);
+}
+
+.Header__nav_item a {
+  display: flex;
+  min-height: 34px;
+  align-items: center;
+  padding: 0 14px;
+  border-radius: 999px;
+  color: #1d1d1f;
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Helvetica Neue", Arial, sans-serif !important;
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: 0 !important;
+  line-height: 1.2;
+  text-rendering: optimizeLegibility;
+  transition: background-color 180ms ease, color 180ms ease, opacity 180ms ease;
+}
+
+.Header__nav_item a:hover {
+  background: rgba(0, 0, 0, 0.055);
+  opacity: 1;
+}
+
+.Header__contact {
+  min-height: 44px;
+  padding: 0 19px;
+  border: 1px solid #111 !important;
+  background: #111;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.13);
+  color: #fff !important;
+  font-size: 12px;
+  font-weight: 560;
+  line-height: 42px;
+  transition: background-color 180ms ease, border-color 180ms ease, transform 180ms ease;
+}
+
+.Header__contact:hover {
+  border-color: #2b2b2d !important;
+  background: #2b2b2d;
+  color: #fff !important;
+  transform: translateY(-1px);
+}
+
+.MissionVision__ttl svg {
+  display: none !important;
+}
+
+.MissionVision__ttl {
+  width: auto !important;
+  height: auto !important;
+  min-height: clamp(58px, 7vw, 104px);
+}
+
+[data-mission-title]::after,
+[data-vision-title]::after {
+  display: none;
+  color: transparent;
+  font-family: "Microsoft YaHei", "PingFang SC", sans-serif;
+  font-size: clamp(48px, 7vw, 104px);
+  font-weight: 760;
+  letter-spacing: 0;
+  line-height: 1;
+  -webkit-text-stroke: 1px rgba(18, 29, 31, 0.52);
+}
+
+.MissionVision__text,
+.MissionVision__text_en,
+.TopScrollIndicator__section_label,
+.Header__nav_item,
+.Header__contact,
+.SideMenu__menu_item {
+  font-family: "Microsoft YaHei", "PingFang SC", sans-serif !important;
+  letter-spacing: 0 !important;
+}
+
+.MissionVision__text_en {
+  max-width: 360px;
+  color: rgba(20, 37, 39, 0.58) !important;
+  font-size: 12px !important;
+  line-height: 1.7 !important;
+}
+
+.News__newsArea,
+.SideMenu__social_links,
+.TweakpaneContainers__container,
+.TopPageOutro__wrapper,
+.Footer__footer,
+#loading-text,
+.TopScrollIndicator__top_scroll_indicator {
+  display: none !important;
+}
+
+/* Keep the two editorial states separate so stale copy never sits on the A scene. */
+body[data-current_section="mission_in"] [data-vision-container],
+body[data-current_section="mission"] [data-vision-container] {
+  visibility: hidden !important;
+}
+
+body[data-current_section="vision"] [data-mission-container] {
+  visibility: hidden !important;
+}
+
+/* The Vue layer owns the first-screen brand message and capability copy. */
+body[data-current_section="vision"] [data-vision-container] .MissionVision__text,
+body[data-current_section="vision"] [data-vision-container] .MissionVision__text_en {
+  visibility: hidden !important;
+}
+
+body[data-anyu-core-only="true"] [data-top_section="kv"],
+body[data-anyu-core-only="true"] [data-top_section="works_intro"],
+body[data-anyu-core-only="true"] [data-top_section="works"],
+body[data-anyu-core-only="true"] [data-top_section="works_outro"],
+body[data-anyu-core-only="true"] [data-top_section="vision_out"],
+body[data-anyu-core-only="true"] [data-top_section="service_in"],
+body[data-anyu-core-only="true"] [data-top_section="service"],
+body[data-anyu-core-only="true"] [data-top_section="stellla"] {
+  visibility: hidden !important;
+  pointer-events: none !important;
+}
+
+#loading-overlay {
+  visibility: hidden !important;
+  opacity: 0 !important;
+  pointer-events: none !important;
+}
+
+body[data-anyu-background="true"] .Header__container,
+body[data-anyu-background="true"] .SideMenu__overlay,
+body[data-anyu-background="true"] .TopScrollIndicator__top_scroll_indicator,
+body[data-anyu-background="true"] .MissionVision__ttl,
+body[data-anyu-background="true"] .MissionVision__text,
+body[data-anyu-background="true"] .MissionVision__text_en {
+  visibility: hidden !important;
+}
+
+@media (max-width: 720px) {
+  .Header__container {
+    padding: 22px 18px;
+  }
+
+  .Header__logo a {
+    min-width: 92px;
+  }
+
+  .anyu-stage-brand {
+    font-size: 26px;
+  }
+
+  [data-mission-title]::after,
+  [data-vision-title]::after {
+    font-size: clamp(42px, 12vw, 68px);
+  }
+
+  .MissionVision__text_en {
+    max-width: min(70vw, 330px);
+  }
+}

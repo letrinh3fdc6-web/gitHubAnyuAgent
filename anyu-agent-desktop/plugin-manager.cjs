@@ -6,6 +6,13 @@ const { spawn } = require('child_process')
 const archiver = require('archiver')
 
 const REGISTRY_VERSION = 1
+const RETIRED_PLUGIN_IDS = Object.freeze([
+  'ecommerce-review-analyzer',
+  'ecommerce-visual-copywriting',
+  'china-ecommerce-compare',
+  'taobao-product-search',
+  'detail-page-studio'
+])
 const MAX_PACKAGE_BYTES = 64 * 1024 * 1024
 const MAX_FILES = 2000
 const MAX_FILE_BYTES = 8 * 1024 * 1024
@@ -79,7 +86,9 @@ function normalizeManifest(raw) {
     license: asString(raw.license, '未声明'), icon: asString(raw.icon), categories: Array.isArray(raw.categories) ? raw.categories.map(String).slice(0, 8) : [],
     keywords: Array.isArray(raw.keywords) ? raw.keywords.map(String).slice(0, 20) : [], skills, permissions,
     compatibility: raw.compatibility && typeof raw.compatibility === 'object' ? raw.compatibility : {},
-    repository: asString(raw.repository), homepage: asString(raw.homepage), entry: { type: 'skills-only' }
+    repository: asString(raw.repository), homepage: asString(raw.homepage),
+    dependencies: raw.dependencies && typeof raw.dependencies === 'object' ? raw.dependencies : {},
+    entry: { type: 'skills-only' }
   }
 }
 function readManifest(root) {
@@ -182,6 +191,11 @@ class PluginManager {
     this.quarantinePath = path.join(this.root, 'quarantine')
     fs.mkdirSync(this.root, { recursive: true }); fs.mkdirSync(this.downloadPath, { recursive: true }); fs.mkdirSync(this.packagePath, { recursive: true }); fs.mkdirSync(this.quarantinePath, { recursive: true })
     this.registry = this.readRegistry()
+    for (const id of RETIRED_PLUGIN_IDS) {
+      const target = path.join(this.packagePath, id)
+      if (this.registry.plugins[id]) this.uninstall(id)
+      else fs.rmSync(target, { recursive: true, force: true })
+    }
   }
   readRegistry() {
     try {
@@ -213,17 +227,24 @@ class PluginManager {
     try { await extractZip(sourcePath, temp); const root = locateRoot(temp); const files = listTree(root); const manifest = readManifest(root); validateSkillFiles(root, manifest); return { manifest, root, files: files.length, sha256: hashFile(sourcePath), warnings: manifest.permissions && Object.keys(manifest.permissions).length ? ['此插件声明了额外权限，请安装前确认。'] : [] } } finally { fs.rmSync(temp, { recursive: true, force: true }) }
   }
   async install(sourcePath, options = {}) {
+    const report = typeof options.onProgress === 'function' ? options.onProgress : () => {}
+    report({ phase: 'preparing', percent: 5, message: '准备安装' })
     const source = path.resolve(String(sourcePath || ''))
     if (!fs.existsSync(source)) throw new Error('插件文件或目录不存在')
+    report({ phase: 'validating', percent: 18, message: '校验插件' })
     const scan = await this.scanPackage(source)
     const manifest = scan.manifest
+    // 扫描完成后补充插件标识，市场卡片可以把进度准确绑定到对应插件。
+    report({ phase: 'validating', percent: 24, message: '插件校验完成', pluginId: manifest.id, version: manifest.version })
     const target = path.join(this.packagePath, manifest.id, manifest.version)
     if (!isInside(this.packagePath, target)) throw new Error('插件安装路径无效')
     fs.mkdirSync(path.dirname(target), { recursive: true })
     const staging = fs.mkdtempSync(path.join(this.quarantinePath, 'install-'))
     try {
+      report({ phase: 'extracting', percent: 42, message: '解压插件', pluginId: manifest.id, version: manifest.version })
       if (fs.statSync(source).isDirectory()) copyDir(scan.root, staging)
       else { await extractZip(source, staging); const root = locateRoot(staging); if (root !== staging) { const flattened = fs.mkdtempSync(path.join(this.quarantinePath, 'flatten-')); copyDir(root, flattened); fs.rmSync(staging, { recursive: true, force: true }); fs.renameSync(flattened, staging) } }
+      report({ phase: 'installing', percent: 72, message: '安装文件', pluginId: manifest.id, version: manifest.version })
       listTree(staging); const installedManifest = readManifest(staging); validateSkillFiles(staging, installedManifest)
       if (fs.existsSync(target)) fs.rmSync(target, { recursive: true, force: true })
       fs.renameSync(staging, target)
@@ -231,10 +252,21 @@ class PluginManager {
     const old = this.registry.plugins[manifest.id]
     const versions = Array.isArray(old?.versions) ? old.versions.filter((item) => item.version !== manifest.version) : []
     versions.unshift({ version: manifest.version, path: target, installedAt: now(), sha256: scan.sha256 })
-    const record = { id: manifest.id, name: manifest.name, displayName: manifest.displayName, description: manifest.description, version: manifest.version, publisher: manifest.publisher, categories: manifest.categories, keywords: manifest.keywords, permissions: manifest.permissions, license: manifest.license, skills: manifest.skills, installedPath: target, versions: versions.slice(0, 5), scope: options.scope === 'project' ? 'project' : 'user', projectPath: options.scope === 'project' ? path.resolve(String(options.projectPath || '')) : '', enabled: old ? old.enabled !== false : true, source: options.source || 'local', visibility: options.visibility || 'private', publishStatus: options.publishStatus || (old?.publishStatus || 'private'), marketplaceId: old?.marketplaceId || '', downloadUrl: old?.downloadUrl || '', installedAt: old?.installedAt || now(), updatedAt: now(), lastScan: { files: scan.files, sha256: scan.sha256, warnings: scan.warnings } }
-    this.registry.plugins[manifest.id] = record; this.saveRegistry(); return { ...record, versions: undefined }
+    const record = { id: manifest.id, name: manifest.name, displayName: manifest.displayName, description: manifest.description, version: manifest.version, publisher: manifest.publisher, categories: manifest.categories, keywords: manifest.keywords, permissions: manifest.permissions, license: manifest.license, skills: manifest.skills, dependencies: manifest.dependencies, dependencyStatus: manifest.dependencies && Object.keys(manifest.dependencies).length ? 'pending' : 'ready', installedPath: target, versions: versions.slice(0, 5), scope: options.scope === 'project' ? 'project' : 'user', projectPath: options.scope === 'project' ? path.resolve(String(options.projectPath || '')) : '', enabled: old ? old.enabled !== false : true, source: options.source || 'local', visibility: options.visibility || 'private', publishStatus: options.publishStatus || (old?.publishStatus || 'private'), marketplaceId: old?.marketplaceId || '', downloadUrl: old?.downloadUrl || '', installedAt: old?.installedAt || now(), updatedAt: now(), lastScan: { files: scan.files, sha256: scan.sha256, warnings: scan.warnings } }
+    this.registry.plugins[manifest.id] = record; this.saveRegistry()
+    report({ phase: 'complete', percent: 100, message: '安装完成', pluginId: manifest.id, version: manifest.version })
+    return { ...record, versions: undefined }
   }
   get(id) { return this.registry.plugins[String(id)] || null }
+  updateDependencyStatus(id, status, detail = {}) {
+    const record = this.registry.plugins[String(id)]
+    if (!record) return null
+    record.dependencyStatus = status
+    record.dependencyDetail = detail
+    record.updatedAt = now()
+    this.saveRegistry()
+    return { ...record, versions: undefined }
+  }
   async preparePublish(sourcePath, options = {}) {
     const source = path.resolve(String(sourcePath || ''))
     if (!fs.existsSync(source)) throw new Error('插件文件或目录不存在')
@@ -271,7 +303,22 @@ class PluginManager {
     return { ...record, versions: undefined }
   }
   setEnabled(id, enabled) { const record = this.registry.plugins[String(id)]; if (!record) throw new Error('插件未安装'); record.enabled = Boolean(enabled); record.updatedAt = now(); this.saveRegistry(); return { ...record, versions: undefined } }
-  uninstall(id) { const key = String(id); const record = this.registry.plugins[key]; if (!record) throw new Error('插件未安装'); for (const version of record.versions || []) { if (version.path && isInside(this.packagePath, version.path)) fs.rmSync(version.path, { recursive: true, force: true }) } delete this.registry.plugins[key]; this.saveRegistry(); return { ok: true, id: key } }
+  uninstall(id, options = {}) {
+    const report = typeof options.onProgress === 'function' ? options.onProgress : () => {}
+    const key = String(id)
+    if (!this.registry.plugins[key]) throw new Error('插件未安装')
+    report({ phase: 'preparing', percent: 8, message: '准备卸载', pluginId: key })
+    const target = path.resolve(this.packagePath, key)
+    if (!/^[a-z0-9][a-z0-9.-]{1,80}$/.test(key) || !isInside(this.packagePath, target)) throw new Error('插件卸载路径无效')
+    // 删除整个插件目录，包含已超出回滚列表的历史版本，防止卸载后继续占用空间。
+    report({ phase: 'removing', percent: 58, message: '删除插件文件', pluginId: key })
+    fs.rmSync(target, { recursive: true, force: true })
+    delete this.registry.plugins[key]
+    report({ phase: 'updating', percent: 82, message: '更新插件索引', pluginId: key })
+    this.saveRegistry()
+    report({ phase: 'complete', percent: 100, message: '卸载完成', pluginId: key })
+    return { ok: true, id: key }
+  }
   rollback(id, version) { const record = this.registry.plugins[String(id)]; const target = (record?.versions || []).find((item) => item.version === String(version)); if (!record || !target || !fs.existsSync(target.path)) throw new Error('没有可用的回滚版本'); record.installedPath = target.path; record.version = target.version; record.updatedAt = now(); this.saveRegistry(); return { ...record, versions: undefined } }
   runtimeSkillPaths(cwd) {
     const result = []
@@ -290,4 +337,4 @@ class PluginManager {
   state() { return { registryVersion: REGISTRY_VERSION, installed: this.listInstalled(), root: this.root } }
 }
 
-module.exports = { PluginManager, MAX_PACKAGE_BYTES, MAX_UNPACKED_BYTES }
+module.exports = { PluginManager, MAX_PACKAGE_BYTES, MAX_UNPACKED_BYTES, RETIRED_PLUGIN_IDS }

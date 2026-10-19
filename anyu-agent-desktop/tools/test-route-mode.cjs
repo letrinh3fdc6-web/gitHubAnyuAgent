@@ -33,14 +33,15 @@ async function main() {
   assert.strictEqual(automatic.calls.automatic, 1)
   assert.deepStrictEqual(automaticState.catalog, [{ id: 'managed', groupId: 7 }])
 
-  const missingKeyState = { accessMode: 'key', keys: [], keysLoaded: false, selectedKey: 19, catalog: [] }
-  const missingKey = createLoader(missingKeyState)
-  await missingKey.loadRouteData({ refreshPublicKeys: true })
-  assert.strictEqual(missingKey.calls.keys, 1)
-  assert.strictEqual(missingKey.calls.key, 0)
-  assert.strictEqual(missingKeyState.accessMode, 'auto')
-  assert.strictEqual(missingKeyState.selectedKey, 0)
-  assert.strictEqual(missingKey.localStorage.values['anyu.accessMode'], 'auto')
+  const legacyKeyState = { accessMode: 'key', keys: [], keysLoaded: false, selectedKey: 19, catalog: [] }
+  const legacyKey = createLoader(legacyKeyState, {
+    loadKeys: async () => { throw new Error('固定自动分组后不应读取公开密钥') }
+  })
+  await legacyKey.loadRouteData({ refreshPublicKeys: true })
+  assert.strictEqual(legacyKey.calls.keys, 0)
+  assert.strictEqual(legacyKey.calls.key, 0)
+  assert.strictEqual(legacyKeyState.accessMode, 'auto')
+  assert.strictEqual(legacyKeyState.selectedKey, 0)
 
   console.log('route mode tests passed')
 }

@@ -1,6 +1,6 @@
 const assert = require('assert')
 const http = require('http')
-const { ANYU_AGENT_GATEWAY_PATH, LocalGatewayBridge, allowedGatewayPath, managedBaseUrl, managedProviderName, parseManagedRoute } = require('../gateway-bridge.cjs')
+const { ANYU_AGENT_GATEWAY_PATH, LocalGatewayBridge, allowedGatewayPath, managedBaseUrl, managedProviderName, normalizeManagedRequestBody, parseManagedRoute } = require('../gateway-bridge.cjs')
 
 function listen(server) {
   return new Promise((resolve, reject) => {
@@ -45,6 +45,15 @@ async function main() {
   assert.deepStrictEqual(parseManagedRoute('/anyu/23/v1/messages'), { groupId: 23, upstreamPath: '/v1/messages' })
   assert.deepStrictEqual(parseManagedRoute('/anyu/29/v1beta/models/gemini-2.5-pro:streamGenerateContent?alt=sse'), { groupId: 29, upstreamPath: '/v1beta/models/gemini-2.5-pro:streamGenerateContent?alt=sse' })
 
+  const offBody = Buffer.from('{"model":"qwen3.8-max","input":"hello","reasoning":{"effort":"off"}}')
+  const responsesRoute = { upstreamPath: '/v1/responses' }
+  assert.strictEqual(JSON.parse(normalizeManagedRequestBody(responsesRoute, offBody)).reasoning.effort, 'none')
+  assert.strictEqual(normalizeManagedRequestBody(responsesRoute, Buffer.from('{"reasoning":{"effort":"medium"}}')).toString(), '{"reasoning":{"effort":"medium"}}')
+  const chatBody = Buffer.from('{"model":"qwen3.8-max","reasoning_effort":"off"}')
+  assert.strictEqual(JSON.parse(normalizeManagedRequestBody({ upstreamPath: '/v1/chat/completions' }, chatBody)).reasoning_effort, 'none')
+  assert.strictEqual(normalizeManagedRequestBody({ upstreamPath: '/v1/messages' }, offBody), offBody)
+  assert.strictEqual(normalizeManagedRequestBody(responsesRoute, Buffer.from('invalid')).toString(), 'invalid')
+
   const response = await fetch(`${baseUrl}/responses`, {
     method: 'POST',
     headers: { Authorization: `Bearer ${local.token}`, 'Content-Type': 'application/json' },
@@ -60,6 +69,23 @@ async function main() {
   assert.strictEqual(requests[1].authorization, 'Bearer new-jwt')
   assert.strictEqual(requests[1].group, '17')
   assert.strictEqual(requests[1].model, 'gpt-5.6')
+
+  const normalized = await fetch(`${baseUrl}/responses`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${local.token}`, 'Content-Type': 'application/json' },
+    body: offBody
+  })
+  assert.strictEqual(normalized.status, 200)
+  assert.strictEqual(JSON.parse(requests[2].body).reasoning.effort, 'none')
+  assert.strictEqual(requests[2].model, 'qwen3.8-max')
+
+  const normalizedChat = await fetch(`${managedBaseUrl(local.origin, 'openai-completions', 17)}/chat/completions`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${local.token}`, 'Content-Type': 'application/json' },
+    body: chatBody
+  })
+  assert.strictEqual(normalizedChat.status, 200)
+  assert.strictEqual(JSON.parse(requests[3].body).reasoning_effort, 'none')
 
   const rejected = await fetch(`${baseUrl}/responses`, { method: 'POST', headers: { Authorization: 'Bearer invalid' }, body: '{}' })
   assert.strictEqual(rejected.status, 401)

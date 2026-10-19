@@ -1,6 +1,10 @@
 const crypto = require('crypto')
 
-const DEFAULT_MANIFEST_URL = 'https://x.ailzd.com/downloads/downloads-manifest.json'
+const DEFAULT_MANIFEST_URL = process.env.ANYU_UPDATE_MANIFEST_URL || String(
+  process.env.ANYU_API_BASE ||
+  process.env.ANYU_DEFAULT_API_BASE ||
+  'https://x.ailzd.com'
+).replace(/\/+$/, '') + '/downloads/downloads-manifest.json'
 
 function versionParts(value) {
   const match = String(value || '').trim().replace(/^v/i, '').match(/^(\d+)(?:\.(\d+))?(?:\.(\d+))?(?:-([0-9A-Za-z.-]+))?/) || []
@@ -20,16 +24,16 @@ function compareVersions(left, right) {
 
 function artifactFromManifest(manifest, currentVersion, manifestUrl = DEFAULT_MANIFEST_URL) {
   if (!manifest || typeof manifest !== 'object') throw new Error('更新目录格式无效')
-  const configured = manifest.anyuAgent || manifest.anyuagent || manifest.app
+  const configured = manifest.anyuAgent || manifest.anyuagent || manifest.letaAgent || manifest.letaagent || manifest.app
   const artifacts = Array.isArray(manifest.artifacts) ? manifest.artifacts : []
   const candidate = configured && typeof configured === 'object'
     ? configured
     : artifacts
-      .filter((item) => /anyuagent|anyu-ai-tool-manager/i.test(String(item?.name || '')))
+      .filter((item) => /anyuagent|letaagent|leta-ai-tool-manager/i.test(String(item?.name || '')))
       .sort((a, b) => compareVersions(b.version || String(b.name).match(/(\d+\.\d+(?:\.\d+)?)/)?.[1], a.version || String(a.name).match(/(\d+\.\d+(?:\.\d+)?)/)?.[1]))[0]
-  if (!candidate || !candidate.name) throw new Error('更新目录中没有 AnYuAgent 安装包')
+  if (!candidate || !candidate.name) throw new Error('更新目录中没有 AnyuAgent 安装包')
   const version = String(candidate.version || String(candidate.name).match(/(\d+\.\d+(?:\.\d+)?)/)?.[1] || '').trim()
-  if (!version) throw new Error('更新目录缺少 AnYuAgent 版本号')
+  if (!version) throw new Error('更新目录缺少 AnyuAgent 版本号')
   const bytes = Number(candidate.bytes)
   const sha256 = String(candidate.sha256 || '').trim().toLowerCase()
   if (!Number.isSafeInteger(bytes) || bytes <= 0 || !/^[a-f0-9]{64}$/.test(sha256)) throw new Error('更新包校验信息不完整')
