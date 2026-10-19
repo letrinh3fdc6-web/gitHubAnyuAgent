@@ -2,12 +2,18 @@ name: Build AnyuAgent for macOS
 
 on:
   workflow_dispatch:
+    inputs:
+      artifact_run_id:
+        description: 'Reuse a verified build run to publish its artifacts'
+        required: false
+        type: string
 
 permissions:
   contents: read
 
 jobs:
   macos:
+    if: github.event.inputs.artifact_run_id == ''
     name: macOS ${{ matrix.arch }}
     strategy:
       fail-fast: false
@@ -132,7 +138,7 @@ jobs:
   release:
     name: Publish GitHub Release
     needs: macos
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: always() && (needs.macos.result == 'success' || github.event.inputs.artifact_run_id != '')
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -143,6 +149,8 @@ jobs:
           pattern: AnyuAgent-macOS-*
           path: release-assets
           merge-multiple: true
+          run-id: ${{ github.event.inputs.artifact_run_id || github.run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Verify release assets
         shell: bash
@@ -160,9 +168,17 @@ jobs:
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.ref_name }}
-          name: AnYuAgent ${{ github.ref_name }}
-          generate_release_notes: true
+          tag_name: anyuagent-v1.0.60
+          target_commitish: ${{ github.sha }}
+          name: AnyuAgent 1.0.60
+          draft: true
+          make_latest: false
+          body: |
+            AnyuAgent 1.0.60 with the current production workspace, desktop authentication synchronization, and message deduplication.
+
+            macOS downloads include separate Apple Silicon and Intel DMG/ZIP packages. Each package includes a matching native runtime. These packages are unsigned and are not notarized.
+
+            Windows download: https://x.ailzd.com/downloads/AnyuAgent-Setup-1.0.60.exe
           files: |
             release-assets/*.dmg
             release-assets/*.zip
