@@ -1,6 +1,6 @@
 {
   "name": "anyu-agent-desktop",
-  "version": "1.0.62",
+  "version": "1.0.63",
   "description": "AnyuAgent standalone desktop workspace",
   "main": "main.cjs",
   "author": "Anyu AI",
@@ -118,6 +118,7 @@
       "dependency-download.cjs",
       "preload.cjs",
       "updater.cjs",
+      "shutdown.cjs",
       "renderer/**/*",
       "renderer-vue/**/*",
       "branding/**/*"
@@ -161,6 +162,7 @@
       "artifactName": "AnyuAgent-${version}-${arch}.${ext}"
     },
     "nsis": {
+      "include": "build/installer.nsh",
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,

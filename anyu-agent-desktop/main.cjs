@@ -33,6 +33,7 @@ protocol?.registerSchemesAsPrivileged?.([
   { scheme: RENDERER_SCHEME, privileges: { standard: true, secure: true, supportFetchAPI: true, corsEnabled: true, stream: true } }
 ])
 const { DEFAULT_MANIFEST_URL, compareVersions, artifactFromManifest } = require('./updater.cjs')
+const { installGracefulQuit } = require('./shutdown.cjs')
 const { PluginManager, MAX_PACKAGE_BYTES } = require('./plugin-manager.cjs')
 const { SkillManager } = require('./skill-manager.cjs')
 const { prepare: prepareDependencies, dependencyEnvironment, resolvePython } = require('./dependency-manager.cjs')
@@ -1792,12 +1793,14 @@ async function stopPi() {
   try { agentSessionService?.stopAll() } catch {}
   localFeedback?.cancel()
   for (const controller of analysisControllers) controller.abort()
-  await stopBrowserBridge()
   const runtimes = [...piRuntimes.values()]
   piRuntimes.clear()
   piActiveKey = ''
-  await Promise.all(runtimes.map((runtime) => stopPiRuntime(runtime)))
-  await gatewayBridge.stop()
+  await Promise.all([
+    ...runtimes.map((runtime) => stopPiRuntime(runtime)),
+    stopBrowserBridge(),
+    gatewayBridge.stop()
+  ])
 }
 
 async function stopBrowserBridge() {
@@ -3598,4 +3601,8 @@ app.whenReady().then(() => {
   app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow() })
 })
 app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit() })
-app.on('before-quit', () => { void stopPi() })
+installGracefulQuit(app, {
+  beforeStop: () => { isQuitting = true },
+  stop: stopPi,
+  onError: error => console.error('[shutdown]', error)
+})
