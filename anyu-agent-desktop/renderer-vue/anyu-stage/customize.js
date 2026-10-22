@@ -124,4 +124,5 @@
   }, true)
 
   document.body.dataset.anyuLocalized = 'true'
+  window.parent.postMessage({ type: 'anyu:stage-shell' }, window.location.origin)
 })()

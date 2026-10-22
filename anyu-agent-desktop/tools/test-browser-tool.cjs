@@ -4,7 +4,7 @@ const http = require('node:http')
 async function main() {
   let tool
   const extension = (await import('../pi-browser-extension.mjs')).default
-  extension({ registerTool: (definition) => { tool = definition } })
+  extension({ registerTool: (definition) => { if (definition.name === 'browser_open') tool = definition } })
   assert.equal(tool.name, 'browser_open')
   const requests = []
   const server = http.createServer((request, response) => {

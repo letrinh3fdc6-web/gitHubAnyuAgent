@@ -1,5 +1,5 @@
 const { app, BrowserWindow, WebContentsView, ipcMain, safeStorage, shell, session, dialog, Menu, Tray, protocol, screen } = require('electron')
-const { spawn, execFileSync } = require('child_process')
+const { spawn, execFile, execFileSync } = require('child_process')
 const fs = require('fs')
 const path = require('path')
 const os = require('os')
@@ -40,6 +40,7 @@ const { prepare: prepareDependencies, dependencyEnvironment, resolvePython } = r
 const { existingBash, shellEnvironment, ensureWindowsShell } = require('./tools/windows-shell-bootstrap.cjs')
 const { LocalGatewayBridge, managedProviderName, managedBaseUrl } = require('./gateway-bridge.cjs')
 const { AgentSessionService } = require('./agent-session.cjs')
+const { AgentOrchestrator } = require('./agent-orchestrator.cjs')
 const {
   ELEVATION_ENV_FLAG,
   writeIntent: writeElevationIntent,
@@ -421,6 +422,7 @@ let recoveredUpdateState = null
 let pluginManager = null
 let skillManager = null
 let agentSessionService = null
+let agentOrchestrator = null
 const dependencyJobs = new Map()
 function preparePluginDependencies(record) {
   if (!record?.id || !record.dependencies || !Object.keys(record.dependencies).length) return
@@ -556,8 +558,8 @@ async function readPluginDownload(response, report) {
   return Buffer.concat(chunks)
 }
 
-function sendBrowserState() {
-  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('agent-browser:state', { ...browserState })
+function sendBrowserState({ reveal = false } = {}) {
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('agent-browser:state', { ...browserState, ...(reveal ? { reveal: true } : {}) })
 }
 
 function browserBounds() {
@@ -686,7 +688,7 @@ async function openBrowserUrl(url) {
   if (!isAllowedBrowserUrl(url)) throw new Error('只支持 HTTP(S) 网页地址')
   const view = ensureBrowserView()
   browserState = { ...browserState, open: true, url: String(url), title: new URL(String(url)).hostname, loading: true, error: '' }
-  sendBrowserState()
+  sendBrowserState({ reveal: true })
   void view.webContents.loadURL(String(url)).catch((error) => {
     browserState = { ...browserState, loading: false, error: error.message || '页面加载失败' }
     sendBrowserState()
@@ -772,7 +774,7 @@ async function openBrowserArtifact(payload = {}) {
   const view = ensureBrowserView()
   previewRoot = realRoot
   browserState = { ...browserState, open: true, url: `artifact://${candidate}`, title: path.basename(candidate), loading: true, error: '' }
-  sendBrowserState()
+  sendBrowserState({ reveal: true })
   const relative = path.relative(realRoot, realCandidate).split(path.sep).map(encodeURIComponent).join('/')
   void view.webContents.loadURL(`leta-preview://workspace/${relative}`).catch((error) => {
     browserState = { ...browserState, loading: false, error: error.message || '结果预览失败' }
@@ -1776,6 +1778,14 @@ async function stopPiRuntime(runtime) {
   runtime.child = null
   for (const id of [...runtime.pending.keys()]) settlePiRequest(runtime, id, new Error('Pi process stopped'))
   if (!child) return
+  if (runtime.startOptions?.orchestration && runtime.inFlightPrompt && child.pid) {
+    // Escalation is restricted to this owned agent's process tree.
+    if (process.platform === 'win32') {
+      await new Promise(resolve => execFile('taskkill.exe', ['/PID', String(child.pid), '/T', '/F'], { windowsHide: true, timeout: 3500 }, () => resolve()))
+    } else {
+      try { process.kill(-child.pid, 'SIGKILL') } catch {}
+    }
+  }
   try { child.stdin?.end() } catch {}
   try { child.kill() } catch {}
   await new Promise((resolve) => {
@@ -1790,6 +1800,7 @@ async function stopPiRuntime(runtime) {
 
 async function stopPi() {
   piSkillLaunch = null
+  await agentOrchestrator?.close()
   try { agentSessionService?.stopAll() } catch {}
   localFeedback?.cancel()
   for (const controller of analysisControllers) controller.abort()
@@ -1878,8 +1889,7 @@ async function startBrowserBridge(cwd) {
 }
 
 function sendPi(command, runtimeArg = null) {
-  const explicit = runtimeArg?.child?.stdin?.writable ? runtimeArg : null
-  const runtime = explicit || activePiRuntime()
+  const runtime = runtimeArg || activePiRuntime()
   if (!runtime?.child?.stdin?.writable) return Promise.reject(new Error('Pi Agent 尚未启动'))
   const id = command.id || `anyu-${++runtime.counter}`
   const payload = { ...command, id }
@@ -1902,11 +1912,11 @@ function sendPi(command, runtimeArg = null) {
 }
 
 // 只清理空闲的后台运行时，给新会话腾位置；正在跑任务的绝不能杀。
-function evictIdlePiRuntimes(keepKey) {
+function evictIdlePiRuntimes(keepKey, allowActiveIdle = false) {
   if (piRuntimes.size < PI_MAX_RUNTIMES) return
   // 只淘汰空闲的后台进程，按最久未使用优先；正在生成任务的绝不能杀。
   const candidates = [...piRuntimes.entries()]
-    .filter(([key, runtime]) => key !== keepKey && key !== piActiveKey && !runtime.inFlightPrompt)
+    .filter(([key, runtime]) => key !== keepKey && (allowActiveIdle || key !== piActiveKey) && !runtime.inFlightPrompt)
     .sort((left, right) => Number(left[1].lastUsedAt || 0) - Number(right[1].lastUsedAt || 0))
   for (const [key, runtime] of candidates) {
     if (piRuntimes.size < PI_MAX_RUNTIMES) return
@@ -1926,11 +1936,16 @@ async function startPiUnsafe(options = {}) {
   const requestedSession = options.sessionPath && isInside(piSessionDir(), options.sessionPath) ? path.resolve(options.sessionPath) : ''
   const key = requestedSession || `anon:${crypto.randomUUID()}`
   const existing = piRuntimes.get(key)
+  const isChild = options.agentRole === 'child'
+  const activeParents = [...piRuntimes.values()].filter(runtime => runtime.inFlightPrompt && runtime.startOptions?.agentRole !== 'child' && runtime !== existing).length
+  if (!isChild && activeParents >= 2 && (options.orchestration || [...piRuntimes.values()].some(runtime => runtime.inFlightPrompt && runtime.startOptions?.orchestration))) {
+    throw new Error('正在执行其他会话，需保留子代理运行位置，请等待其中一轮完成')
+  }
   if (existing?.child && existing.child.exitCode === null && existing.child.signalCode === null && !options.force) {
     // 同会话复用现有进程：切换会话因此不再中止正在运行的任务。
     existing.lastUsedAt = Date.now()
     if (managed && options.thinkingLevel && !existing.inFlightPrompt) gatewayBridge.setThinkingLevel(existing.gatewayContext, options.thinkingLevel)
-    piActiveKey = key
+    if (!options.background) piActiveKey = key
     // 浏览器桥是所有进程共享的，这里只补登记该会话的工作区（幂等，不会轮换令牌）。
     try { await startBrowserBridge(existing.cwd) } catch {}
     return { ok: true, reused: true, cwd: existing.cwd, sessionDir: piSessionDir(), sessionPath: existing.key, permissionMode: existing.permissionMode }
@@ -1944,7 +1959,7 @@ async function startPiUnsafe(options = {}) {
     piRuntimes.delete(key)
     await stopPiRuntime(existing)
   }
-  evictIdlePiRuntimes(key)
+  evictIdlePiRuntimes(key, isChild)
   let credential = ''
   let bridgeOrigin = ''
   if (managed) {
@@ -1957,7 +1972,10 @@ async function startPiUnsafe(options = {}) {
     credential = keyValue(record)
     if (!credential) throw new Error('所选密钥没有可用的 API Key，请刷新密钥列表后重试')
   }
-  const agentDir = piAgentDir(); const sessionDir = piSessionDir()
+  const agentDir = options.orchestration
+    ? path.join(piAgentDir(), 'agent-configs', crypto.createHash('sha256').update(key).digest('hex').slice(0, 32))
+    : piAgentDir()
+  const sessionDir = piSessionDir()
   fs.mkdirSync(sessionDir, { recursive: true })
   fs.mkdirSync(agentDir, { recursive: true })
   const gatewayContext = managed ? crypto.randomUUID() : ''
@@ -1972,19 +1990,22 @@ async function startPiUnsafe(options = {}) {
   // 没把权限模式传下来（或传的还是默认值），也要按意图以完整访问启动 Pi。
   // 这是"重启以后还要手动再指定一次"的直接修复点。
   const intentPermissionMode = currentElevationIntent()?.permissionMode
-  const resolvedPermissionMode = intentPermissionMode === 'full' && requestedPermissionMode !== 'full'
+  const resolvedPermissionMode = !isChild && intentPermissionMode === 'full' && requestedPermissionMode !== 'full'
     ? 'full'
     : requestedPermissionMode
   const args = ['--mode', 'rpc', '--provider', provider, '--model', selectedModelId, '--session-dir', sessionDir]
   // 工具失败必须由 Agent 决策如何恢复，不能让一次底层异常直接终止整条对话。
   // 只传行为约束，不把任何具体错误或临时路径写进系统提示词。
   args.push('--append-system-prompt', '工具调用由你负责决策。工具失败只代表当前尝试失败：读取错误码和简短摘要，按需重试、改参数、选择替代工具或向用户说明；不要把原始堆栈、二进制内容、临时路径当成用户需求，也不要因一次工具失败终止后续对话。')
-  if (resolvedPermissionMode === 'full') {
+  if (resolvedPermissionMode === 'full' && !options.readOnly) {
     // gptFullAccess 同时启用 Pi 全部内置工具；--approve 只负责信任项目文件。
     // 配置档会启用全部内置工具；不再传显式白名单，以保留插件和扩展工具。
     args.push('--permission-profile', 'gptFullAccess', '--approve')
     args.push('--append-system-prompt', '当前是用户明确选择的完全权限模式：全部内置工具、文件读写、命令执行和浏览器控制均已授权。直接执行任务，不要因为权限或安全顾虑停在方案阶段，也不要请求额外确认；只有缺少必要信息或操作不可逆时才询问。完成后自行验证结果。')
   }
+  if (isChild) args.push('--no-extensions')
+  if (options.readOnly) args.push('--tools', 'read,grep,find,ls')
+  if (options.systemPrompt) args.push('--append-system-prompt', options.systemPrompt)
   if (requestedSession) args.push('--session', requestedSession)
   const sessionCwd = requestedSession ? sessionWorkingDirectory(requestedSession) : ''
   const requestedCwd = sessionCwd || options.cwd
@@ -1994,13 +2015,20 @@ async function startPiUnsafe(options = {}) {
   for (const skillPath of pluginPaths) args.push('--skill', skillPath)
   const browserExtension = externalProcessPath('pi-browser-extension.mjs')
   // 扩展缺失时不能让 Pi 直接启动失败（Pi 会以退出码 1 终止），降级为不带浏览器扩展启动。
-  if (fs.existsSync(browserExtension)) args.push('--extension', browserExtension)
-  else console.error(`[pi] 浏览器扩展缺失，已跳过: ${browserExtension}`)
+  if (!options.readOnly) {
+    if (fs.existsSync(browserExtension)) args.push('--extension', browserExtension)
+    else console.error(`[pi] 浏览器扩展缺失，已跳过: ${browserExtension}`)
+  }
   // Tool-level approval gate. It only prompts when ANYU_PERMISSION_MODE=confirm,
   // but is always loaded so a permission change does not need a new install.
   const approvalExtension = externalProcessPath('pi-approval-gate.mjs')
   if (fs.existsSync(approvalExtension)) args.push('--extension', approvalExtension)
   else console.error(`[pi] 审批扩展缺失，已跳过: ${approvalExtension}`)
+  if (options.orchestration) {
+    const orchestrationExtension = externalProcessPath('pi-subagent-extension.mjs')
+    if (!fs.existsSync(orchestrationExtension)) throw new Error('缺少多代理扩展，请更新桌面客户端')
+    args.push('--extension', orchestrationExtension)
+  }
   const runtime = { key, gatewayContext, buffer: '', pending: new Map(), counter: 0, child: null, inFlightPrompt: false, lastUsedAt: Date.now(), lastEventAt: 0, cwd, permissionMode: resolvedPermissionMode }
   let startupStderr = ''
   let stateResponse = null
@@ -2008,8 +2036,9 @@ async function startPiUnsafe(options = {}) {
   if (managed) gatewayBridge.setThinkingLevel(gatewayContext, options.thinkingLevel || 'auto')
   runtime.child = spawn(executable, args, {
     cwd,
-    env: { ...dependencyEnvironment(shellEnvironment(process.env)), PI_CODING_AGENT_DIR: agentDir, PI_CODING_AGENT_SESSION_DIR: sessionDir, ANYU_API_KEY: credential, ANYU_PERMISSION_PROFILE: resolvedPermissionMode === 'full' ? 'gptFullAccess' : '', ANYU_PERMISSION_MODE: resolvedPermissionMode, PI_SKIP_VERSION_CHECK: '1', LETA_BROWSER_BRIDGE_PORT: String(browserBridgeConfig.port), LETA_BROWSER_BRIDGE_TOKEN: browserBridgeConfig.token },
+    env: { ...dependencyEnvironment(shellEnvironment(process.env)), PI_CODING_AGENT_DIR: agentDir, PI_CODING_AGENT_SESSION_DIR: sessionDir, ANYU_API_KEY: credential, ANYU_PERMISSION_PROFILE: resolvedPermissionMode === 'full' && !options.readOnly ? 'gptFullAccess' : '', ANYU_PERMISSION_MODE: resolvedPermissionMode, PI_SKIP_VERSION_CHECK: '1', LETA_BROWSER_BRIDGE_PORT: options.readOnly ? '' : String(browserBridgeConfig.port), LETA_BROWSER_BRIDGE_TOKEN: options.readOnly ? '' : browserBridgeConfig.token, ANYU_AGENT_BRIDGE_PORT: String(options.orchestration?.port || ''), ANYU_AGENT_BRIDGE_TOKEN: options.orchestration?.token || '', ANYU_AGENT_ROLE: options.agentRole || '', ANYU_AGENT_READ_ONLY: options.readOnly ? '1' : '' },
     stdio: ['pipe', 'pipe', 'pipe'],
+    detached: Boolean(options.orchestration && process.platform !== 'win32'),
     windowsHide: true
   })
   const child = runtime.child
@@ -2048,7 +2077,7 @@ async function startPiUnsafe(options = {}) {
   stateResponse = await sendPi({ type: 'get_state' }, runtime)
   const skillLaunch = { executable, cwd, env: { ...process.env, PI_CODING_AGENT_DIR: agentDir, ANYU_API_KEY: credential, PI_SKIP_VERSION_CHECK: '1', PI_OFFLINE: '1', ANYU_PERMISSION_MODE: '', ANYU_PERMISSION_PROFILE: '', LETA_BROWSER_BRIDGE_TOKEN: '', LETA_BROWSER_BRIDGE_PORT: '' } }
   runtime.skillLaunch = skillLaunch
-  piSkillLaunch = skillLaunch
+  if (!options.background) piSkillLaunch = skillLaunch
   } catch (error) {
     // 启动失败只清理这个会话自己的进程，不能连坐正在跑任务的后台会话。
     await stopPiRuntime(runtime)
@@ -2087,7 +2116,7 @@ async function startPiUnsafe(options = {}) {
     force: false,
     __sessionRecoveryAttempt: undefined,
   }
-  piActiveKey = finalKey
+  if (!options.background) piActiveKey = finalKey
   return { ok: true, cwd, sessionDir, permissionMode: resolvedPermissionMode, sessionPath: finalKey, reused: false }
 }
 
@@ -2181,6 +2210,8 @@ async function setAgentPermissionMode(mode) {
   runtimes.sort((left, right) => Number(right.key === activeKey) - Number(left.key === activeKey))
   for (const runtime of runtimes) {
     if (!runtime?.startOptions) continue
+    // A running team holds an immutable permission snapshot for the whole turn.
+    if (runtime.startOptions.agentRole === 'child' || (runtime.startOptions.orchestration && runtime.inFlightPrompt)) continue
     const { force: _force, __sessionRecoveryAttempt: _recoveryAttempt, ...baseOptions } = runtime.startOptions
     await startPi({
       ...baseOptions,
@@ -3021,6 +3052,16 @@ app.whenReady().then(() => {
     },
     log: (...args) => console.log('[agent-session]', ...args)
   })
+  agentOrchestrator = new AgentOrchestrator({
+    sessions: agentSessionService,
+    getCatalog: () => requestApi('/integrations/anyu-agent/catalog'),
+    retireRuntime: async key => {
+      const runtime = piRuntimes.get(key)
+      if (!runtime) return
+      await stopPiRuntime(runtime)
+      if (piRuntimes.get(key) === runtime) piRuntimes.delete(key)
+    },
+  })
   pluginManager = new PluginManager(app.getPath('userData'))
   skillManager = new SkillManager(app.getPath('userData'))
   try {
@@ -3317,12 +3358,12 @@ app.whenReady().then(() => {
   ipcMain.handle('payment:qr-data-url', (_, value) => createPaymentQrDataUrl(value))
   ipcMain.handle('payment:open-browser', (_, payload = {}) => openPaymentBrowser(payload || {}))
   ipcMain.handle('pi:key-models', (_, keyId) => listKeyModels(keyId))
-  ipcMain.handle('agent:start', (_, payload) => agentSessionService.start(payload || {}))
-  ipcMain.handle('agent:prompt', (_, payload) => agentSessionService.prompt(payload || {}))
-  ipcMain.handle('agent:abort', (_, payload) => agentSessionService.abort(payload || {}))
+  ipcMain.handle('agent:start', (_, payload) => agentOrchestrator.start(payload || {}))
+  ipcMain.handle('agent:prompt', (_, payload) => agentOrchestrator.prompt(payload || {}))
+  ipcMain.handle('agent:abort', (_, payload) => agentOrchestrator.abort(payload || {}))
   ipcMain.handle('agent:approve', (_, payload) => agentSessionService.approve(payload || {}))
   ipcMain.handle('agent:events', (_, payload) => agentSessionService.history(payload || {}))
-  ipcMain.handle('agent:snapshot', (_, payload) => agentSessionService.snapshot(payload || {}))
+  ipcMain.handle('agent:snapshot', (_, payload) => agentOrchestrator.snapshot(payload || {}))
   ipcMain.handle('agent:sessions', () => agentSessionService.list())
   ipcMain.handle('pi:save-attachments', (_, payload) => savePiAttachments(payload || {}))
   ipcMain.handle('pi:attachments', (_, sessionPath) => loadPiAttachments(sessionPath))

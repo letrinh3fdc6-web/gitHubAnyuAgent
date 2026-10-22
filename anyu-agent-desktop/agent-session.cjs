@@ -97,6 +97,7 @@ class AgentSessionService {
     this.runs = new Map()
     this.approvals = new Map()
     this.recent = new Map()
+    this.listeners = new Set()
     this.seq = Date.now()
     this.loadIndex()
   }
@@ -132,6 +133,7 @@ class AgentSessionService {
           createdAt: record.createdAt,
           updatedAt: record.updatedAt,
           lastStatus: record.lastStatus || '',
+          parentSessionId: record.parentSessionId || '',
         }
       }
       const temporary = `${this.indexFile}.${process.pid}.tmp`
@@ -188,13 +190,22 @@ class AgentSessionService {
     } catch (error) {
       this.log('broadcast failed:', error?.message || error)
     }
+    for (const listener of this.listeners) {
+      try { listener(payload) } catch (error) { this.log('event listener failed:', error?.message || error) }
+    }
     return payload
+  }
+
+  subscribe(listener) {
+    this.listeners.add(listener)
+    return () => this.listeners.delete(listener)
   }
 
   // ---------------------------------------------------------------- session API
 
   async start(payload = {}) {
     const sessionId = safeSessionId(payload.sessionId || payload.conversationId)
+    if (this.runs.has(sessionId)) throw new Error('当前会话仍在运行，不能更改运行配置')
     const record = this.sessions.get(sessionId) || {
       sessionId,
       createdAt: nowIso(),
@@ -210,6 +221,7 @@ class AgentSessionService {
     const cwdChanged = Boolean(record.cwd && cwd && path.resolve(record.cwd) !== path.resolve(cwd))
 
     const started = await this.startRuntime({
+      ...(payload.runtimeOptions || record.runtimeOptions || {}),
       accessMode: payload.accessMode || 'managed',
       model,
       provider,
@@ -227,6 +239,8 @@ class AgentSessionService {
     record.model = model
     record.provider = provider
     record.models = models
+    record.runtimeOptions = payload.runtimeOptions || record.runtimeOptions
+    record.parentSessionId = payload.parentSessionId || record.parentSessionId || ''
     record.updatedAt = nowIso()
     record.lastStatus = record.lastStatus || 'ready'
     this.sessions.set(sessionId, record)
@@ -543,6 +557,7 @@ class AgentSessionService {
   finishRun(sessionId, { status, error = '' } = {}) {
     const run = this.runs.get(sessionId)
     if (!run) return
+    if (run.failureReason) { status = 'failed'; error = run.failureReason }
     this.runs.delete(sessionId)
     const record = this.sessions.get(sessionId)
     if (record) {
@@ -576,6 +591,7 @@ class AgentSessionService {
 
   list() {
     return [...this.sessions.values()]
+      .filter(record => !record.parentSessionId)
       .sort((a, b) => String(b.updatedAt || '').localeCompare(String(a.updatedAt || '')))
       .map((record) => ({
         sessionId: record.sessionId,
@@ -714,6 +730,11 @@ class AgentSessionService {
           activity.output = event.output
           activity.finishedAt = event.at
         }
+      } else if (event.type === 'subagent.updated' && event.task) {
+        const tasks = current.subagents || (current.subagents = [])
+        const index = tasks.findIndex(task => task.id === event.task.id)
+        if (index < 0) tasks.push({ ...event.task })
+        else tasks[index] = { ...event.task }
       } else if (event.type === 'run.finished') {
         current.isStreaming = false
         current.isError = event.status === 'failed'
@@ -728,7 +749,17 @@ class AgentSessionService {
       current.isStreaming = Boolean(this.runs.get(sessionId))
       messages.push(current)
     }
-    return messages.filter((message) => message.role === 'user' || message.content || message.activities?.length)
+    if (!this.runs.has(sessionId)) {
+      for (const message of messages) {
+        for (const task of message.subagents || []) {
+          if (['queued', 'running', 'waiting_approval'].includes(task.status)) {
+            task.status = 'failed'
+            task.error = '执行已中断，未自动重试'
+          }
+        }
+      }
+    }
+    return messages.filter((message) => message.role === 'user' || message.content || message.activities?.length || message.subagents?.length || message.isStreaming)
   }
 
   snapshot(payload = {}) {

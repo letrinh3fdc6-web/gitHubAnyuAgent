@@ -1,5 +1,6 @@
 const { contextBridge, ipcRenderer } = require('electron')
 contextBridge.exposeInMainWorld('anyu', {
+  agentCapabilities: { subagents: true },
   systemAccessState: () => ipcRenderer.invoke('system:state'),
   agentPermissionState: () => ipcRenderer.invoke('agent:permission-state'),
   setAgentPermissionMode: (mode) => ipcRenderer.invoke('agent:set-permission-mode', mode),

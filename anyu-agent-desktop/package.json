@@ -1,6 +1,6 @@
 {
   "name": "anyu-agent-desktop",
-  "version": "1.0.63",
+  "version": "1.0.64",
   "description": "AnyuAgent standalone desktop workspace",
   "main": "main.cjs",
   "author": "Anyu AI",
@@ -82,6 +82,7 @@
     "artifactName": "AnyuAgent-Setup-${version}.exe",
     "asar": true,
     "asarUnpack": [
+      "pi-subagent-extension.mjs",
       "pi-browser-extension.mjs",
       "pi-approval-gate.mjs",
       "tools/auto_edit_worker.py",
@@ -108,6 +109,8 @@
       "skill-manager.cjs",
       "skills/**/*",
       "agent-session.cjs",
+      "agent-orchestrator.cjs",
+      "pi-subagent-extension.mjs",
       "pi-browser-extension.mjs",
       "pi-approval-gate.mjs",
       "gateway-bridge.cjs",
