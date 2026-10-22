@@ -176,17 +176,17 @@ jobs:
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: anyuagent-v1.0.64
+          tag_name: anyuagent-v1.0.65
           target_commitish: ${{ github.sha }}
-          name: AnyuAgent 1.0.64
+          name: AnyuAgent 1.0.65
           draft: true
           make_latest: false
           body: |
-            AnyuAgent 1.0.64 adds optional multi-model subagents, semantic image planning, automatic browser previews, and account usage records labelled with hidden AnyuAgent system keys. Windows includes the bounded installer process check and graceful shutdown fix. Windows and macOS share the same frozen renderer source.
+            AnyuAgent 1.0.65 adds optional multi-model subagents, semantic image planning, automatic browser previews, and account usage records labelled with hidden AnyuAgent system keys. Windows installer checks use native image-path queries to avoid slow module enumeration. Windows and macOS share the same frozen renderer source.
 
             macOS downloads include separate Apple Silicon and Intel DMG/ZIP packages. Each package includes a matching native runtime. These packages are unsigned and are not notarized.
 
-            Windows download: https://x.ailzd.com/downloads/AnyuAgent-Setup-1.0.64.exe
+            Windows download: https://x.ailzd.com/downloads/AnyuAgent-Setup-1.0.65.exe
           files: |
             release-assets/*.dmg
             release-assets/*.zip

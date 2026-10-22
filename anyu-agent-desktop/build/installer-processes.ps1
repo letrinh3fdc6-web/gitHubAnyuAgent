@@ -11,6 +11,29 @@ function Write-InstallLog([string]$Message) {
 }
 
 try {
+    # Query image paths without enumerating each process's loaded modules.
+    Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+using System.Text;
+public static class AnyuInstallerProcessImage {
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern IntPtr OpenProcess(uint access, bool inherit, uint pid);
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern bool QueryFullProcessImageName(IntPtr process, uint flags, StringBuilder image, ref uint size);
+    [DllImport("kernel32.dll")]
+    private static extern bool CloseHandle(IntPtr handle);
+    public static string GetPath(uint pid) {
+        IntPtr handle = OpenProcess(0x1000, false, pid);
+        if (handle == IntPtr.Zero) return null;
+        try {
+            uint size = 32768;
+            var image = new StringBuilder((int)size);
+            return QueryFullProcessImageName(handle, 0, image, ref size) ? image.ToString() : null;
+        } finally { CloseHandle(handle); }
+    }
+}
+'@
     $resolved = [IO.Path]::GetFullPath($InstallDirectory).TrimEnd('\', '/')
     $volume = [IO.Path]::GetPathRoot($resolved).TrimEnd('\', '/')
     if ($resolved -eq $volume -or -not [IO.Path]::IsPathRooted($InstallDirectory)) {
@@ -23,7 +46,7 @@ try {
         foreach ($item in Get-Process -ErrorAction Stop) {
             if ($item.Id -eq $PID -or $item.Id -eq $InstallerProcessId) { continue }
             $image = $null
-            try { $image = $item.Path } catch {}
+            try { $image = [AnyuInstallerProcessImage]::GetPath($item.Id) } catch {}
             if (-not $image) {
                 if ($item.ProcessName -eq 'AnyuAgent') {
                     throw "Cannot inspect AnyuAgent PID $($item.Id); close it before installing"
@@ -46,7 +69,8 @@ try {
         foreach ($item in $targets) {
             # Recheck the image path immediately before stopping the process.
             $current = Get-Process -Id $item.Id -ErrorAction SilentlyContinue
-            if ($current -and $current.Path -and $current.Path.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) {
+            $currentImage = if ($current) { [AnyuInstallerProcessImage]::GetPath($current.Id) } else { $null }
+            if ($current -and $currentImage -and $currentImage.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) {
                 Write-InstallLog "Stopping installation-owned process $($current.ProcessName), PID $($current.Id)"
                 Stop-Process -InputObject $current -Force -ErrorAction Stop
                 if (-not $current.WaitForExit(2000)) { throw "Process $($current.Id) did not exit" }
