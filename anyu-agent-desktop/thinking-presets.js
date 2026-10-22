@@ -230,6 +230,13 @@
    *             templateId:string, templateLabel:string, source:'api'|'template'|'generic'|'none' }}
    */
   function resolveThinking(model = {}) {
+    if (model.thinking && typeof model.thinking === 'object') {
+      const capability = model.thinking
+      const levels = normalizeLevels((capability.levels || []).map(level => level === 'on' ? 'high' : level))
+      if (!levels.length) levels.push(capability.mode === 'fixed' ? 'high' : 'off')
+      const defaultLevel = levels.includes(capability.default_level) ? capability.default_level : pickDefault(levels)
+      return { reasoning: capability.mode !== 'none', levels, map: mapFromLevels(levels), defaultLevel, templateId: capability.family, templateLabel: '模型能力目录', source: 'api' }
+    }
     const id = String(model.id || model.modelId || model.model_id || '')
     const name = String(model.name || model.display_name || model.displayName || '')
     const api = String(model.api || '')

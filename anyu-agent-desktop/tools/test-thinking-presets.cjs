@@ -22,6 +22,16 @@ function check(name, fn) {
   }
 }
 
+check('服务端模型能力覆盖旧模板，不制造额外档位', () => {
+  const result = presets.resolveThinking({ id: 'grok-4.7', thinking: { family: 'grok', mode: 'effort', levels: ['low', 'medium', 'high', 'xhigh'], default_level: 'high', required: true } })
+  assert.deepEqual(result.levels, ['low', 'medium', 'high', 'xhigh'])
+  assert.equal(result.defaultLevel, 'high')
+  assert.equal(result.source, 'api')
+  const unknown = presets.resolveThinking({ id: 'gpt-unknown', reasoning: true, thinking: { family: 'none', mode: 'none', levels: [], default_level: 'auto', required: false } })
+  assert.equal(unknown.reasoning, false)
+  assert.deepEqual(unknown.levels, ['off'])
+})
+
 // ── 1. 模板库自身的不变量 ────────────────────────────────────────────────
 
 check('模板库档位全部合法且顺序稳定', () => {
@@ -63,9 +73,9 @@ const cases = [
   ['anthropic/claude-3-7-sonnet', 'anthropic-thinking', 4],
   ['gemini-3-pro-preview', 'google-gemini', 4],
   ['gemini-2.5-flash', 'google-gemini', 4],
-  ['deepseek-r1', 'deepseek-reasoning', 4],
-  ['DeepSeek-V4.1-Flash', 'deepseek-reasoning', 4],
-  ['deepseek-v3.2', 'deepseek-reasoning', 4],
+  ['deepseek-r1', 'deepseek-reasoning', 3],
+  ['DeepSeek-V4.1-Flash', 'deepseek-reasoning', 3],
+  ['deepseek-v3.2', 'deepseek-reasoning', 3],
   ['qwen3-max', 'qwen-thinking', 4],
   ['qwq-32b', 'qwen-thinking', 4],
   ['glm-4.6', 'glm-thinking', 4],

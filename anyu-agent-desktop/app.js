@@ -699,6 +699,7 @@
     // 思考强度与模型族匹配都交给共用模板库，接口显式声明优先。
     const thinking = thinkingPresets.resolveThinking({
       id: modelId,
+      thinking: model?.thinking,
       name: model?.display_name || model?.displayName || model?.name || '',
       api,
       reasoning: model?.reasoning ?? model?.supports_reasoning ?? model?.supportsReasoning,

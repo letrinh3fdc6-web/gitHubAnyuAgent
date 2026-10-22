@@ -21,8 +21,8 @@ function managedProviderName(api, groupId) {
   return `anyu-gateway-${protocol}-g${Number(groupId)}`
 }
 
-function managedBaseUrl(origin, api, groupId) {
-	const route = `${String(origin || '').replace(/\/$/, '')}/anyu/${Number(groupId)}`
+function managedBaseUrl(origin, api, groupId, contextKey = '') {
+	const route = `${String(origin || '').replace(/\/$/, '')}/anyu/${Number(groupId)}${contextKey ? `/context/${encodeURIComponent(contextKey)}` : ''}`
   if (api === 'anthropic-messages') return route
   return api === 'google-generative-ai' || api === 'google-vertex' ? `${route}/v1beta` : `${route}/v1`
 }
@@ -39,12 +39,12 @@ function authorizedLocalRequest(req, token) {
 function parseManagedRoute(requestUrl) {
   let url
   try { url = new URL(requestUrl, 'http://127.0.0.1') } catch { return null }
-	const match = url.pathname.match(/^\/anyu\/([1-9]\d*)(\/.*)$/)
+	const match = url.pathname.match(/^\/anyu\/([1-9]\d*)(?:\/context\/([a-zA-Z0-9_-]{1,64}))?(\/.*)$/)
 	if (!match) return null
 	const groupId = Number(match[1])
-	const upstreamPath = match[2]
+	const upstreamPath = match[3]
 	if (!Number.isSafeInteger(groupId) || groupId <= 0 || !allowedGatewayPath(upstreamPath)) return null
-	return { groupId, upstreamPath: `${upstreamPath}${url.search}` }
+	return { groupId, upstreamPath: `${upstreamPath}${url.search}`, ...(match[2] ? { contextKey: match[2] } : {}) }
 }
 
 function requestModel(route, body) {
@@ -130,6 +130,7 @@ class LocalGatewayBridge {
     this.maxRequestBytes = Number(options.maxRequestBytes || DEFAULT_MAX_REQUEST_BYTES)
     this.server = null
     this.sockets = new Set()
+    this.thinkingContexts = new Map()
     // Pi 会连续发起多轮请求，复用到正式网关的连接可避免重复 TCP/TLS 握手。
     this.upstreamAgent = createUpstreamAgent(this.gatewayBase.protocol)
     this.token = ''
@@ -160,11 +161,20 @@ class LocalGatewayBridge {
     return { origin: this.origin, token: this.token }
   }
 
+  setThinkingLevel(contextKey, level = 'auto') {
+    if (!contextKey) return
+    if (!/^[a-zA-Z0-9_-]{1,64}$/.test(contextKey) || !/^(auto|off|on|between_tools|minimal|low|medium|high|xhigh|max)$/.test(level)) throw new Error('无效的思考深度')
+    this.thinkingContexts.set(contextKey, level)
+  }
+
+  removeThinkingContext(contextKey) { this.thinkingContexts.delete(contextKey) }
+
   async stop() {
     const server = this.server
     this.server = null
     this.origin = ''
     this.token = ''
+    this.thinkingContexts.clear()
     if (!server) return
     for (const socket of this.sockets) socket.destroy()
     this.sockets.clear()
@@ -184,6 +194,10 @@ class LocalGatewayBridge {
     const route = parseManagedRoute(req.url)
     if (!route) {
       writeJSON(res, 404, '本机桥接路径不在允许范围内')
+      return
+    }
+    if (route.contextKey && !this.thinkingContexts.has(route.contextKey)) {
+      writeJSON(res, 400, '当前会话的思考配置已失效，请重新发送')
       return
     }
 		let body
@@ -214,6 +228,7 @@ class LocalGatewayBridge {
       'User-Agent': this.userAgent,
       'Content-Length': String(body.length)
     }
+    if (route.contextKey) headers['X-AnYu-Thinking-Level'] = this.thinkingContexts.get(route.contextKey)
     for (const [name, value] of Object.entries(clientRequest.headers || {})) {
       if (FORWARDED_REQUEST_HEADERS.has(name.toLowerCase()) && value != null) headers[name] = value
     }
@@ -245,7 +260,12 @@ class LocalGatewayBridge {
         if (!clientResponse.headersSent) clientResponse.writeHead(upstreamResponse.statusCode || 502, responseHeaders(upstreamResponse.headers))
         upstreamResponse.pipe(clientResponse)
         upstreamResponse.once('end', resolve)
-        upstreamResponse.once('error', (error) => { writeJSON(clientResponse, 502, error.message || '网关响应失败'); resolve() })
+        upstreamResponse.once('error', (error) => {
+          // Once SSE headers are sent, a JSON error would corrupt the protocol.
+          if (clientResponse.headersSent) clientResponse.destroy(error)
+          else writeJSON(clientResponse, 502, error.message || '网关响应失败')
+          resolve()
+        })
       })
       upstream.once('error', (error) => { writeJSON(clientResponse, 502, error.message || '无法连接网关'); resolve() })
       clientRequest.once('aborted', () => upstream.destroy())

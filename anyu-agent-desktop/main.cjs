@@ -1695,13 +1695,14 @@ function modelConfig(models, runtime = {}) {
     const groupId = Number(model?.groupId || model?.group_id || 0)
     const managed = runtime.managed === true && Number.isSafeInteger(groupId) && groupId > 0
     const provider = managed ? managedProviderName(api, groupId) : providerForApi(api)
-    const baseUrl = managed ? managedBaseUrl(runtime.bridgeOrigin, api, groupId) : baseUrlForApi(api)
+    const baseUrl = managed ? managedBaseUrl(runtime.bridgeOrigin, api, groupId, runtime.gatewayContext) : baseUrlForApi(api)
     if (!grouped.has(provider)) grouped.set(provider, { api, baseUrl, models: [] })
     const displayName = String(model?.name || model?.display_name || id)
     // 思考强度能力统一交给模板库判定：主进程与渲染层共用一份规则，
     // 接口显式声明的档位优先，其次才按模型族匹配模板。
     const thinking = resolveThinking({
       id,
+      thinking: model?.thinking,
       name: displayName,
       api,
       reasoning: model?.reasoning ?? model?.supports_reasoning ?? model?.supportsReasoning,
@@ -1769,6 +1770,7 @@ function settlePiRequest(runtime, id, error, value) {
 }
 
 async function stopPiRuntime(runtime) {
+  gatewayBridge.removeThinkingContext(runtime.gatewayContext)
   const child = runtime.child
   runtime.child = null
   for (const id of [...runtime.pending.keys()]) settlePiRequest(runtime, id, new Error('Pi process stopped'))
@@ -1924,6 +1926,7 @@ async function startPiUnsafe(options = {}) {
   if (existing?.child && existing.child.exitCode === null && existing.child.signalCode === null && !options.force) {
     // 同会话复用现有进程：切换会话因此不再中止正在运行的任务。
     existing.lastUsedAt = Date.now()
+    if (managed && options.thinkingLevel && !existing.inFlightPrompt) gatewayBridge.setThinkingLevel(existing.gatewayContext, options.thinkingLevel)
     piActiveKey = key
     // 浏览器桥是所有进程共享的，这里只补登记该会话的工作区（幂等，不会轮换令牌）。
     try { await startBrowserBridge(existing.cwd) } catch {}
@@ -1954,7 +1957,8 @@ async function startPiUnsafe(options = {}) {
   const agentDir = piAgentDir(); const sessionDir = piSessionDir()
   fs.mkdirSync(sessionDir, { recursive: true })
   fs.mkdirSync(agentDir, { recursive: true })
-  fs.writeFileSync(path.join(agentDir, 'models.json'), JSON.stringify(modelConfig(options.models, { managed, bridgeOrigin }), null, 2), { mode: 0o600 })
+  const gatewayContext = managed ? crypto.randomUUID() : ''
+  fs.writeFileSync(path.join(agentDir, 'models.json'), JSON.stringify(modelConfig(options.models, { managed, bridgeOrigin, gatewayContext }), null, 2), { mode: 0o600 })
   const selectedModel = (Array.isArray(options.models) ? options.models : []).find((model) => String(model?.id || model?.name || '') === String(options.model || '')) || options.models?.[0] || {}
   const selectedModelId = String(selectedModel?.modelId || selectedModel?.model_id || selectedModel?.id || 'gpt-4o-mini').replace(/^models\//, '').trim()
   const selectedGroupId = Number(selectedModel?.groupId || selectedModel?.group_id || 0)
@@ -1975,9 +1979,7 @@ async function startPiUnsafe(options = {}) {
   if (resolvedPermissionMode === 'full') {
     // gptFullAccess 同时启用 Pi 全部内置工具；--approve 只负责信任项目文件。
     // 配置档会启用全部内置工具；不再传显式白名单，以保留插件和扩展工具。
-    // 完全权限同时把思考强度拉到 Pi 支持的最高档，避免出现“权限开了但
-    // 模型仍用低思考档位”的半套配置。Codex 的 xhigh/max 对应这里的 max。
-    args.push('--permission-profile', 'gptFullAccess', '--approve', '--thinking', 'max')
+    args.push('--permission-profile', 'gptFullAccess', '--approve')
     args.push('--append-system-prompt', '当前是用户明确选择的完全权限模式：全部内置工具、文件读写、命令执行和浏览器控制均已授权。直接执行任务，不要因为权限或安全顾虑停在方案阶段，也不要请求额外确认；只有缺少必要信息或操作不可逆时才询问。完成后自行验证结果。')
   }
   if (requestedSession) args.push('--session', requestedSession)
@@ -1996,10 +1998,11 @@ async function startPiUnsafe(options = {}) {
   const approvalExtension = externalProcessPath('pi-approval-gate.mjs')
   if (fs.existsSync(approvalExtension)) args.push('--extension', approvalExtension)
   else console.error(`[pi] 审批扩展缺失，已跳过: ${approvalExtension}`)
-  const runtime = { key, buffer: '', pending: new Map(), counter: 0, child: null, inFlightPrompt: false, lastUsedAt: Date.now(), lastEventAt: 0, cwd, permissionMode: resolvedPermissionMode }
+  const runtime = { key, gatewayContext, buffer: '', pending: new Map(), counter: 0, child: null, inFlightPrompt: false, lastUsedAt: Date.now(), lastEventAt: 0, cwd, permissionMode: resolvedPermissionMode }
   let startupStderr = ''
   let stateResponse = null
   try {
+  if (managed) gatewayBridge.setThinkingLevel(gatewayContext, options.thinkingLevel || 'auto')
   runtime.child = spawn(executable, args, {
     cwd,
     env: { ...dependencyEnvironment(shellEnvironment(process.env)), PI_CODING_AGENT_DIR: agentDir, PI_CODING_AGENT_SESSION_DIR: sessionDir, ANYU_API_KEY: credential, ANYU_PERMISSION_PROFILE: resolvedPermissionMode === 'full' ? 'gptFullAccess' : '', ANYU_PERMISSION_MODE: resolvedPermissionMode, PI_SKIP_VERSION_CHECK: '1', LETA_BROWSER_BRIDGE_PORT: String(browserBridgeConfig.port), LETA_BROWSER_BRIDGE_TOKEN: browserBridgeConfig.token },
@@ -2011,12 +2014,14 @@ async function startPiUnsafe(options = {}) {
   child.stderr.on('data', (data) => { const message = data.toString(); startupStderr = `${startupStderr}${message}`.slice(-4000); console.error(`[pi] ${message}`); if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('pi:stderr', message) })
   child.once('error', (error) => {
     if (runtime.child === child) {
+      gatewayBridge.removeThinkingContext(runtime.gatewayContext)
       runtime.child = null
       for (const id of [...runtime.pending.keys()]) settlePiRequest(runtime, id, error)
     }
   })
   child.once('exit', (code) => {
     if (runtime.child === child) {
+      gatewayBridge.removeThinkingContext(runtime.gatewayContext)
       runtime.child = null
       try { agentSessionService?.runtimeExited(runtime.key, code) } catch (error) { console.error('[agent-session]', error?.message || error) }
       // 带上 Pi 的最后一段 stderr：否则用户只看到"已退出 (1)"，无法定位是扩展、模型还是网络问题。
@@ -2997,6 +3002,10 @@ app.whenReady().then(() => {
     userDataDir: app.getPath('userData'),
     startRuntime: (options) => startPi(options),
     sendCommand: (command, runtime) => sendPi(command, runtime),
+    configureThinking: (runtime, level) => {
+      gatewayBridge.setThinkingLevel(runtime?.gatewayContext, level)
+      if (runtime?.startOptions) runtime.startOptions.thinkingLevel = level
+    },
     respondUi: (response, runtime) => {
       if (!runtime?.child?.stdin?.writable) throw new Error('Agent 运行时未启动')
       runtime.child.stdin.write(`${JSON.stringify(response)}\n`)
@@ -3375,6 +3384,10 @@ app.whenReady().then(() => {
     }
     // 多会话并行：命令必须落在它自己的子进程上。
     const runtime = resolvePiRuntime(command.sessionKey || command.sessionPath)
+    if (command.type === 'prompt' && command.thinkingLevel && runtime?.gatewayContext) {
+      if (runtime.inFlightPrompt) throw new Error('当前会话仍在运行，请先停止当前任务')
+      gatewayBridge.setThinkingLevel(runtime.gatewayContext, command.thinkingLevel)
+    }
     return sendPi(command, runtime)
   })
   ipcMain.handle('pi:ui-response', (_, response) => {

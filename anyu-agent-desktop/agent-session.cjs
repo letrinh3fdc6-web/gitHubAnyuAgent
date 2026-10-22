@@ -14,6 +14,7 @@ const crypto = require('node:crypto')
 const EVENT_VERSION = 1
 const MAX_LOG_BYTES = 0
 const APPROVAL_TIMEOUT_MS = 10 * 60 * 1000
+const ABORT_GRACE_MS = 5000
 const MAX_RECENT_EVENTS = 600
 const SNAPSHOT_PAGE_SIZE = 200
 const SNAPSHOT_TAIL_START_BYTES = 4 * 1024 * 1024
@@ -83,6 +84,7 @@ class AgentSessionService {
     if (!this.userDataDir) throw new Error('AgentSessionService requires userDataDir')
     this.startRuntime = options.startRuntime
     this.sendCommand = options.sendCommand
+    this.configureThinking = options.configureThinking
     this.respondUi = options.respondUi
     this.stopRuntime = options.stopRuntime
     this.resolveRuntime = options.resolveRuntime
@@ -215,6 +217,7 @@ class AgentSessionService {
       sessionPath: record.piSessionPath || undefined,
       cwd: cwd || undefined,
       permissionMode: permissionMode || undefined,
+      thinkingLevel: payload.thinkingLevel || 'auto',
       force: Boolean(modelChanged || permissionChanged || cwdChanged || payload.force),
     })
 
@@ -261,6 +264,7 @@ class AgentSessionService {
       runtime = this.resolveRuntime?.(record.piSessionPath) || null
     }
     if (!runtime) throw new Error('Agent 运行时未启动')
+    if (this.runs.get(sessionId)) throw new Error('当前会话仍在运行，请等待或先停止当前任务')
 
     const run = {
       runId: crypto.randomUUID(),
@@ -273,6 +277,7 @@ class AgentSessionService {
       error: '',
       startedAt: nowIso(),
     }
+    run.settled = new Promise((resolve) => { run.resolveSettled = resolve })
     this.runs.set(sessionId, run)
     record.updatedAt = nowIso()
     record.lastStatus = 'running'
@@ -280,27 +285,47 @@ class AgentSessionService {
     this.emit(sessionId, { type: 'run.started', input: message })
 
     try {
+      await this.configureThinking?.(runtime, payload.thinkingLevel || 'auto')
+      if (this.runs.get(sessionId) !== run || run.aborting) throw new Error('当前任务已取消')
       await this.sendCommand({ type: 'prompt', sessionKey: record.piSessionPath, message, ...(run.images.length ? { images: run.images } : {}) }, runtime)
     } catch (error) {
-      this.finishRun(sessionId, { status: 'failed', error: error?.message || String(error) })
+      if (this.runs.get(sessionId) === run) this.finishRun(sessionId, { status: run.aborting ? 'cancelled' : 'failed', error: error?.message || String(error) })
       throw error
     }
     return { ok: true, sessionId, runId: run.runId }
   }
 
-  abort(payload = {}) {
+  async abort(payload = {}) {
     const sessionId = safeSessionId(payload.sessionId || payload.conversationId)
     const record = this.sessions.get(sessionId)
     if (!record) return { ok: false }
     const runtime = this.resolveRuntime?.(record.piSessionPath) || null
     if (!runtime) return { ok: false }
     const run = this.runs.get(sessionId)
+    if (run?.abortPromise) return run.abortPromise
     if (run) {
       run.aborting = true
       this.emit(sessionId, { type: 'run.aborting' })
     }
-    this.sendCommand({ type: 'abort', sessionKey: record.piSessionPath }, runtime).catch(() => {})
-    return { ok: true }
+    const stopping = (async () => {
+      let timer
+      try {
+        await Promise.race([
+          Promise.all([this.sendCommand({ type: 'abort', sessionKey: record.piSessionPath }, runtime), run?.settled]),
+          new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('Agent 停止超时')), ABORT_GRACE_MS) }),
+        ])
+      } catch (error) {
+        if (!this.stopRuntime) throw error
+        // Escalate only this session if its runtime does not acknowledge stop.
+        await this.stopRuntime(runtime)
+        if (run && this.runs.get(sessionId) === run) this.finishRun(sessionId, { status: 'cancelled' })
+      } finally {
+        clearTimeout(timer)
+      }
+      return { ok: true }
+    })()
+    if (run) run.abortPromise = stopping
+    return stopping
   }
 
   async approve(payload = {}) {
@@ -375,7 +400,7 @@ class AgentSessionService {
     const run = this.runs.get(record.sessionId)
     if (run) {
       run.error = `Agent 进程已退出 (${code ?? 'unknown'})`
-      this.finishRun(record.sessionId, { status: 'failed', error: run.error })
+      this.finishRun(record.sessionId, { status: run.aborting ? 'cancelled' : 'failed', error: run.aborting ? '' : run.error })
     }
     this.settleApproval(record.sessionId, 'failed', new Error('Agent 进程已退出'))
     this.emit(record.sessionId, { type: 'session.exited', code: code ?? null })
@@ -393,7 +418,7 @@ class AgentSessionService {
     if (event.type === 'message_start') {
       const message = event.message || event.assistantMessage
       if (message?.role === 'assistant') {
-        if (run) { run.text = ''; run.thinking = '' }
+        if (run) { run.text = ''; run.thinking = ''; run.error = '' }
         this.emit(sessionId, { type: 'message.started', messageId: message?.id || message?.messageId || null })
       }
       return
@@ -415,13 +440,14 @@ class AgentSessionService {
     if (event.type === 'message_end') {
       const message = event.message
       if (message?.role !== 'assistant') return
-      const content = textOfContent(message.content) || message.errorMessage || ''
+      const content = textOfContent(message.content) || run?.text || ''
+      const error = message.errorMessage || (message.stopReason === 'error' ? '模型请求失败，请稍后重试' : '')
       if (run && content) run.text = content
-      if (run && message.errorMessage) run.error = String(message.errorMessage)
+      if (run) run.error = String(error)
       this.emit(sessionId, {
         type: 'message.completed',
         content,
-        errorMessage: message.errorMessage || '',
+        errorMessage: String(error),
         stopReason: message.stopReason || '',
       })
       return
@@ -459,6 +485,11 @@ class AgentSessionService {
       return
     }
 
+    if (event.type === 'auto_retry_end') {
+      if (run && event.success === false && event.finalError) run.error = String(event.finalError)
+      return
+    }
+
     if (event.type === 'agent_start' || event.type === 'turn_start') {
       this.emit(sessionId, { type: 'run.active' })
       return
@@ -476,7 +507,9 @@ class AgentSessionService {
     }
 
     if (event.type === 'agent_settled') {
-      this.finishRun(sessionId, { status: run?.error ? 'failed' : 'completed', error: run?.error || '' })
+      const error = event.error || event.errorMessage
+      if (run && error) run.error = String(error)
+      this.finishRun(sessionId, { status: run?.aborting ? 'cancelled' : run?.error ? 'failed' : 'completed', error: run?.aborting ? '' : run?.error || '' })
       return
     }
 
@@ -519,6 +552,7 @@ class AgentSessionService {
     }
     this.emit(sessionId, {
       type: 'run.finished',
+      runId: run.runId,
       status,
       error,
       text: run.text,
@@ -526,6 +560,7 @@ class AgentSessionService {
       durationMs: Math.max(0, Date.now() - Date.parse(run.startedAt)),
     })
     this.settleApproval(sessionId, 'failed', new Error('本轮已结束'))
+    run.resolveSettled?.()
   }
 
   // ---------------------------------------------------------------- queries
@@ -657,6 +692,13 @@ class AgentSessionService {
         messages.push({ id: `${runId}-user`, runId, role: 'user', content: String(event.input || ''), createdAt: event.at, seq })
       } else if (!started || !current) {
         continue
+      } else if (event.type === 'message.started') {
+        current.content = ''
+        current.isError = false
+        delete current.error
+        current.isStreaming = true
+      } else if (event.type === 'run.retrying') {
+        current.isStreaming = true
       } else if (event.type === 'message.delta') {
         current.content += event.delta
       } else if (event.type === 'message.completed' && event.content) {
@@ -677,6 +719,7 @@ class AgentSessionService {
         current.isError = event.status === 'failed'
         if (event.error) current.error = event.error
         if (event.text) current.content = event.text
+        if (current.isError && !current.content) current.content = event.error || 'Agent 运行失败'
         messages.push(current)
         current = null
       }
