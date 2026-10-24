@@ -176,17 +176,17 @@ jobs:
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: anyuagent-v1.0.66
+          tag_name: anyuagent-v1.0.67
           target_commitish: ${{ github.sha }}
-          name: AnyuAgent 1.0.66
+          name: AnyuAgent 1.0.67
           draft: true
           make_latest: false
           body: |
-            AnyuAgent 1.0.66 improves startup rendering with an inline loading screen, bounded scene resolution, shader warmup, and a single transition after the scene is ready. Existing multi-model subagents, image planning, account usage records and installer fixes are included. Windows and macOS share the same verified renderer source.
+            AnyuAgent 1.0.67 updates execution permissions, session and subagent permission inheritance, the verified desktop renderer, and workspace compatibility. Windows and macOS share the same renderer source as the website.
 
             macOS downloads include separate Apple Silicon and Intel DMG/ZIP packages. Each package includes a matching native runtime. These packages are unsigned and are not notarized.
 
-            Windows download: https://x.ailzd.com/downloads/AnyuAgent-Setup-1.0.66.exe
+            Windows download: https://x.ailzd.com/downloads/AnyuAgent-Setup-1.0.67.exe
           files: |
             release-assets/*.dmg
             release-assets/*.zip

@@ -14,7 +14,7 @@ assert.equal(rendererContext.modelCapabilities({ supports_vision: false, input: 
 
 const main = fs.readFileSync('main.cjs', 'utf8')
 const mainStart = main.indexOf('function modelInputCapabilities(')
-const mainEnd = main.indexOf('function modelPermissionMode(', mainStart)
+const mainEnd = main.indexOf('function resolvePermissionMode(', mainStart)
 if (mainStart < 0 || mainEnd < 0) throw new Error('主进程模型能力函数不存在')
 const mainContext = {}
 vm.runInNewContext(`${main.slice(mainStart, mainEnd)}; this.modelInputCapabilities = modelInputCapabilities`, mainContext)

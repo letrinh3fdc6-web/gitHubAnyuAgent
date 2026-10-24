@@ -44,7 +44,7 @@ async function harness(t, options = {}) {
     // The directory is created uniquely by this test and contains no source.
     fs.rmSync(dir, { recursive: true, force: true })
   })
-  await host.start({ sessionId: 'parent', model: models[0].id, models: [models[0]], team, permissionMode: 'confirm' })
+  await host.start({ sessionId: 'parent', model: models[0].id, models: [models[0]], team, permissionMode: options.permissionMode || 'confirm' })
   await host.prompt({ sessionId: 'parent', message: 'Implement and verify' })
   const root = host.roots.get('parent')
   function finish(id, text = 'Verified result', error = '') {
@@ -100,6 +100,18 @@ test('parent cancellation stops running children and never starts queued work', 
   await h.host.prompt({ sessionId: 'parent', message: 'Single agent again' })
   assert.ok(h.sessions.runs.has('parent'))
   assert.equal(h.host.roots.size, 0)
+})
+
+test('full permission is inherited across models while read-only worker restrictions remain intact', async t => {
+  const h = await harness(t, { permissionMode: 'full' })
+  const delegated = h.host.delegate(h.root.context, [plan()])
+  await waitFor(() => h.prompts.length === 2)
+  assert.equal(h.starts[1].permissionMode, 'full')
+  assert.equal(h.starts[1].readOnly, true)
+  assert.equal(h.starts[1].model, models[1].id)
+  for (const sessionId of h.host.children.keys()) h.finish(sessionId)
+  assert.equal((await delegated).tasks[0].status, 'completed')
+  h.finish('parent')
 })
 
 test('cancel during child startup retires the late process without submitting its prompt', async t => {

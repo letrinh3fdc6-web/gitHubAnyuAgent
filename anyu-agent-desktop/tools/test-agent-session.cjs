@@ -28,6 +28,38 @@ async function createSession(t) {
   return { service, events, ingest, start, end }
 }
 
+test('a stale full session record cannot auto-approve a controlled runtime', async t => {
+  const { service, events, ingest } = await createSession(t)
+  t.after(() => service.stopAll())
+  const record = service.findByPath('session.jsonl')
+  record.permissionMode = 'full'
+  service.resolveRuntime = () => ({ permissionMode: 'confirm' })
+  let autoApproved = false
+  service.respondUi = async () => { autoApproved = true }
+  ingest({ type: 'extension_ui_request', id: 'approval-one', method: 'confirm', title: 'Write file?' })
+  assert.equal(autoApproved, false)
+  assert.equal(events.at(-1).type, 'approval.requested')
+  await service.approve({ sessionId: record.sessionId, requestId: 'approval-one', decision: 'deny' })
+})
+
+test('full permission is determined by the running process and idle metadata follows a restart', async t => {
+  const { service, events, ingest } = await createSession(t)
+  t.after(() => service.stopAll())
+  const record = service.findByPath('session.jsonl')
+  record.permissionMode = 'confirm'
+  service.resolveRuntime = () => ({ permissionMode: 'full' })
+  const answers = []
+  service.respondUi = async response => { answers.push(response) }
+  ingest({ type: 'extension_ui_request', id: 'approval-full', method: 'confirm', title: 'Write file?' })
+  assert.equal(answers[0].confirmed, true)
+  assert.equal(events.at(-1).type, 'approval.auto')
+  service.runtimePermissionChanged('session.jsonl', 'full')
+  assert.equal(record.permissionMode, 'confirm', 'Running turn keeps its snapshot')
+  ingest({ type: 'agent_settled' })
+  service.runtimePermissionChanged('session.jsonl', 'full')
+  assert.equal(record.permissionMode, 'full')
+})
+
 test('a successful retry clears the previous 502 in live events and replay', async (t) => {
   const { service, events, ingest, start, end } = await createSession(t)
   start()
@@ -50,6 +82,32 @@ test('a successful retry clears the previous 502 in live events and replay', asy
   assert.equal(assistant.content, 'OK')
   assert.equal(assistant.isError, false)
   assert.equal(assistant.isStreaming, false)
+})
+
+test('progress prose and tools remain in chronological order during execution and replay', async (t) => {
+  const { service, events, ingest, start, end } = await createSession(t)
+  start()
+  ingest({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'Checking files.' } })
+  ingest({ type: 'message_update', assistantMessageEvent: { type: 'toolcall_start', contentIndex: 1 } })
+  assert.equal(events.at(-1).type, 'tool.preparing')
+  ingest({ type: 'message_update', assistantMessageEvent: { type: 'toolcall_delta', delta: '{"path":"README.md"}' } })
+  end('Checking files.', '', 'toolUse')
+  ingest({ type: 'tool_execution_start', toolCallId: 'read-1', toolName: 'read', args: { path: 'README.md' } })
+  ingest({ type: 'tool_execution_update', toolCallId: 'read-1', partialResult: { content: [{ type: 'text', text: 'working' }] } })
+  assert.equal(service.snapshot({ sessionId: 'retry-test' }).messages.at(-1).activities[0].output, 'working')
+  ingest({ type: 'tool_execution_end', toolCallId: 'read-1', result: { content: [{ type: 'text', text: 'done' }] } })
+  start()
+  ingest({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'Finished.' } })
+  const live = service.snapshot({ sessionId: 'retry-test' }).messages.at(-1)
+  assert.equal(live.isStreaming, true)
+  assert.deepEqual(live.parts.map(part => part.kind === 'text' ? part.content : part.id), ['Checking files.', 'read-1', 'Finished.'])
+  end('Finished.')
+  ingest({ type: 'agent_settled' })
+  const replay = service.snapshot({ sessionId: 'retry-test' }).messages.at(-1)
+  assert.deepEqual(replay.parts, live.parts)
+  assert.equal(replay.isStreaming, false)
+  assert.equal(replay.content, 'Finished.')
+  assert.equal(replay.activities[0].output, 'done')
 })
 
 test('retry exhaustion remains failed with a readable error in the snapshot', async (t) => {

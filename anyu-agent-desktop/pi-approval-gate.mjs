@@ -5,7 +5,7 @@
 // desktop session layer as an `approval.requested` event, so the user sees a
 // real Allow/Deny card instead of the tool running silently.
 
-const DANGEROUS_TOOLS = /^(bash|write|edit|apply_patch|str_replace|multi_edit|multiedit|create_file|delete_file|move_file)$/i
+const READ_ONLY_TOOLS = /^(read|grep|find|ls)$/i
 
 function summarize(toolName, input) {
   const value = input && typeof input === 'object' ? input : {}
@@ -33,9 +33,10 @@ function summarize(toolName, input) {
 
 export default function anyuApprovalGate(pi) {
   pi.on('tool_call', async (event, ctx) => {
-    if (String(process.env.ANYU_PERMISSION_MODE || '').toLowerCase() !== 'confirm') return
+    if (String(process.env.ANYU_PERMISSION_MODE || '').toLowerCase() === 'full') return
     const toolName = String(event?.toolName || '')
-    if (!DANGEROUS_TOOLS.test(toolName)) return
+    if (READ_ONLY_TOOLS.test(toolName)) return
+    if (typeof ctx?.ui?.confirm !== 'function' || ctx.hasUI === false) return { block: true, reason: '当前没有可用的操作确认界面' }
     const allowed = await ctx.ui.confirm(
       `允许执行 ${toolName}？`,
       summarize(toolName, event?.input),

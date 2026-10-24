@@ -169,7 +169,7 @@ class AgentOrchestrator {
         task.durationMs = event.durationMs
         this.publish(root, run, task)
         child.resolve?.()
-      } else if (event.type === 'tool.started' || event.type === 'tool.completed') {
+      } else if (event.type === 'tool.started' || event.type === 'tool.updated' || event.type === 'tool.completed') {
         task.toolName = event.toolName
         this.publish(root, run, task)
         this.sessions.emit(root.sessionId, { type: 'subagent.tool', task: { ...task }, childEvent: event })

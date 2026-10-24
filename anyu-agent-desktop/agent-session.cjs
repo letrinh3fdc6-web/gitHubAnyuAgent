@@ -432,13 +432,20 @@ class AgentSessionService {
     if (event.type === 'message_start') {
       const message = event.message || event.assistantMessage
       if (message?.role === 'assistant') {
+        const replace = Boolean(run?.error || run?.retrying)
         if (run) { run.text = ''; run.thinking = ''; run.error = '' }
-        this.emit(sessionId, { type: 'message.started', messageId: message?.id || message?.messageId || null })
+        if (run) run.retrying = false
+        this.emit(sessionId, { type: 'message.started', messageId: message?.id || message?.messageId || crypto.randomUUID(), replace })
       }
       return
     }
 
     if (event.type === 'message_update') {
+      const update = event.assistantMessageEvent || event.messageEvent
+      if (update?.type === 'toolcall_start') {
+        this.emit(sessionId, { type: 'tool.preparing' })
+        return
+      }
       const { kind, delta } = deltaOf(event)
       if (!delta) return
       if (kind === 'thinking') {
@@ -495,6 +502,7 @@ class AgentSessionService {
     }
 
     if (event.type === 'auto_retry_start') {
+      if (run) run.retrying = true
       this.emit(sessionId, { type: 'run.retrying', attempt: event.attempt || 1, maxAttempts: event.maxAttempts || 3 })
       return
     }
@@ -511,6 +519,7 @@ class AgentSessionService {
 
     if (event.type === 'agent_end') {
       if (event.willRetry) {
+        if (run) run.retrying = true
         this.emit(sessionId, { type: 'run.retrying', attempt: event.attempt || 1, maxAttempts: event.maxAttempts || 3 })
         return
       }
@@ -543,8 +552,8 @@ class AgentSessionService {
       defaultValue: event.defaultValue ?? '',
       createdAt: nowIso(),
     }
-    if (request.method === 'confirm' && record.permissionMode === 'full') {
-      const runtime = this.resolveRuntime?.(record.piSessionPath)
+    const runtime = this.resolveRuntime?.(record.piSessionPath)
+    if (request.method === 'confirm' && runtime?.permissionMode === 'full') {
       if (runtime) {
         this.respondUi({ type: 'extension_ui_response', id: request.requestId, confirmed: true, sessionKey: record.piSessionPath }, runtime).catch(() => {})
       }
@@ -552,6 +561,14 @@ class AgentSessionService {
       return
     }
     this.requestApproval(sessionId, request).catch(() => {})
+  }
+
+  runtimePermissionChanged(piSessionPath, mode) {
+    const record = this.findByPath(piSessionPath)
+    if (!record || this.runs.has(record.sessionId) || record.permissionMode === mode) return
+    record.permissionMode = mode
+    record.updatedAt = nowIso()
+    this.persist()
   }
 
   finishRun(sessionId, { status, error = '' } = {}) {
@@ -689,8 +706,11 @@ class AgentSessionService {
     let current = null
     let started = false
     for (const record of records) {
-      const event = record.event
+      let event = record.event
       if (!event) continue
+      if (event.type === 'subagent.tool' && event.childEvent && event.task) {
+        event = { ...event.childEvent, toolCallId: `${event.task.id}:${event.childEvent.toolCallId}`, toolName: `${event.task.model} / ${event.childEvent.toolName || 'tool'}` }
+      }
       if (event.type === 'run.started') {
         started = true
         const runId = String(event.runId || `run-${event.seq}`)
@@ -701,6 +721,7 @@ class AgentSessionService {
           role: 'assistant',
           content: '',
           activities: [],
+          parts: [],
           createdAt: event.at,
           isStreaming: true,
           seq,
@@ -709,26 +730,42 @@ class AgentSessionService {
       } else if (!started || !current) {
         continue
       } else if (event.type === 'message.started') {
+        if (event.replace || current.retrying || current.error) {
+          let lastText = current.parts.length - 1
+          while (lastText >= 0 && current.parts[lastText].kind !== 'text') lastText -= 1
+          if (lastText >= 0) current.parts.splice(lastText, 1)
+        }
+        current.parts.push({ kind: 'text', id: event.messageId || `text-${event.seq}`, content: '' })
         current.content = ''
+        delete current.retrying
         current.isError = false
         delete current.error
         current.isStreaming = true
       } else if (event.type === 'run.retrying') {
         current.isStreaming = true
+        current.retrying = true
       } else if (event.type === 'message.delta') {
         current.content += event.delta
-      } else if (event.type === 'message.completed' && event.content) {
-        current.content = event.content
+        const part = current.parts.at(-1)
+        if (part?.kind === 'text') part.content = current.content
+      } else if (event.type === 'message.completed') {
+        if (event.content) current.content = event.content
+        if (event.errorMessage || event.stopReason === 'error') current.error = event.errorMessage || '模型请求失败，请稍后重试'
+        const part = current.parts.at(-1)
+        if (part?.kind === 'text') part.content = current.content
       } else if (event.type === 'tool.started') {
         const activity = { id: event.toolCallId || `${event.seq}`, kind: 'tool', name: event.toolName, status: 'running', input: event.args, startedAt: event.at }
         activities.set(activity.id, activity)
         current.activities.push(activity)
-      } else if (event.type === 'tool.completed') {
+        current.parts.push({ kind: 'tool', id: activity.id })
+      } else if (event.type === 'tool.updated' || event.type === 'tool.completed') {
         const activity = activities.get(event.toolCallId)
         if (activity) {
-          activity.status = event.isError ? 'failed' : 'completed'
           activity.output = event.output
-          activity.finishedAt = event.at
+          if (event.type === 'tool.completed') {
+            activity.status = event.isError ? 'failed' : 'completed'
+            activity.finishedAt = event.at
+          }
         }
       } else if (event.type === 'subagent.updated' && event.task) {
         const tasks = current.subagents || (current.subagents = [])
@@ -741,6 +778,10 @@ class AgentSessionService {
         if (event.error) current.error = event.error
         if (event.text) current.content = event.text
         if (current.isError && !current.content) current.content = event.error || 'Agent 运行失败'
+        const part = current.parts.at(-1)
+        if (part?.kind === 'text') part.content = current.content
+        else if (current.content && !current.parts.some(item => item.kind === 'text' && item.content === current.content)) current.parts.push({ kind: 'text', id: `text-${event.seq}`, content: current.content })
+        delete current.retrying
         messages.push(current)
         current = null
       }

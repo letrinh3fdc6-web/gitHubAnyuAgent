@@ -52,12 +52,32 @@
         #anyu-startup span { animation: none; opacity: 0.65; }
       }
     </style>
-    <script type="module" crossorigin src="/assets/index-BI-Qnc3u.js"></script>
+  <!-- ANYU_STARTUP_PRELOADS_START -->
+    <script nonce="__CSP_NONCE_VALUE__">(() => {
+  const route = location.pathname.replace(/\/+$/, '') || '/'
+  if (!['/', '/home', '/login', '/register', '/forgot-password', '/reset-password'].includes(route)) return
+  if (window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) return
+  for (const [rel, href, as] of [
+    ['modulepreload', '/_astro/index.astro_astro_type_script_index_0_lang.Cu0uHvXK.js?v=c2ffebfb9fa2', 'script'],
+    ['preload', '/common/scene.glb', 'fetch'],
+  ]) {
+    const link = document.createElement('link')
+    link.rel = rel
+    link.href = href
+    link.as = as
+    link.crossOrigin = 'anonymous'
+    link.fetchPriority = 'low'
+    document.head.appendChild(link)
+  }
+})()
+</script>
+    <!-- ANYU_STARTUP_PRELOADS_END -->
+    <script type="module" crossorigin src="/assets/index-CWrqs1jJ.js"></script>
     <link rel="modulepreload" crossorigin href="/assets/vendor-vue-QRYV1gcO.js">
     <link rel="modulepreload" crossorigin href="/assets/vendor-i18n-DNPP6Q_f.js">
     <link rel="modulepreload" crossorigin href="/assets/vendor-http-B8_nURbH.js">
     <link rel="modulepreload" crossorigin href="/assets/vendor-markdown-B-YAsVbD.js">
-    <link rel="stylesheet" crossorigin href="/assets/index-DltyJUf7.css">
+    <link rel="stylesheet" crossorigin href="/assets/index-BMd67bbK.css">
   </head>
   <body>
     <div id="anyu-startup" role="status" aria-label="ANYU loading">

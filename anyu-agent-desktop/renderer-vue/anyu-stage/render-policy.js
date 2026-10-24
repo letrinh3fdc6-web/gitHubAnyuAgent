@@ -5,20 +5,28 @@ export function stageRenderScale(width, height, pixelRatio = 1) {
 
 export async function prepareStagePasses(renderer, processes, computation) {
   const target = renderer.getRenderTarget()
+  let sliceStarted = performance.now()
+  // Cached shaders need no extra frame each; yield once the preparation uses
+  // half a frame so the startup animation can keep painting on slower devices.
+  const yieldIfBusy = async () => {
+    if (performance.now() - sliceStarted < 8) return
+    await new Promise(requestAnimationFrame)
+    sliceStarted = performance.now()
+  }
   try {
     for (const process of processes) {
       for (const pass of process.passes) {
         process.quad.material = pass
         renderer.setRenderTarget(pass.renderTarget)
         await renderer.compileAsync(process.scene, process.camera)
-        await new Promise(requestAnimationFrame)
+        await yieldIfBusy()
       }
     }
     for (const material of computation.materials) {
       computation.mesh.material = material
       renderer.setRenderTarget(computation.tempDataLinear.buffer)
       await renderer.compileAsync(computation.scene, computation.camera)
-      await new Promise(requestAnimationFrame)
+      await yieldIfBusy()
     }
   } finally {
     renderer.setRenderTarget(target)

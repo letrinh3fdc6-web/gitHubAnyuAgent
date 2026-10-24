@@ -1,3 +1,10 @@
+if (process.argv.includes('--anyu-execution-worker')) {
+  const { app } = require('electron')
+  require('./execution-worker.cjs').runExecutionWorker(app).catch(error => {
+    console.error('[execution-worker]', error.message)
+    app.exit(1)
+  })
+} else {
 const { app, BrowserWindow, WebContentsView, ipcMain, safeStorage, shell, session, dialog, Menu, Tray, protocol, screen } = require('electron')
 const { spawn, execFile, execFileSync } = require('child_process')
 const fs = require('fs')
@@ -41,9 +48,9 @@ const { existingBash, shellEnvironment, ensureWindowsShell } = require('./tools/
 const { LocalGatewayBridge, managedProviderName, managedBaseUrl } = require('./gateway-bridge.cjs')
 const { AgentSessionService } = require('./agent-session.cjs')
 const { AgentOrchestrator } = require('./agent-orchestrator.cjs')
+const { ExecutionBroker } = require('./execution-broker.cjs')
+const { resolvePermissionMode: resolveExecutionPermission } = require('./agent-permissions.cjs')
 const {
-  ELEVATION_ENV_FLAG,
-  writeIntent: writeElevationIntent,
   readIntent: readElevationIntent,
   clearIntent: clearElevationIntent,
   isElevatedLaunch
@@ -197,6 +204,8 @@ function writeAgentPermissionMode(mode) {
   return normalized
 }
 
+const executionBroker = new ExecutionBroker({ app, executable: () => piExecutable() })
+
 // 读取当前进程的系统授权状态；系统权限只能由 Windows/macOS 自己授予。
 //
 // 判定结果缓存：提权流程会连续调用多次（提权前判定 + 提权后回报状态），
@@ -225,7 +234,8 @@ function systemAccessState() {
   // "没提权"和"提权了但系统没给权限"这两种完全不同的失败原因。
   const launchedElevated = isElevatedLaunch()
   if (platform === 'win32') {
-    return { platform, elevated, administrator: elevated, uacAvailable: true, canRequestElevation: !elevated, fullDiskAccess: null, launchedElevated }
+    const worker = executionBroker.state()
+    return { platform, elevated, administrator: elevated, executionAdministrator: elevated || worker.ready, executionHost: elevated ? 'main' : worker.ready ? 'worker' : 'standard', executionPid: worker.pid, uacAvailable: true, canRequestElevation: !elevated && !worker.ready, fullDiskAccess: null, launchedElevated }
   }
   if (platform === 'darwin') {
     return { platform, elevated, administrator: elevated, uacAvailable: false, canRequestElevation: false, fullDiskAccess: 'unknown', privacySettingsAvailable: true, launchedElevated }
@@ -236,25 +246,11 @@ function systemAccessState() {
 async function requestSystemElevation(payload = {}) {
   if (process.platform === 'win32') {
     if (isWindowsAdministrator()) return { ok: true, restarted: false, state: systemAccessState() }
-    const executable = app.getPath('exe')
-    const launchArgs = JSON.stringify(process.argv.slice(1))
-    const script = '$launchArgs = ConvertFrom-Json $env:ANYU_ELEVATION_ARGS; Start-Process -FilePath $env:ANYU_ELEVATION_EXE -ArgumentList $launchArgs -Verb RunAs'
     try {
-      // 意图先同步落盘，再拉起提权实例。顺序不能反：新实例启动时就会读它，
-      // 而渲染进程的 localStorage 写入没有落盘保证。
-      writeElevationIntent(app.getPath('userData'), payload?.permissionMode)
-      execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], {
-        encoding: 'utf8', windowsHide: true, timeout: 15000,
-        env: { ...process.env, ANYU_ELEVATION_EXE: executable, ANYU_ELEVATION_ARGS: launchArgs, [ELEVATION_ENV_FLAG]: '1' }
-      })
-      pendingElevationIntent = readElevationIntent(app.getPath('userData'))
-      setTimeout(() => app.quit(), 120)
-      return { ok: true, restarted: true, state: { ...systemAccessState(), pending: true } }
+      await executionBroker.ensure()
+      return { ok: true, restarted: false, state: systemAccessState() }
     } catch (error) {
-      // UAC 被取消或拉起失败：清掉意图，避免下次启动凭空套用完整访问。
-      clearElevationIntent(app.getPath('userData'))
-      pendingElevationIntent = null
-      return { ok: false, cancelled: true, message: error?.message || 'Windows UAC 授权未完成', state: systemAccessState() }
+      return { ok: false, code: error.code || 'ELEVATION_FAILED', cancelled: error.cancelled === true, message: error.message, state: systemAccessState() }
     }
   }
   if (process.platform === 'darwin') {
@@ -334,28 +330,8 @@ function modelInputCapabilities(model, id, api) {
   if (hasImage && !input.includes('image')) input.push('image')
   return input
 }
-function modelPermissionMode(model, provider = '') {
-  const explicit = String(model?.permissionMode || model?.permission_mode || '').toLowerCase()
-  if (explicit === 'full' || explicit === 'confirm') return explicit
-  const toolFlags = [
-    model?.supportsTools, model?.supports_tools, model?.toolUse,
-    model?.tool_use, model?.capabilities?.tools, model?.capabilities?.tool_use
-  ]
-  if (toolFlags.some((value) => value === false)) return 'confirm'
-  if (toolFlags.some((value) => value === true)) return 'full'
-  const lower = `${model?.id || model?.name || ''} ${model?.api || ''} ${provider || ''}`.toLowerCase()
-  // Leta 的主流对话模型都具备 Agent 工具调用能力；未知模型保守地要求确认。
-  if (/gpt|codex|openai|claude|anthropic|gemini|google|grok|qwen|deepseek|glm|kimi|mistral|moonshot|doubao|llama/.test(lower)) return 'full'
-  return 'confirm'
-}
-function resolvePermissionMode(requested, model, provider = '') {
-  const mode = String(requested || '').toLowerCase()
-  if (mode === 'full' || mode === 'confirm') return mode
-  // auto 由主进程持久化设置优先决定。这样工作区设置在窗口刷新、
-  // Electron 重启后仍然是权威来源；持久化为 auto 时再回退到模型能力推断。
-  const persisted = readAgentPermissionMode()
-  if (persisted === 'full' || persisted === 'confirm') return persisted
-  return modelPermissionMode(model, provider)
+function resolvePermissionMode(requested) {
+  return resolveExecutionPermission(requested, readAgentPermissionMode())
 }
 let mainWindow
 let windowsShellBootstrapPromise = null
@@ -1780,9 +1756,9 @@ async function stopPiRuntime(runtime) {
   if (!child) return
   if (runtime.startOptions?.orchestration && runtime.inFlightPrompt && child.pid) {
     // Escalation is restricted to this owned agent's process tree.
-    if (process.platform === 'win32') {
+    if (process.platform === 'win32' && !child.elevatedExecution) {
       await new Promise(resolve => execFile('taskkill.exe', ['/PID', String(child.pid), '/T', '/F'], { windowsHide: true, timeout: 3500 }, () => resolve()))
-    } else {
+    } else if (process.platform !== 'win32') {
       try { process.kill(-child.pid, 'SIGKILL') } catch {}
     }
   }
@@ -1812,6 +1788,7 @@ async function stopPi() {
     stopBrowserBridge(),
     gatewayBridge.stop()
   ])
+  await executionBroker.close()
 }
 
 async function stopBrowserBridge() {
@@ -1937,11 +1914,15 @@ async function startPiUnsafe(options = {}) {
   const key = requestedSession || `anon:${crypto.randomUUID()}`
   const existing = piRuntimes.get(key)
   const isChild = options.agentRole === 'child'
+  const resolvedPermissionMode = resolvePermissionMode(options.permissionMode)
   const activeParents = [...piRuntimes.values()].filter(runtime => runtime.inFlightPrompt && runtime.startOptions?.agentRole !== 'child' && runtime !== existing).length
   if (!isChild && activeParents >= 2 && (options.orchestration || [...piRuntimes.values()].some(runtime => runtime.inFlightPrompt && runtime.startOptions?.orchestration))) {
     throw new Error('正在执行其他会话，需保留子代理运行位置，请等待其中一轮完成')
   }
-  if (existing?.child && existing.child.exitCode === null && existing.child.signalCode === null && !options.force) {
+  const permissionChanged = existing && existing.permissionMode !== resolvedPermissionMode
+  if (permissionChanged && existing.inFlightPrompt) throw new Error('当前任务仍在运行，请停止或完成任务后应用新的权限。')
+  if (resolvedPermissionMode === 'full' && process.platform === 'win32' && !isWindowsAdministrator()) await executionBroker.ensure()
+  if (existing?.child && existing.child.exitCode === null && existing.child.signalCode === null && !options.force && !permissionChanged) {
     // 同会话复用现有进程：切换会话因此不再中止正在运行的任务。
     existing.lastUsedAt = Date.now()
     if (managed && options.thinkingLevel && !existing.inFlightPrompt) gatewayBridge.setThinkingLevel(existing.gatewayContext, options.thinkingLevel)
@@ -1985,18 +1966,11 @@ async function startPiUnsafe(options = {}) {
   const selectedGroupId = Number(selectedModel?.groupId || selectedModel?.group_id || 0)
   if (managed && (!Number.isSafeInteger(selectedGroupId) || selectedGroupId <= 0)) throw new Error('自动分组模型缺少有效分组，请刷新模型目录')
   const provider = managed ? managedProviderName(selectedModel.api || 'openai-completions', selectedGroupId) : String(options.provider || providerForApi(selectedModel.api || 'openai-completions'))
-  const requestedPermissionMode = resolvePermissionMode(options.permissionMode, selectedModel, provider)
-  // 提权意图一旦还在，主进程必须兜底保证它落地：即使渲染进程因为启动竞态
-  // 没把权限模式传下来（或传的还是默认值），也要按意图以完整访问启动 Pi。
-  // 这是"重启以后还要手动再指定一次"的直接修复点。
-  const intentPermissionMode = currentElevationIntent()?.permissionMode
-  const resolvedPermissionMode = !isChild && intentPermissionMode === 'full' && requestedPermissionMode !== 'full'
-    ? 'full'
-    : requestedPermissionMode
   const args = ['--mode', 'rpc', '--provider', provider, '--model', selectedModelId, '--session-dir', sessionDir]
   // 工具失败必须由 Agent 决策如何恢复，不能让一次底层异常直接终止整条对话。
   // 只传行为约束，不把任何具体错误或临时路径写进系统提示词。
   args.push('--append-system-prompt', '工具调用由你负责决策。工具失败只代表当前尝试失败：读取错误码和简短摘要，按需重试、改参数、选择替代工具或向用户说明；不要把原始堆栈、二进制内容、临时路径当成用户需求，也不要因一次工具失败终止后续对话。')
+  args.push('--append-system-prompt', '需要执行工具的多步骤任务，开始前用一两句普通回复说明接下来做什么。执行中在取得实质进展、发现问题或改变方案时，用简短普通回复告知用户真实进度，再继续调用工具；不要等全部完成才回复。简单问题直接回答，用户要求严格 JSON 等格式时遵守格式。不得编造进度或输出内部思维链，最终答复说明结果和验证情况。')
   if (resolvedPermissionMode === 'full' && !options.readOnly) {
     // gptFullAccess 同时启用 Pi 全部内置工具；--approve 只负责信任项目文件。
     // 配置档会启用全部内置工具；不再传显式白名单，以保留插件和扩展工具。
@@ -2023,7 +1997,7 @@ async function startPiUnsafe(options = {}) {
   // but is always loaded so a permission change does not need a new install.
   const approvalExtension = externalProcessPath('pi-approval-gate.mjs')
   if (fs.existsSync(approvalExtension)) args.push('--extension', approvalExtension)
-  else console.error(`[pi] 审批扩展缺失，已跳过: ${approvalExtension}`)
+  else if (resolvedPermissionMode === 'confirm') throw new Error('缺少操作审批模块，请修复或重新安装客户端。')
   if (options.orchestration) {
     const orchestrationExtension = externalProcessPath('pi-subagent-extension.mjs')
     if (!fs.existsSync(orchestrationExtension)) throw new Error('缺少多代理扩展，请更新桌面客户端')
@@ -2034,14 +2008,19 @@ async function startPiUnsafe(options = {}) {
   let stateResponse = null
   try {
   if (managed) gatewayBridge.setThinkingLevel(gatewayContext, options.thinkingLevel || 'auto')
-  runtime.child = spawn(executable, args, {
+  const launchOptions = {
     cwd,
     env: { ...dependencyEnvironment(shellEnvironment(process.env)), PI_CODING_AGENT_DIR: agentDir, PI_CODING_AGENT_SESSION_DIR: sessionDir, ANYU_API_KEY: credential, ANYU_PERMISSION_PROFILE: resolvedPermissionMode === 'full' && !options.readOnly ? 'gptFullAccess' : '', ANYU_PERMISSION_MODE: resolvedPermissionMode, PI_SKIP_VERSION_CHECK: '1', LETA_BROWSER_BRIDGE_PORT: options.readOnly ? '' : String(browserBridgeConfig.port), LETA_BROWSER_BRIDGE_TOKEN: options.readOnly ? '' : browserBridgeConfig.token, ANYU_AGENT_BRIDGE_PORT: String(options.orchestration?.port || ''), ANYU_AGENT_BRIDGE_TOKEN: options.orchestration?.token || '', ANYU_AGENT_ROLE: options.agentRole || '', ANYU_AGENT_READ_ONLY: options.readOnly ? '1' : '' },
     stdio: ['pipe', 'pipe', 'pipe'],
     detached: Boolean(options.orchestration && process.platform !== 'win32'),
     windowsHide: true
-  })
+  }
+  runtime.child = resolvedPermissionMode === 'full' && process.platform === 'win32' && !isWindowsAdministrator()
+    ? executionBroker.spawn(args, launchOptions)
+    : spawn(executable, args, launchOptions)
   const child = runtime.child
+  child.stdout.setEncoding('utf8')
+  child.stderr.setEncoding('utf8')
   child.stdout.on('data', (chunk) => parsePiLines(runtime, chunk))
   child.stderr.on('data', (data) => { const message = data.toString(); startupStderr = `${startupStderr}${message}`.slice(-4000); console.error(`[pi] ${message}`); if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('pi:stderr', message) })
   child.once('error', (error) => {
@@ -2049,6 +2028,8 @@ async function startPiUnsafe(options = {}) {
       gatewayBridge.removeThinkingContext(runtime.gatewayContext)
       runtime.child = null
       for (const id of [...runtime.pending.keys()]) settlePiRequest(runtime, id, error)
+      try { agentSessionService?.runtimeExited(runtime.key, -1) } catch {}
+      if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('pi:exit', { code: -1, sessionKey: runtime.key, error: error.message })
     }
   })
   child.once('exit', (code) => {
@@ -2117,6 +2098,7 @@ async function startPiUnsafe(options = {}) {
     __sessionRecoveryAttempt: undefined,
   }
   if (!options.background) piActiveKey = finalKey
+  agentSessionService?.runtimePermissionChanged(finalKey, resolvedPermissionMode)
   return { ok: true, cwd, sessionDir, permissionMode: resolvedPermissionMode, sessionPath: finalKey, reused: false }
 }
 
@@ -2201,34 +2183,63 @@ async function startPi(options = {}) {
   return run
 }
 
-async function setAgentPermissionMode(mode) {
-  const normalized = writeAgentPermissionMode(mode)
+let permissionChangeLock = Promise.resolve()
+function setAgentPermissionMode(mode) {
+  const run = permissionChangeLock.then(() => applyAgentPermissionMode(mode))
+  permissionChangeLock = run.catch(() => {})
+  return run
+}
+
+function agentPermissionState() {
+  const mode = readAgentPermissionMode()
+  const access = systemAccessState()
+  return {
+    mode,
+    activeMode: activePiRuntime()?.child ? activePiRuntime().permissionMode : null,
+    runtimeCount: [...piRuntimes.values()].filter(runtime => runtime.child).length,
+    ready: mode !== 'full' || access.platform !== 'win32' || access.executionAdministrator === true,
+    systemAccess: access,
+  }
+}
+
+async function applyAgentPermissionMode(mode) {
+  const normalized = normalizeAgentPermissionMode(mode)
+  if (normalized === 'full' && process.platform === 'win32') {
+    const elevation = await requestSystemElevation()
+    if (!elevation.ok) return { ...elevation, ...agentPermissionState() }
+  }
+  writeAgentPermissionMode(normalized)
+  acknowledgeElevationIntent()
   let restarted = 0
+  let deferred = 0
+  const errors = []
   const activeKey = piActiveKey
   const runtimes = [...piRuntimes.values()]
   // 先重启当前前台会话，保证设置窗口返回后用户看到的就是新权限。
   runtimes.sort((left, right) => Number(right.key === activeKey) - Number(left.key === activeKey))
   for (const runtime of runtimes) {
     if (!runtime?.startOptions) continue
+    if (runtime.permissionMode === resolveExecutionPermission(normalized)) continue
     // A running team holds an immutable permission snapshot for the whole turn.
-    if (runtime.startOptions.agentRole === 'child' || (runtime.startOptions.orchestration && runtime.inFlightPrompt)) continue
+    if (runtime.startOptions.agentRole === 'child') continue
+    if (runtime.inFlightPrompt) { deferred += 1; continue }
     const { force: _force, __sessionRecoveryAttempt: _recoveryAttempt, ...baseOptions } = runtime.startOptions
-    await startPi({
+    try { await startPi({
       ...baseOptions,
       sessionPath: runtime.key,
       permissionMode: normalized,
       force: true,
       __sessionRecoveryAttempt: undefined,
-    })
-    restarted += 1
+    }); restarted += 1 } catch (error) { errors.push(error.message) }
   }
   if (activeKey && piRuntimes.has(activeKey)) piActiveKey = activeKey
   return {
     ok: true,
     mode: normalized,
     restarted,
-    activeMode: activePiRuntime()?.permissionMode || normalized,
-    systemAccess: systemAccessState(),
+    deferred,
+    message: errors.length ? `权限已保存，部分空闲会话重启失败：${errors.join('；')}` : deferred ? '权限已保存，运行中的任务保留本轮权限，下一轮应用新设置。' : '',
+    ...agentPermissionState(),
   }
 }
 
@@ -3130,12 +3141,7 @@ app.whenReady().then(() => {
   ipcMain.handle('system:elevation-intent', () => elevationIntentState())
   ipcMain.handle('system:acknowledge-elevation', () => acknowledgeElevationIntent())
   ipcMain.handle('system:open-privacy-settings', (_, section) => openSystemPrivacySettings(section))
-  ipcMain.handle('agent:permission-state', () => ({
-    mode: readAgentPermissionMode(),
-    activeMode: activePiRuntime()?.permissionMode || null,
-    runtimeCount: piRuntimes.size,
-    systemAccess: systemAccessState(),
-  }))
+  ipcMain.handle('agent:permission-state', () => agentPermissionState())
   ipcMain.handle('agent:set-permission-mode', (_, mode) => setAgentPermissionMode(mode))
   ipcMain.handle('auth:state', async () => {
     if (!auth?.accessToken && !auth?.refreshToken) return { authenticated: false }
@@ -3647,3 +3653,4 @@ installGracefulQuit(app, {
   stop: stopPi,
   onError: error => console.error('[shutdown]', error)
 })
+}

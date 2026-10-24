@@ -265,27 +265,15 @@
   const selectedKey = () => state.keys.find((key) => Number(key.id) === state.selectedKey)
   const currentModel = () => state.catalog.find((item) => item.id === state.model)
   const effectiveWorkspace = () => state.sessionCwd || state.cwd || ''
-  function modelPermissionMode(model = currentModel()) {
-    const explicit = String(model?.permissionMode || model?.permission_mode || '').toLowerCase()
-    if (explicit === 'full' || explicit === 'confirm') return explicit
-    const toolFlags = [
-      model?.supportsTools, model?.supports_tools, model?.toolUse,
-      model?.tool_use, model?.capabilities?.tools, model?.capabilities?.tool_use
-    ]
-    if (toolFlags.some((value) => value === false)) return 'confirm'
-    if (toolFlags.some((value) => value === true)) return 'full'
-    const lower = `${model?.id || model?.name || ''} ${model?.api || ''} ${model?.provider || ''}`.toLowerCase()
-    // Leta 主流模型用于编码 Agent 时默认开放本机工具，未知模型仍保留确认。
-    return /gpt|codex|openai|claude|anthropic|gemini|google|grok|qwen|deepseek|glm|kimi|mistral|moonshot|doubao|llama/.test(lower) ? 'full' : 'confirm'
-  }
+  function modelPermissionMode() { return 'confirm' }
   function effectivePermissionMode() {
     return state.permissionMode === 'auto' ? (state.activePermissionMode || modelPermissionMode()) : state.permissionMode
   }
-  // 三种权限模式。auto 按模型能力自动决定，confirm/full 是用户手工锁定。
+  // Model capability and user execution permission are independent.
   const PERMISSION_MODES = [
-    { id: 'auto', icon: '⌁', name: '自动适配', hint: '按当前模型的工具能力自动决定是否询问' },
+    { id: 'auto', icon: '⌁', name: '自动适配', hint: '默认受控访问，执行操作前确认' },
     { id: 'confirm', icon: '✓', name: '受控访问', hint: '敏感操作先询问，其余照常执行' },
-    { id: 'full', icon: '⚡', name: '完整访问', hint: '不再询问，直接执行全部内置工具' }
+    { id: 'full', icon: '⚡', name: '完整访问', hint: '全部工具免确认；Windows 通过 UAC 授权管理员执行' }
   ]
   function permissionModeMeta(mode) {
     return PERMISSION_MODES.find((item) => item.id === mode) || PERMISSION_MODES[0]
@@ -297,6 +285,7 @@
     const access = state.systemAccess
     if (!access) return '正在读取系统授权状态'
     if (access.platform === 'win32') {
+      if (access.executionHost === 'worker' && access.executionAdministrator) return '管理员执行进程已验证；界面保持普通权限'
       if (access.administrator) return 'Windows 管理员权限已启用'
       // 区分"没走提权"和"走了提权但系统没给权限"，否则用户只能靠反复点击试错。
       return access.launchedElevated ? '已按提权流程重启，但系统未授予管理员权限' : 'Windows 标准用户权限'
@@ -305,27 +294,22 @@
     return access.elevated ? '系统特权进程' : '当前用户权限'
   }
   async function refreshSystemAccess() {
-    if (!window.anyu.systemAccessState) return
-    try { state.systemAccess = await window.anyu.systemAccessState() } catch { state.systemAccess = null }
+    try {
+      if (window.anyu.agentPermissionState) {
+        const result = await window.anyu.agentPermissionState()
+        state.permissionMode = result.mode
+        state.activePermissionMode = result.activeMode || null
+        state.systemAccess = result.systemAccess
+      } else state.systemAccess = await window.anyu.systemAccessState?.()
+    } catch { state.systemAccess = null }
   }
-  // 读取主进程在提权重启之前同步落盘的意图。
-  // 这是"重启后权限没生效、还得手动再指定一次"的修复点：不再依赖渲染进程的
-  // localStorage 是否赶在 app.quit() 之前落盘，而是由主进程给出权威结论。
+  // Consume legacy restart markers without overriding canonical permission state.
   async function applyElevationIntent() {
     let intent = null
     try { intent = await window.anyu.elevationIntent?.() } catch { intent = null }
     if (!intent?.pending) return null
-    if (intent.permissionMode === 'full') {
-      state.permissionMode = 'full'
-      localStorage.setItem('anyu.permissionMode', 'full')
-      localStorage.setItem('anyu.permissionMode.userSelected', '1')
-      // 区分"没提权"和"提权了但系统没给权限"，否则用户只能靠反复点击来试错。
-      state.elevationNotice = intent.elevated
-        ? '已以管理员身份重启，完整访问已生效。'
-        : '已按完整访问重启，但系统未授予管理员权限；需要提权的操作仍会被拒绝。'
-    } else {
-      state.elevationNotice = intent.elevated ? '已以管理员身份重启。' : ''
-    }
+    await refreshSystemAccess()
+    await window.anyu.acknowledgeElevation?.()
     return intent
   }
 
@@ -336,52 +320,40 @@
     try { await window.anyu.acknowledgeElevation?.() } catch {}
   }
 
-  /**
-   * 切换权限模式。
-   *
-   * 权限模式只是 Pi 的启动参数（--permission-profile gptFullAccess --approve），
-   * 重启 Pi 子进程就能生效，完全不需要重启整个应用——更不该因为当前不是管理员
-   * 就强制走 UAC 重启。系统管理员权限是另一件事，见下面的 requestElevation()。
-   */
   async function choosePermissionMode(mode) {
-    if (state.loading) { state.error = '当前任务完成后再切换权限'; renderApp(); return }
+    if (state.permissionBusy) return
     const next = ['auto', 'confirm', 'full'].includes(mode) ? mode : 'auto'
-    state.permissionMode = next
+    state.permissionBusy = true
     state.permissionMenuOpen = false
     state.elevationNotice = ''
-    localStorage.setItem('anyu.permissionMode', next)
-    localStorage.setItem('anyu.permissionMode.userSelected', '1')
-    // 用户主动选了非完整访问，说明不需要提权意图继续兜底，先撤销再继续。
-    if (next !== 'full') { try { await window.anyu.acknowledgeElevation?.() } catch {} }
-    let started = false
-    // 必须是 state.sessionPath：这里曾经写成裸的 sessionPath，切换权限模式时
-    // 会直接抛 ReferenceError，把"重启 Pi 生效新权限"这一步整个打断。
-    try { await startAgent(state.sessionPath); started = true } catch (error) { state.error = error.message || '权限模式切换失败' }
-    // 权限模式已经在本进程落地，之前的提权意图不再需要兜底；失败时保留，留给主进程兜底。
-    if (started) { try { await window.anyu.acknowledgeElevation?.() } catch {} }
-    await refreshSystemAccess()
-    renderApp()
+    try {
+      const result = await window.anyu.setAgentPermissionMode(next)
+      if (result?.systemAccess) state.systemAccess = result.systemAccess
+      if (result?.ok === false) throw new Error(result.message || '权限模式切换失败')
+      state.permissionMode = result.mode
+      state.activePermissionMode = result.activeMode || null
+      state.elevationNotice = result.message || '权限设置已保存。'
+      localStorage.setItem('anyu.permissionMode', result.mode)
+      localStorage.setItem('anyu.permissionMode.userSelected', '1')
+    } catch (error) { state.error = error.message || '权限模式切换失败' }
+    finally { state.permissionBusy = false; renderApp() }
   }
 
   /**
-   * 申请系统管理员权限。这是独立的显式操作，不再挂在"完整访问"上。
-   *
-   * Windows 上进程一旦启动就无法自我提权，只能由 UAC 拉起新实例，所以这一步
-   * 必然重启应用。把它做成用户主动点的动作，而不是切权限时的副作用，
-   * 才不会出现"只是想要完整访问，结果应用莫名其妙重启了"。
+   * Prepare the dedicated administrator worker without restarting the UI.
    */
   async function requestElevation() {
-    if (state.loading) { state.error = '当前任务完成后再申请管理员权限'; renderApp(); return }
+    if (state.permissionBusy) return
     state.permissionMenuOpen = false
     state.elevationNotice = ''
-    // 刻意不传 permissionMode：提权只改系统权限，不顺手替用户改权限模式。
-    const result = await window.anyu.requestSystemElevation?.({})
-    if (result?.state) state.systemAccess = result.state
-    if (result?.cancelled) state.error = 'Windows UAC 授权未完成'
-    // 提权成功会重启应用；重启后的状态由 applyElevationIntent 恢复。
-    if (result?.restarted) { renderApp(); return }
-    await refreshSystemAccess()
-    renderApp()
+    state.permissionBusy = true
+    try {
+      const result = await window.anyu.requestSystemElevation?.({})
+      if (result?.state) state.systemAccess = result.state
+      if (result?.ok === false) throw new Error(result.message || '管理员执行进程启动失败')
+      state.elevationNotice = systemAccessLabel()
+    } catch (error) { state.error = error.message }
+    finally { state.permissionBusy = false; renderApp() }
   }
   // 档位顺序、中文名、图标、说明文案都定义在 thinking-presets.js 里，
   // 渲染层只做一次转发，避免和主进程各维护一套。
@@ -3712,7 +3684,7 @@
     const section = ['general', 'appearance', 'skills', 'plugins'].includes(state.settingsSection) ? state.settingsSection : 'general'
     const pageTitle = { general: '常规', appearance: '外观', skills: '核心技能', plugins: '插件市场' }[section]
     const generalMarkup = `
-      <section class="settings-section"><h2>权限</h2><div class="settings-card"><div class="settings-row"><div><strong>本机访问权限</strong><p>完整访问会启用所有内置和扩展工具；切换权限模式不会重启应用，只有下面单独的管理员授权才会。</p></div><div class="permission-segmented" role="group" aria-label="本机访问权限"><button type="button" class="${state.permissionMode === 'auto' ? 'active' : ''}" data-permission-mode="auto">自动适配</button><button type="button" class="${state.permissionMode === 'confirm' ? 'active' : ''}" data-permission-mode="confirm">受控访问</button><button type="button" class="${state.permissionMode === 'full' ? 'active' : ''}" data-permission-mode="full">完整访问</button></div></div><p class="settings-help">当前模型：${esc(permissionModeLabel())}；权限档案：${state.permissionMode === 'full' ? 'gptFullAccess（全部内置工具和已安装扩展工具）' : '按需确认'}。</p><div class="settings-row"><div><strong>系统授权状态</strong><p>${esc(systemAccessLabel())}</p></div><div class="settings-row-actions">${state.systemAccess?.platform === 'win32' && !state.systemAccess?.administrator ? '<button type="button" class="ghost" id="request-system-elevation">以管理员身份重启</button>' : ''}${state.systemAccess?.platform === 'darwin' ? '<button type="button" class="ghost" id="open-privacy-settings">打开完全磁盘访问</button><button type="button" class="ghost" id="open-accessibility-settings">打开辅助功能</button>' : ''}</div></div></div></section>
+      <section class="settings-section"><h2>权限</h2><div class="settings-card"><div class="settings-row"><div><strong>本机访问权限</strong><p>完整访问开放全部工具；Windows 通过 UAC 授权独立的管理员执行进程。</p></div><div class="permission-segmented" role="group" aria-label="本机访问权限"><button type="button" class="${state.permissionMode === 'auto' ? 'active' : ''}" data-permission-mode="auto">自动适配</button><button type="button" class="${state.permissionMode === 'confirm' ? 'active' : ''}" data-permission-mode="confirm">受控访问</button><button type="button" class="${state.permissionMode === 'full' ? 'active' : ''}" data-permission-mode="full">完整访问</button></div></div><p class="settings-help">当前设置：${esc(permissionModeMeta(state.permissionMode).name)}；运行档位：${esc(state.activePermissionMode ? permissionModeLabel(state.activePermissionMode) : '尚未启动')}。</p><div class="settings-row"><div><strong>系统授权状态</strong><p>${esc(systemAccessLabel())}</p></div><div class="settings-row-actions">${state.systemAccess?.platform === 'win32' && !state.systemAccess?.executionAdministrator ? '<button type="button" class="ghost" id="request-system-elevation">授权管理员执行</button>' : ''}${state.systemAccess?.platform === 'darwin' ? '<button type="button" class="ghost" id="open-privacy-settings">打开完全磁盘访问</button><button type="button" class="ghost" id="open-accessibility-settings">打开辅助功能</button>' : ''}</div></div></div></section>
       <section class="settings-section"><h2>常规</h2><div class="settings-card"><div class="settings-row"><div><strong>无项目任务文件夹</strong><p>在项目外启动的任务默认存储数据的位置。</p></div><div class="settings-row-actions"><span class="settings-value">${esc(effectiveWorkspace() || '尚未选择')}</span><button type="button" class="ghost" id="settings-cwd">更改</button></div></div><div class="settings-divider"></div><div class="settings-row"><div><strong>账户</strong><p>当前登录的 Anyu 账号。</p></div><span class="settings-value">${esc(state.user?.email || 'Anyu 用户')}</span></div></div></section>
       <section class="settings-section settings-account-actions"><h2>账号操作</h2><div class="settings-card"><div class="settings-row"><div><strong>切换账号</strong><p>退出当前账号并返回登录页面。</p></div><button type="button" class="ghost" id="settings-logout">切换账号</button></div></div></section>`
     const content = section === 'appearance' ? appearanceMarkup() : section === 'skills' ? coreSkillsMarkup() : section === 'plugins' ? pluginMarketMarkup() : generalMarkup
@@ -3786,35 +3758,31 @@
   /**
    * 权限 pill 及其下拉菜单。
    *
-   * 切换权限模式只重启 Pi 子进程，不重启应用；系统管理员权限是另一件事，
-   * 单独列在菜单下半部分，并且明确标注"会重启应用"。
+   * Permission changes are verified by the main process.
    */
   function permissionPickerMarkup() {
     const mode = PERMISSION_MODES.some((item) => item.id === state.permissionMode) ? state.permissionMode : 'auto'
     const meta = permissionModeMeta(mode)
     const effective = effectivePermissionMode()
     const access = state.systemAccess
-    const elevated = Boolean(access?.administrator)
+    const elevated = Boolean(access?.executionAdministrator || access?.administrator)
     const rows = PERMISSION_MODES
       .map((item) => `<button type="button" role="menuitemradio" aria-checked="${item.id === mode}" class="bar-menu-item ${item.id === mode ? 'selected' : ''}" data-permission-mode="${esc(item.id)}"><span class="bar-menu-icon">${esc(item.icon)}</span><span class="bar-menu-copy"><strong>${esc(item.name)}</strong><small>${esc(item.hint)}</small></span><span class="bar-menu-check">${item.id === mode ? '✓' : ''}</span></button>`)
       .join('')
-    // Windows 上进程一旦启动就无法自我提权，只能靠 UAC 拉起新实例，所以这一步
-    // 必然重启应用。必须把代价写在界面上，用户才知道点它的后果。
     let elevationRow = ''
     if (access?.platform === 'win32') {
       elevationRow = elevated
-        ? `<div class="bar-menu-note" role="note"><span class="bar-menu-icon">✓</span><span class="bar-menu-copy"><strong>已具备管理员权限</strong><small>系统保护目录可以正常读写</small></span></div>`
-        : `<button type="button" class="bar-menu-item" id="request-elevation"><span class="bar-menu-icon">🛡</span><span class="bar-menu-copy"><strong>以管理员身份重启</strong><small>可选。只有当任务需要写系统保护目录时才用，会重启应用</small></span></button>`
+        ? `<div class="bar-menu-note" role="note"><span class="bar-menu-icon">✓</span><span class="bar-menu-copy"><strong>管理员执行权限已验证</strong><small>完全权限任务使用管理员执行进程</small></span></div>`
+        : `<button type="button" class="bar-menu-item" id="request-elevation"><span class="bar-menu-icon">🛡</span><span class="bar-menu-copy"><strong>授权管理员执行</strong><small>通过 Windows UAC 启动独立执行进程</small></span></button>`
     } else if (access?.platform === 'darwin') {
       elevationRow = `<button type="button" class="bar-menu-item" id="request-privacy-settings"><span class="bar-menu-icon">🛡</span><span class="bar-menu-copy"><strong>打开隐私与安全性设置</strong><small>完全磁盘访问、辅助功能需在系统设置里手动授权</small></span></button>`
     }
     const menu = state.permissionMenuOpen
-      ? `<div class="bar-menu permission-menu" role="menu" aria-label="本机访问权限"><div class="bar-menu-heading"><strong>本机访问权限</strong><small>切换后立即生效，不会重启应用</small></div>${rows}<div class="bar-menu-divider"></div><div class="bar-menu-heading"><strong>系统权限</strong><small>${esc(state.systemAccess ? systemAccessLabel() : '正在读取…')}</small></div>${elevationRow}</div>`
+      ? `<div class="bar-menu permission-menu" role="menu" aria-label="本机访问权限"><div class="bar-menu-heading"><strong>本机访问权限</strong><small>运行中的任务保留本轮权限</small></div>${rows}<div class="bar-menu-divider"></div><div class="bar-menu-heading"><strong>系统权限</strong><small>${esc(state.systemAccess ? systemAccessLabel() : '正在读取…')}</small></div>${elevationRow}</div>`
       : ''
-    // auto 模式下真正生效的是按模型解出来的档位。只写"自动适配"用户无从判断
-    // 当前到底会不会弹确认，所以把解析结果一并写在 pill 上。
+    // Show the actual controlled default for automatic mode.
     const label = mode === 'auto' ? `自动·${permissionModeLabel(effective)}` : meta.name
-    return `<div class="bar-picker"><button type="button" id="permission-picker" class="bar-pill ${effective === 'full' ? 'is-warning' : ''}" aria-haspopup="menu" aria-expanded="${state.permissionMenuOpen}" title="${esc(`本机访问权限：${mode === 'auto' ? `自动适配，当前按模型能力为${permissionModeLabel(effective)}` : meta.name}。${meta.hint}`)}"><span class="bar-pill-icon">${esc(meta.icon)}</span><span class="bar-pill-label">${esc(label)}</span><span class="picker-chevron">⌄</span></button>${menu}</div>`
+    return `<div class="bar-picker"><button type="button" id="permission-picker" class="bar-pill ${effective === 'full' ? 'is-warning' : ''}" aria-haspopup="menu" aria-expanded="${state.permissionMenuOpen}" title="${esc(`本机访问权限：${meta.name}。${meta.hint}`)}"><span class="bar-pill-icon">${esc(meta.icon)}</span><span class="bar-pill-label">${esc(label)}</span><span class="picker-chevron">⌄</span></button>${menu}</div>`
   }
 
   /**
