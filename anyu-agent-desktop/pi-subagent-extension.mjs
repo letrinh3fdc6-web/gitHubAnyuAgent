@@ -6,7 +6,7 @@ export default function anyuSubagents(pi) {
   if (!port || !token) return
   const child = process.env.ANYU_AGENT_ROLE === 'child'
   const readOnly = process.env.ANYU_AGENT_READ_ONLY === '1'
-  const readTools = new Set(['read', 'grep', 'find', 'ls'])
+  const readTools = new Set(['read', 'grep', 'find', 'ls', 'runtime_probe'])
 
   function request(route, payload, signal) {
     const data = JSON.stringify(payload)
@@ -34,9 +34,9 @@ export default function anyuSubagents(pi) {
     })
   }
 
-  if (readOnly) pi.on('session_start', async () => { pi.setActiveTools(['read', 'grep', 'find', 'ls']) })
+  if (readOnly) pi.on('session_start', async () => { pi.setActiveTools([...readTools]) })
   pi.on('tool_call', async event => {
-    if (event.toolName === 'delegate_tasks' && !child) return
+    if (['delegate_tasks', 'merge_task', 'retry_task'].includes(event.toolName) && !child) return
     if (readOnly && !readTools.has(event.toolName)) return { block: true, reason: '该子代理仅允许读取与分析' }
     try { await request('/acquire', { toolCallId: event.toolCallId, toolName: event.toolName }) }
     catch (error) { return { block: true, reason: error.message } }
@@ -60,6 +60,9 @@ export default function anyuSubagents(pi) {
           title: { type: 'string', maxLength: 100 },
           instructions: { type: 'string', maxLength: 12000, description: '独立完整的目标、上下文、文件范围与验收标准' },
           mode: { type: 'string', enum: ['read', 'execute'] },
+          key: { type: 'string', description: 'Unique task key within this batch' },
+          dependsOn: { type: 'array', items: { type: 'string' }, description: 'Keys of prerequisite tasks in this batch' },
+          isolate: { type: 'boolean', description: 'Default true: execute in a private workspace copy; review and merge changes after success' },
         },
       } } },
     },
@@ -71,4 +74,7 @@ export default function anyuSubagents(pi) {
       } finally { clearInterval(timer) }
     },
   })
+  for (const [name, route] of [['merge_task', '/merge'], ['retry_task', '/retry']]) {
+    pi.registerTool({ name, label: name === 'merge_task' ? '合入子任务结果' : '重试失败子任务', description: name === 'merge_task' ? 'Merge a completed isolated task after reviewing its result. Rejects concurrent file edits without overwriting them.' : 'Retry one failed subtask, preserving other successful results.', parameters: { type: 'object', required: ['taskId'], properties: { taskId: { type: 'string' } } }, async execute(_id, params, signal) { const value = await request(route, params, signal); return { content: [{ type: 'text', text: JSON.stringify(value) }], details: value } } })
+  }
 }

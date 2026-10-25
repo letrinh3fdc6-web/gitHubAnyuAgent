@@ -9,7 +9,7 @@ const { spawn } = require('node:child_process')
 const { AgentSessionService } = require('../agent-session.cjs')
 const { AgentOrchestrator } = require('../agent-orchestrator.cjs')
 
-test('bundled Pi delegates across models, executes read, and preserves DeepSeek reasoning through tool results', { timeout: 45000 }, async t => {
+test('bundled Pi delegates across models, probes the runtime, executes read, and preserves DeepSeek reasoning through tool results', { timeout: 45000 }, async t => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'anyu-pi-subagent-'))
   const executable = path.resolve(__dirname, '../pi-runtime', process.platform === 'win32' ? 'pi.exe' : 'pi')
   const runtimes = new Map(), requests = [], events = []
@@ -24,10 +24,13 @@ test('bundled Pi delegates across models, executes read, and preserves DeepSeek 
       requests.push(body)
       const isParent = body.model === 'gpt-6-astra'
       const hasToolResult = body.messages.some(message => message.role === 'tool')
+      const hasReadResult = body.messages.some(message => message.role === 'tool' && message.tool_call_id === 'read-1')
       if (!isParent) {
-        assert.deepEqual(body.tools.map(tool => tool.function.name).sort(), ['find', 'grep', 'ls', 'read'])
+        assert.deepEqual(body.tools.map(tool => tool.function.name).sort(), ['find', 'grep', 'ls', 'read', 'runtime_probe'])
         if (hasToolResult) {
-          assert.ok(body.messages.some(message => message.role === 'tool' && JSON.stringify(message.content).includes(marker)))
+          const probe = body.messages.find(message => message.role === 'tool' && message.tool_call_id === 'probe-1')
+          assert.equal(JSON.parse(probe.content).workspace.readable, true)
+          if (hasReadResult) assert.ok(body.messages.some(message => message.role === 'tool' && JSON.stringify(message.content).includes(marker)))
           const previous = body.messages.find(message => message.role === 'assistant' && message.tool_calls?.length)
           assert.equal(previous.reasoning_content, 'Read the requested evidence.')
         }
@@ -35,14 +38,15 @@ test('bundled Pi delegates across models, executes read, and preserves DeepSeek 
       res.writeHead(200, { 'Content-Type': 'text/event-stream' })
       const send = (delta, finish_reason = null) => res.write(`data: ${JSON.stringify({ id: 'mock-chat', object: 'chat.completion.chunk', created: 1, model: body.model, choices: [{ index: 0, delta, finish_reason }] })}\n\n`)
       send({ role: 'assistant' })
-      if (!hasToolResult) {
-        const name = isParent ? 'delegate_tasks' : 'read'
+      if (!hasToolResult || (!isParent && !hasReadResult)) {
+        const name = isParent ? 'delegate_tasks' : hasToolResult ? 'read' : 'runtime_probe'
+        const callId = isParent ? 'delegate-1' : hasToolResult ? 'read-1' : 'probe-1'
         const args = isParent
           ? { tasks: [{ workerId: 'deepseek', title: 'Read marker', mode: 'read', instructions: 'Read marker.txt in the current workspace and return its first line. Do not change files.' }] }
-          : { path: path.join(directory, 'marker.txt') }
+          : hasToolResult ? { path: path.join(directory, 'marker.txt') } : {}
         if (!isParent) send({ reasoning_content: 'Read the requested evidence.' })
         const encoded = JSON.stringify(args)
-        send({ tool_calls: [{ index: 0, id: isParent ? 'delegate-1' : 'read-1', type: 'function', function: { name, arguments: encoded.slice(0, 20) } }] })
+        send({ tool_calls: [{ index: 0, id: callId, type: 'function', function: { name, arguments: encoded.slice(0, 20) } }] })
         send({ tool_calls: [{ index: 0, function: { arguments: encoded.slice(20) } }] })
         send({}, 'tool_calls')
       } else {
@@ -85,7 +89,8 @@ test('bundled Pi delegates across models, executes read, and preserves DeepSeek 
       const configModel = { id: options.model, name: options.model, api: 'openai-completions', reasoning: true, input: ['text'], contextWindow: 128000, maxTokens: 4096, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }
       fs.writeFileSync(path.join(runtimeDir, 'models.json'), JSON.stringify({ providers: { 'anyu-test': { baseUrl, api: 'openai-completions', apiKey: 'local-test-only', models: [configModel] } } }))
       const args = ['--mode', 'rpc', '--provider', 'anyu-test', '--model', options.model, '--session-dir', path.join(directory, 'sessions'), '--no-context-files', '--no-skills', '--no-extensions', '--extension', path.resolve(__dirname, '../pi-subagent-extension.mjs'), '--offline']
-      if (options.readOnly) args.push('--tools', 'read,grep,find,ls')
+      args.push('--extension', path.resolve(__dirname, '../runtime-probe-extension.mjs'))
+      if (options.readOnly) args.push('--tools', 'read,grep,find,ls,runtime_probe')
       const runtime = { key: '', pending: new Map(), buffer: '' }
       runtime.child = spawn(executable, args, { cwd: directory, windowsHide: true, env: { ...process.env, PI_CODING_AGENT_DIR: runtimeDir, PI_SKIP_VERSION_CHECK: '1', ANYU_AGENT_BRIDGE_PORT: String(options.orchestration.port), ANYU_AGENT_BRIDGE_TOKEN: options.orchestration.token, ANYU_AGENT_ROLE: options.agentRole, ANYU_AGENT_READ_ONLY: options.readOnly ? '1' : '' }, stdio: ['pipe', 'pipe', 'pipe'] })
       runtime.child.stdout.on('data', chunk => {
@@ -134,7 +139,7 @@ test('bundled Pi delegates across models, executes read, and preserves DeepSeek 
   assert.deepEqual(errors, [])
   assert.equal(final.status, 'completed')
   assert.equal(final.text, marker)
-  assert.equal(requests.length, 4)
+  assert.equal(requests.length, 5)
   assert.ok(events.some(event => event.type === 'subagent.updated' && event.task.status === 'completed'))
   assert.equal(fs.readFileSync(path.join(directory, 'marker.txt'), 'utf8'), marker)
 })

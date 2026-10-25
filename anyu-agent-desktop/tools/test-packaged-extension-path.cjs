@@ -12,6 +12,12 @@ const unpack = Array.isArray(pkg.build?.asarUnpack) ? pkg.build.asarUnpack : []
 assert.ok(unpack.includes('pi-browser-extension.mjs'), 'package.json 必须把 pi-browser-extension.mjs 放进 asarUnpack')
 assert.ok(fs.existsSync(path.join(root, 'pi-browser-extension.mjs')), '扩展源文件必须存在')
 assert.ok(pkg.build.files.includes('pi-browser-extension.mjs'), '扩展必须仍在 files 白名单内，否则打包后不会带上')
+for (const extension of ['runtime-probe-extension.mjs', 'pi-approval-gate.mjs', 'pi-workbench-extension.mjs']) {
+  assert.ok(unpack.includes(extension), `${extension} must be accessible outside app.asar`)
+  assert.ok(pkg.build.files.includes(extension), `${extension} must be packaged`)
+  assert.ok(fs.existsSync(path.join(root, extension)), `${extension} source must exist`)
+  assert.ok(main.includes(`externalProcessPath('${extension}')`), `${extension} must use the unpacked path`)
+}
 
 assert.match(main, /function externalProcessPath/, 'main.cjs 需要 asar 路径换算函数')
 assert.match(main, /externalProcessPath\('pi-browser-extension\.mjs'\)/, '传给 Pi 的扩展路径必须经过 externalProcessPath 换算')

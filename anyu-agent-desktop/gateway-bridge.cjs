@@ -127,6 +127,8 @@ class LocalGatewayBridge {
     this.userAgent = String(options.userAgent || 'AnyuAgent-Desktop')
     this.getAccessToken = options.getAccessToken
     this.refreshAccessToken = options.refreshAccessToken
+    this.beforeRequest = options.beforeRequest
+    this.onResponse = options.onResponse
     this.maxRequestBytes = Number(options.maxRequestBytes || DEFAULT_MAX_REQUEST_BYTES)
     this.server = null
     this.sockets = new Set()
@@ -210,6 +212,10 @@ class LocalGatewayBridge {
 			writeJSON(res, 400, '请求缺少有效模型')
 			return
 		}
+    if (this.beforeRequest && !/count[_T]okens/.test(route.upstreamPath)) {
+      route.requestId = `anyu-${crypto.randomUUID()}`
+      try { await this.beforeRequest(route) } catch (error) { writeJSON(res, 409, error.message); return }
+    }
 		await this.proxy(req, res, route, normalizeManagedRequestBody(route, body), true)
   }
 
@@ -232,11 +238,13 @@ class LocalGatewayBridge {
     for (const [name, value] of Object.entries(clientRequest.headers || {})) {
       if (FORWARDED_REQUEST_HEADERS.has(name.toLowerCase()) && value != null) headers[name] = value
     }
+    if (route.requestId) headers['x-request-id'] = route.requestId
     const transport = target.protocol === 'https:' ? https : http
     await new Promise((resolve) => {
       const requestOptions = { method: clientRequest.method, headers, agent: this.upstreamAgent }
       if (this.lookup) requestOptions.lookup = this.lookup
       const upstream = transport.request(target, requestOptions, (upstreamResponse) => {
+        this.onResponse?.(route, upstreamResponse.headers, upstreamResponse.statusCode)
         if (upstreamResponse.statusCode === 401 && allowRefresh) {
           const chunks = []
           upstreamResponse.on('data', (chunk) => chunks.push(chunk))

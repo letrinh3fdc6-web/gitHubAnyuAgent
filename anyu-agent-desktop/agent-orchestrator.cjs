@@ -2,8 +2,9 @@
 
 const http = require('node:http')
 const crypto = require('node:crypto')
+const path = require('node:path')
 
-const READ_TOOLS = new Set(['read', 'grep', 'find', 'ls'])
+const READ_TOOLS = new Set(['read', 'grep', 'find', 'ls', 'runtime_probe'])
 const PROTOCOLS = new Set(['openai-completions', 'openai-responses', 'anthropic-messages', 'google-generative-ai', 'google-vertex'])
 const stopped = () => Object.assign(new Error('任务已停止'), { code: 'ERR_CANCELED' })
 const integer = (value, min, max) => Number.isInteger(value) && value >= min && value <= max
@@ -11,7 +12,9 @@ const integer = (value, min, max) => Number.isInteger(value) && value >= min && 
 function resolveConfig(team, models) {
   if (!team?.enabled) return null
   if (!Array.isArray(team.workers) || !integer(team.workers.length, 1, 4)) throw new Error('请选择 1-4 个执行子代理')
-  if (!integer(team.maxParallel, 1, 2) || !integer(team.maxTasks, 1, 8) || !integer(team.timeoutMinutes, 1, 30)) throw new Error('多代理任务限制无效')
+  if (!integer(team.maxParallel, 1, 2)) throw new Error('子代理并发限制为 1-2 个')
+  if (!integer(team.maxTasks, 1, 64)) throw new Error('每轮子任务数量限制为 1-64 个')
+  if (!integer(team.timeoutMinutes, 0, 1440)) throw new Error('多代理时限为 0-1440 分钟，0 表示不限时')
   const ids = new Set()
   const workers = team.workers.map(worker => {
     if (!worker || !/^[a-zA-Z0-9_-]{1,64}$/.test(worker.id) || ids.has(worker.id)) throw new Error('子代理标识无效')
@@ -81,10 +84,12 @@ class ToolLeases {
 }
 
 class AgentOrchestrator {
-  constructor({ sessions, getCatalog, retireRuntime }) {
+  constructor({ sessions, getCatalog, retireRuntime, workbench }) {
     this.sessions = sessions
     this.getCatalog = getCatalog
     this.retireRuntime = retireRuntime
+    this.workbench = workbench
+    this.mergeQueue = Promise.resolve()
     this.roots = new Map()
     this.contexts = new Map()
     this.children = new Map()
@@ -147,7 +152,9 @@ class AgentOrchestrator {
     if (root.run) throw new Error('多代理任务仍在运行')
     const run = { controller: new AbortController(), tasks: new Map(), delegations: new Map(), children: new Set(), active: 0, turns: 0, pending: new Set(), runId: '' }
     root.run = run
-    run.timer = setTimeout(() => { void this.abort({ sessionId: root.sessionId }, '多代理任务已达到本轮时限').catch(() => {}) }, root.config.timeoutMinutes * 60000)
+    run.timer = root.config.timeoutMinutes > 0
+      ? setTimeout(() => { void this.abort({ sessionId: root.sessionId }, `多代理任务已达到设置的 ${root.config.timeoutMinutes} 分钟时限；可调整时限后继续任务`).catch(() => {}) }, root.config.timeoutMinutes * 60000)
+      : null
     try { return await this.sessions.prompt(payload) }
     catch (error) { await this.abort({ sessionId: root.sessionId }).catch(() => {}); throw error }
   }
@@ -209,6 +216,12 @@ class AgentOrchestrator {
 
   publish(root, run, task) {
     if (root.run === run) this.sessions.emit(root.sessionId, { type: 'subagent.updated', runId: run.runId, task: { ...task } })
+    const record = this.workbench?.store.state.tasks[run.runId]
+    if (record) {
+      record.subtasks ||= {}
+      record.subtasks[task.id] = { ...task }
+      void this.workbench.store.save().catch(() => {})
+    }
   }
 
   async abort(payload, error = '') {
@@ -273,15 +286,45 @@ class AgentOrchestrator {
       if (!worker || !['read', 'execute'].includes(item.mode) || typeof item.title !== 'string' || !item.title.trim() || item.title.length > 100 || typeof item.instructions !== 'string' || !item.instructions.trim() || item.instructions.length > 12000) throw new Error('子任务模型、类型或描述无效')
       return { item, worker }
     })
-    const jobs = plans.map(({ item, worker }) => {
-      const task = { id: crypto.randomUUID(), workerId: worker.id, model: worker.selection.model, groupId: worker.selection.groupId, groupName: worker.catalogModel.group_name, title: item.title, mode: item.mode, status: 'queued' }
+    const keys = new Map()
+    for (const { item } of plans) {
+      const key = item.key || crypto.randomUUID()
+      if (typeof key !== 'string' || !/^[\w-]{1,80}$/.test(key) || keys.has(key)) throw new Error('子任务 key 重复或无效')
+      item.key = key
+      keys.set(key, item)
+    }
+    const visiting = new Set(), visited = new Set()
+    const visit = key => {
+      if (visiting.has(key)) throw new Error('子任务依赖存在循环')
+      if (visited.has(key)) return
+      const item = keys.get(key)
+      if (!item || (item.dependsOn && (!Array.isArray(item.dependsOn) || item.dependsOn.length > 4))) throw new Error('子任务依赖无效')
+      visiting.add(key)
+      for (const dep of item.dependsOn || []) visit(dep)
+      visiting.delete(key); visited.add(key)
+    }
+    for (const key of keys.keys()) visit(key)
+    const jobsByKey = new Map()
+    const schedule = ({ item, worker }) => {
+      if (jobsByKey.has(item.key)) return jobsByKey.get(item.key)
+      const dependencies = (item.dependsOn || []).map(key => schedule(plans.find(plan => plan.item.key === key)))
+      const task = { id: crypto.randomUUID(), key: item.key, dependsOn: item.dependsOn || [], isolated: Boolean(this.workbench && item.mode === 'execute' && item.isolate !== false), instructions: item.instructions, workerId: worker.id, model: worker.selection.model, groupId: worker.selection.groupId, groupName: worker.catalogModel.group_name, title: item.title, mode: item.mode, status: 'queued' }
       run.tasks.set(task.id, task)
       this.publish(root, run, task)
-      const job = this.execute(root, run, task, item.instructions, worker)
+      const job = Promise.all(dependencies).then(async results => {
+        if (results.some(result => result.status !== 'completed')) {
+          task.status = 'blocked'; task.error = '前置任务未成功'; this.publish(root, run, task)
+          return { taskId: task.id, status: task.status, error: task.error }
+        }
+        for (const result of results) if (result.mergePending) await this.mergeTask(root.sessionId, result.taskId)
+        return this.execute(root, run, task, item.instructions, worker)
+      }).catch(error => { task.status = 'failed'; task.error = error.message; this.publish(root, run, task); return { taskId: task.id, status: 'failed', error: error.message } })
+      jobsByKey.set(item.key, job)
       run.pending.add(job)
       void job.finally(() => run.pending.delete(job)).catch(() => {})
       return job
-    })
+    }
+    const jobs = plans.map(schedule)
     const results = await Promise.all(jobs)
     if (run.controller.signal.aborted) throw stopped()
     return { tasks: results }
@@ -295,7 +338,7 @@ class AgentOrchestrator {
       release = await this.slot(root, run)
       if (run.controller.signal.aborted) throw stopped()
       const sessionId = `child-${task.id}`
-      context = { token: crypto.randomBytes(32).toString('hex'), sessionId, role: 'child', readOnly: task.mode === 'read' }
+      context = { token: crypto.randomBytes(32).toString('hex'), sessionId, role: 'child', readOnly: task.mode === 'read', isolated: task.isolated }
       const finished = new Promise(resolve => { child = { root, run, task, context, resolve, turns: 0 } })
       this.children.set(sessionId, child)
       this.contexts.set(context.token, context)
@@ -303,20 +346,32 @@ class AgentOrchestrator {
       const parent = this.sessions.sessions.get(root.sessionId)
       // Hold an execution task's lease across its entire tool sequence so a
       // second worker cannot navigate the shared browser or edit between steps.
-      if (task.mode === 'execute') await this.leases.acquire(context, '@task', 'execute', run.controller.signal)
+      if (task.mode === 'execute' && !task.isolated) await this.leases.acquire(context, '@task', 'execute', run.controller.signal)
+      let cwd = parent.cwd
+      if (task.isolated) {
+        task.workdir = path.join(this.workbench.store.directory, 'isolated', task.id)
+        task.base = await this.workbench.snapshots.persist(`${task.id}-base`, await this.workbench.snapshots.isolate(parent.cwd, task.workdir))
+        cwd = task.workdir
+      }
       if (run.controller.signal.aborted) throw stopped()
       task.startedAt = new Date().toISOString()
       task.status = 'running'
       this.publish(root, run, task)
       await this.sessions.start({
         sessionId, parentSessionId: root.sessionId, accessMode: 'managed', model: worker.selection.model,
-        provider: worker.catalogModel.provider, models: [worker.catalogModel], cwd: parent.cwd,
+        provider: worker.catalogModel.provider, models: [worker.catalogModel], cwd,
         permissionMode: parent.permissionMode, thinkingLevel: worker.selection.thinkingLevel,
         runtimeOptions: { agentRole: 'child', readOnly: context.readOnly, background: true, orchestration: { port: this.port, token: context.token }, systemPrompt: `你是独立的执行子代理，只完成当前分配任务，不再委派。${context.readOnly ? '仅可读取和分析，不得修改文件、运行 shell 或操作共享浏览器。' : '工具权限继承主任务授权，不得扩大授权。'} 汇报实际完成内容、变更文件、验证结果及未解决问题；不能把计划当作已执行结果，不输出内部思维链。结果用简洁文字返回主代理。` },
       })
       if (run.controller.signal.aborted) throw stopped()
       await this.sessions.prompt({ sessionId, message: instructions, thinkingLevel: worker.selection.thinkingLevel })
       await finished
+      if (task.isolated) {
+        const after = await this.workbench.snapshots.capture(task.workdir)
+        task.changes = this.workbench.snapshots.changes(await this.workbench.snapshots.load(task.base), after)
+        task.mergePending = task.status === 'completed' && task.changes.length > 0
+        this.publish(root, run, task)
+      }
     } catch (error) {
       task.status = run.controller.signal.aborted ? 'cancelled' : 'failed'
       task.error = error?.message || String(error)
@@ -334,7 +389,42 @@ class AgentOrchestrator {
       }
       release?.()
     }
-    return { taskId: task.id, title: task.title, model: task.model, status: task.status, summary: task.summary || '', error: task.error || '' }
+    return { taskId: task.id, title: task.title, model: task.model, status: task.status, summary: task.summary || '', error: task.error || '', mergePending: task.mergePending || false, changes: task.changes?.map(change => ({ path: change.path, kind: change.kind })) || [] }
+  }
+
+  storedTask(sessionId, id) {
+    const current = this.roots.get(sessionId)?.run?.tasks.get(id)
+    if (current) return current
+    const record = Object.values(this.workbench?.store.state.tasks || {}).reverse().find(task => task.sessionId === sessionId && task.subtasks?.[id])
+    if (!record) throw new Error('子任务不存在')
+    this.workbench.task(record.id)
+    return record.subtasks[id]
+  }
+
+  async mergeTask(sessionId, id) {
+    const task = this.storedTask(sessionId, id)
+    if (!task.mergePending || task.status !== 'completed' || !task.base) throw new Error('没有可合入的子任务结果')
+    const operation = this.mergeQueue.catch(() => {}).then(async () => {
+      if (!task.mergePending) throw new Error('结果已合入')
+      const result = await this.workbench.snapshots.apply(task.base.cwd, task.changes)
+      task.mergePending = false; task.mergedAt = new Date().toISOString()
+      const root = this.roots.get(sessionId)
+      if (root?.run) this.publish(root, root.run, task)
+      await this.workbench.store.save()
+      return result
+    })
+    this.mergeQueue = operation
+    return operation
+  }
+
+  async retryTask(sessionId, id) {
+    const task = this.storedTask(sessionId, id)
+    if (!['failed', 'cancelled', 'blocked'].includes(task.status)) throw new Error('只能重试失败的子任务')
+    const root = this.roots.get(sessionId)
+    if (root?.run) return this.delegate(root.context, [{ workerId: task.workerId, title: task.title, mode: task.mode, instructions: task.instructions, isolate: task.isolated }])
+    const owner = Object.values(this.workbench.store.state.tasks).reverse().find(record => record.sessionId === sessionId && record.subtasks?.[id])
+    if (!owner) throw new Error('原始任务不存在')
+    return this.workbench.options.resume(owner, `Only retry this failed subtask using delegate_tasks with workerId ${task.workerId}, mode ${task.mode}. Do not repeat other completed tasks. Title: ${task.title}\nInstructions: ${task.instructions}\nPrior error: ${task.error || ''}`)
   }
 
   async handle(req, res) {
@@ -360,12 +450,17 @@ class AgentOrchestrator {
         if (!previous) run.delegations.set(body.requestId, { signature, job })
         result = await job
       }
+      else if (req.url === '/merge' || req.url === '/retry') {
+        if (context.role !== 'parent') throw new Error('仅主代理可以操作子任务结果')
+        result = req.url === '/merge' ? await this.mergeTask(context.sessionId, body.taskId) : await this.retryTask(context.sessionId, body.taskId)
+      }
       else if (req.url === '/acquire' || req.url === '/release') {
         if (typeof body.toolCallId !== 'string' || !body.toolCallId || body.toolCallId.length > 200) throw new Error('工具标识无效')
         if (req.url === '/release') result = this.leases.release(context, body.toolCallId)
         else {
           if (context.readOnly && !READ_TOOLS.has(body.toolName)) throw new Error('该子代理仅允许只读工具')
-          result = await this.leases.acquire(context, body.toolCallId, body.toolName, run.controller.signal)
+          result = context.isolated && !String(body.toolName).startsWith('browser_') && !['mcp_call', 'bash'].includes(body.toolName)
+            ? { ok: true } : await this.leases.acquire(context, body.toolCallId, body.toolName, run.controller.signal)
         }
       } else throw new Error('未知操作')
       respond(200, result)
