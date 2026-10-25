@@ -53,6 +53,20 @@ test('rollback restores modified/deleted files and removes only task-created fil
   await assert.rejects(fs.stat(path.join(h.cwd, 'new.txt')), { code: 'ENOENT' })
 })
 
+test('rollback accepts a workspace reached through a directory alias', async t => {
+  const h = await fixture(t)
+  const alias = path.join(h.directory, 'project-alias')
+  await fs.symlink(h.cwd, alias, process.platform === 'win32' ? 'junction' : 'dir')
+  await fs.writeFile(path.join(h.cwd, 'old.txt'), 'before')
+  const before = await h.wb.snapshots.capture(alias)
+  await fs.writeFile(path.join(h.cwd, 'old.txt'), 'after')
+  await fs.writeFile(path.join(h.cwd, 'new.txt'), 'created')
+  const after = await h.wb.snapshots.capture(alias)
+  await h.wb.snapshots.apply(alias, h.wb.snapshots.changes(before, after), true)
+  assert.equal(await fs.readFile(path.join(h.cwd, 'old.txt'), 'utf8'), 'before')
+  await assert.rejects(fs.stat(path.join(h.cwd, 'new.txt')), { code: 'ENOENT' })
+})
+
 test('rollback rejects the entire change set if the user edited one file afterward', async t => {
   const h = await fixture(t)
   await fs.writeFile(path.join(h.cwd, 'a.txt'), 'old')

@@ -103,9 +103,10 @@ class WorkspaceCheckpoints {
   }
 
   async apply(root, changes, reverse = false) {
+    const canonical = await fs.realpath(root)
     const plans = []
     for (const change of changes) {
-      const file = await safePath(root, change.path)
+      const file = await safePath(canonical, change.path)
       const expected = reverse ? change.after : change.before
       const desired = reverse ? change.before : change.after
       let current = null
@@ -116,7 +117,7 @@ class WorkspaceCheckpoints {
     for (const plan of plans) {
       // Revalidate each destination immediately before writing. Never follow a
       // newly inserted symlink or overwrite edits made since the review.
-      await safePath(root, path.relative(root, plan.file))
+      await safePath(canonical, path.relative(canonical, plan.file))
       let current = null
       try { current = digest(await fs.readFile(plan.file)) } catch (error) { if (error.code !== 'ENOENT') throw error }
       if (current !== (plan.expected?.hash || null)) throw new Error(`Concurrent edit: ${path.basename(plan.file)}`)
