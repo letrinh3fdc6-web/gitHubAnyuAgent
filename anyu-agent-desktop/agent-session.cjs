@@ -85,6 +85,7 @@ class AgentSessionService {
     this.startRuntime = options.startRuntime
     this.sendCommand = options.sendCommand
     this.configureThinking = options.configureThinking
+    this.beforePrompt = options.beforePrompt
     this.respondUi = options.respondUi
     this.stopRuntime = options.stopRuntime
     this.resolveRuntime = options.resolveRuntime
@@ -95,6 +96,7 @@ class AgentSessionService {
     this.indexFile = path.join(this.root, 'index.json')
     this.sessions = new Map()
     this.runs = new Map()
+    this.maintenance = new Set()
     this.approvals = new Map()
     this.recent = new Map()
     this.listeners = new Set()
@@ -110,6 +112,7 @@ class AgentSessionService {
       const raw = JSON.parse(fs.readFileSync(this.indexFile, 'utf8'))
       for (const record of Object.values(raw?.sessions || {})) {
         if (!record || typeof record !== 'object' || !record.sessionId) continue
+        if (record.context?.status === 'compacting') record.context = { ...record.context, status: 'cancelled', error: '应用重启，上次压缩已中断，原始记录保留' }
         this.sessions.set(String(record.sessionId), { ...record, models: Array.isArray(record.models) ? record.models : [] })
       }
     } catch {
@@ -134,6 +137,8 @@ class AgentSessionService {
           updatedAt: record.updatedAt,
           lastStatus: record.lastStatus || '',
           parentSessionId: record.parentSessionId || '',
+          team: record.team || null,
+          context: record.context || null,
         }
       }
       const temporary = `${this.indexFile}.${process.pid}.tmp`
@@ -205,7 +210,7 @@ class AgentSessionService {
 
   async start(payload = {}) {
     const sessionId = safeSessionId(payload.sessionId || payload.conversationId)
-    if (this.runs.has(sessionId)) throw new Error('当前会话仍在运行，不能更改运行配置')
+    if (this.runs.has(sessionId) || this.maintenance.has(sessionId)) throw new Error('当前会话仍在运行或压缩，不能更改运行配置')
     const record = this.sessions.get(sessionId) || {
       sessionId,
       createdAt: nowIso(),
@@ -221,6 +226,7 @@ class AgentSessionService {
     const cwdChanged = Boolean(record.cwd && cwd && path.resolve(record.cwd) !== path.resolve(cwd))
 
     const started = await this.startRuntime({
+      agentSessionId: sessionId,
       ...(payload.runtimeOptions || record.runtimeOptions || {}),
       accessMode: payload.accessMode || 'managed',
       model,
@@ -241,6 +247,7 @@ class AgentSessionService {
     record.models = models
     record.runtimeOptions = payload.runtimeOptions || record.runtimeOptions
     record.parentSessionId = payload.parentSessionId || record.parentSessionId || ''
+    record.team = payload.team || null
     record.updatedAt = nowIso()
     record.lastStatus = record.lastStatus || 'ready'
     this.sessions.set(sessionId, record)
@@ -270,7 +277,7 @@ class AgentSessionService {
     if (!record) throw new Error('Agent 会话尚未初始化')
     const message = String(payload.message || '')
     if (!message.trim() && !Array.isArray(payload.images)) throw new Error('消息不能为空')
-    if (this.runs.get(sessionId)) throw new Error('当前会话仍在运行，请等待或先停止当前任务')
+    if (this.runs.get(sessionId) || this.maintenance.has(sessionId)) throw new Error('当前会话仍在运行或压缩，请等待或先停止当前任务')
 
     let runtime = this.resolveRuntime?.(record.piSessionPath) || null
     if (!runtime) {
@@ -278,7 +285,7 @@ class AgentSessionService {
       runtime = this.resolveRuntime?.(record.piSessionPath) || null
     }
     if (!runtime) throw new Error('Agent 运行时未启动')
-    if (this.runs.get(sessionId)) throw new Error('当前会话仍在运行，请等待或先停止当前任务')
+    if (this.runs.get(sessionId) || this.maintenance.has(sessionId)) throw new Error('当前会话仍在运行或压缩，请等待或先停止当前任务')
 
     const run = {
       runId: crypto.randomUUID(),
@@ -295,10 +302,12 @@ class AgentSessionService {
     this.runs.set(sessionId, run)
     record.updatedAt = nowIso()
     record.lastStatus = 'running'
+    if (!record.title) record.title = message.slice(0, 80)
     this.persist()
     this.emit(sessionId, { type: 'run.started', input: message })
 
     try {
+      await this.beforePrompt?.(record, run, payload)
       await this.configureThinking?.(runtime, payload.thinkingLevel || 'auto')
       if (this.runs.get(sessionId) !== run || run.aborting) throw new Error('当前任务已取消')
       await this.sendCommand({ type: 'prompt', sessionKey: record.piSessionPath, message, ...(run.images.length ? { images: run.images } : {}) }, runtime)
@@ -309,12 +318,49 @@ class AgentSessionService {
     return { ok: true, sessionId, runId: run.runId }
   }
 
+  async contextStatus(payload = {}) {
+    const sessionId = safeSessionId(payload.sessionId)
+    const record = this.sessions.get(sessionId)
+    const runtime = record && this.resolveRuntime?.(record.piSessionPath)
+    const status = { ready: Boolean(runtime?.child?.stdin?.writable), running: this.runs.has(sessionId), compacting: this.maintenance.has(sessionId) || Boolean(runtime?.compacting), lastCompaction: record?.context || null, policy: runtime?.contextPolicy || null }
+    if (!status.ready) return status
+    const result = await this.sendCommand({ type: 'get_session_stats', sessionKey: record.piSessionPath }, runtime)
+    return { ...status, usage: result?.data?.contextUsage || null }
+  }
+
+  async compact(payload = {}) {
+    const sessionId = safeSessionId(payload.sessionId)
+    const record = this.sessions.get(sessionId)
+    const runtime = record && this.resolveRuntime?.(record.piSessionPath)
+    if (!runtime) throw new Error('请先在当前会话发送消息，再压缩上下文')
+    if (this.runs.has(sessionId) || this.maintenance.has(sessionId) || runtime.inFlightPrompt) throw new Error('任务仍在执行，请结束或停止后再手动压缩')
+    this.maintenance.add(sessionId)
+    runtime.compacting = true
+    runtime.compactionCancelled = false
+    runtime.inFlightPrompt = true
+    try {
+      const result = await this.sendCommand({ type: 'compact', sessionKey: record.piSessionPath }, runtime)
+      return { ok: true, tokensBefore: result?.data?.tokensBefore, estimatedTokensAfter: result?.data?.estimatedTokensAfter }
+    } catch (error) {
+      if (runtime.compactionCancelled) return { ok: false, cancelled: true }
+      throw error
+    } finally { this.maintenance.delete(sessionId); runtime.inFlightPrompt = false; runtime.compacting = false }
+  }
+
   async abort(payload = {}) {
     const sessionId = safeSessionId(payload.sessionId || payload.conversationId)
     const record = this.sessions.get(sessionId)
     if (!record) return { ok: false }
     const runtime = this.resolveRuntime?.(record.piSessionPath) || null
     if (!runtime) return { ok: false }
+    if (this.maintenance.has(sessionId) && this.stopRuntime) {
+      // Pi's RPC abort does not cancel manual summarization. Stop only this idle
+      // session's runtime; its append-only history is resumed on the next turn.
+      runtime.compactionCancelled = true
+      await this.stopRuntime(runtime)
+      this.ingest(record.piSessionPath, { type: 'compaction_end', reason: 'manual', aborted: true })
+      return { ok: true }
+    }
     const run = this.runs.get(sessionId)
     if (run?.abortPromise) return run.abortPromise
     if (run) {
@@ -411,6 +457,11 @@ class AgentSessionService {
   runtimeExited(piSessionPath, code) {
     const record = this.findByPath(piSessionPath)
     if (!record) return
+    if (record.context?.status === 'compacting') {
+      record.context = { ...record.context, status: 'cancelled', error: '运行时退出，压缩已中断，原始记录保留' }
+      this.persist()
+      this.emit(record.sessionId, { type: 'context.compacted', context: record.context })
+    }
     const run = this.runs.get(record.sessionId)
     if (run) {
       run.error = `Agent 进程已退出 (${code ?? 'unknown'})`
@@ -428,6 +479,15 @@ class AgentSessionService {
     if (!record) return
     const sessionId = record.sessionId
     const run = this.runs.get(sessionId)
+
+    if (event.type === 'compaction_start' || event.type === 'compaction_end') {
+      const started = event.type === 'compaction_start'
+      record.context = { status: started ? 'compacting' : event.aborted ? 'cancelled' : event.result ? 'completed' : 'failed', reason: event.reason || 'threshold', at: nowIso(), tokensBefore: event.result?.tokensBefore ?? null, estimatedTokensAfter: event.result?.estimatedTokensAfter ?? null, error: String(event.errorMessage || '') }
+      this.persist()
+      this.emit(sessionId, { type: started ? 'context.compacting' : 'context.compacted', context: record.context, usage: event.result?.usage || null, willRetry: Boolean(event.willRetry) })
+      if (run && event.willRetry && event.result) { run.retrying = true; run.error = '' }
+      return
+    }
 
     if (event.type === 'message_start') {
       const message = event.message || event.assistantMessage
@@ -470,6 +530,7 @@ class AgentSessionService {
         content,
         errorMessage: String(error),
         stopReason: message.stopReason || '',
+        usage: message.usage || null,
       })
       return
     }
@@ -553,7 +614,7 @@ class AgentSessionService {
       createdAt: nowIso(),
     }
     const runtime = this.resolveRuntime?.(record.piSessionPath)
-    if (request.method === 'confirm' && runtime?.permissionMode === 'full') {
+    if (request.method === 'confirm' && runtime?.permissionMode === 'full' && !request.title.startsWith('[Project policy]')) {
       if (runtime) {
         this.respondUi({ type: 'extension_ui_response', id: request.requestId, confirmed: true, sessionKey: record.piSessionPath }, runtime).catch(() => {})
       }
@@ -621,6 +682,7 @@ class AgentSessionService {
         updatedAt: record.updatedAt,
         lastStatus: record.lastStatus || '',
         running: Boolean(this.runs.get(record.sessionId)),
+        activeRunId: this.runs.get(record.sessionId)?.runId || '',
       }))
   }
 
@@ -730,6 +792,7 @@ class AgentSessionService {
       } else if (!started || !current) {
         continue
       } else if (event.type === 'message.started') {
+        delete current.streamStatus
         if (event.replace || current.retrying || current.error) {
           let lastText = current.parts.length - 1
           while (lastText >= 0 && current.parts[lastText].kind !== 'text') lastText -= 1
@@ -742,9 +805,13 @@ class AgentSessionService {
         delete current.error
         current.isStreaming = true
       } else if (event.type === 'run.retrying') {
+        delete current.streamStatus
         current.isStreaming = true
         current.retrying = true
+      } else if (event.type === 'context.compacting' || event.type === 'context.compacted') {
+        current.streamStatus = event.type === 'context.compacting' ? 'compacting' : 'waiting'
       } else if (event.type === 'message.delta') {
+        delete current.streamStatus
         current.content += event.delta
         const part = current.parts.at(-1)
         if (part?.kind === 'text') part.content = current.content
@@ -754,6 +821,7 @@ class AgentSessionService {
         const part = current.parts.at(-1)
         if (part?.kind === 'text') part.content = current.content
       } else if (event.type === 'tool.started') {
+        delete current.streamStatus
         const activity = { id: event.toolCallId || `${event.seq}`, kind: 'tool', name: event.toolName, status: 'running', input: event.args, startedAt: event.at }
         activities.set(activity.id, activity)
         current.activities.push(activity)
@@ -773,6 +841,7 @@ class AgentSessionService {
         if (index < 0) tasks.push({ ...event.task })
         else tasks[index] = { ...event.task }
       } else if (event.type === 'run.finished') {
+        delete current.streamStatus
         current.isStreaming = false
         current.isError = event.status === 'failed'
         if (event.error) current.error = event.error

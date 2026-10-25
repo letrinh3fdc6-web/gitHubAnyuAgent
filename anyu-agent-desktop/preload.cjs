@@ -1,6 +1,14 @@
 const { contextBridge, ipcRenderer } = require('electron')
 contextBridge.exposeInMainWorld('anyu', {
-  agentCapabilities: { subagents: true },
+  agentCapabilities: { subagents: true, workbench: true, context: true },
+  agentContext: (action, payload) => ipcRenderer.invoke('agent:context', action, payload || {}),
+  releaseNotes: (acknowledge) => ipcRenderer.invoke('update:release-notes', acknowledge || ''),
+  agentWorkbench: (action, payload) => ipcRenderer.invoke('agent:workbench', action, payload || {}),
+  onWorkbenchChanged: listener => {
+    const handler = (_, payload) => listener(payload)
+    ipcRenderer.on('agent:workbench-changed', handler)
+    return () => ipcRenderer.removeListener('agent:workbench-changed', handler)
+  },
   systemAccessState: () => ipcRenderer.invoke('system:state'),
   agentPermissionState: () => ipcRenderer.invoke('agent:permission-state'),
   setAgentPermissionMode: (mode) => ipcRenderer.invoke('agent:set-permission-mode', mode),

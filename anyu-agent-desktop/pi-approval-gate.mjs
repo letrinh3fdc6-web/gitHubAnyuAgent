@@ -5,7 +5,7 @@
 // desktop session layer as an `approval.requested` event, so the user sees a
 // real Allow/Deny card instead of the tool running silently.
 
-const READ_ONLY_TOOLS = /^(read|grep|find|ls)$/i
+const READ_ONLY_TOOLS = /^(read|grep|find|ls|runtime_probe)$/i
 
 function summarize(toolName, input) {
   const value = input && typeof input === 'object' ? input : {}

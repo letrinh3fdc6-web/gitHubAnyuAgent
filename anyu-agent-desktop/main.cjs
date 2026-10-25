@@ -5,7 +5,7 @@ if (process.argv.includes('--anyu-execution-worker')) {
     app.exit(1)
   })
 } else {
-const { app, BrowserWindow, WebContentsView, ipcMain, safeStorage, shell, session, dialog, Menu, Tray, protocol, screen } = require('electron')
+const { app, BrowserWindow, WebContentsView, ipcMain, safeStorage, shell, session, dialog, Menu, Tray, protocol, screen, Notification } = require('electron')
 const { spawn, execFile, execFileSync } = require('child_process')
 const fs = require('fs')
 const path = require('path')
@@ -47,6 +47,8 @@ const { prepare: prepareDependencies, dependencyEnvironment, resolvePython } = r
 const { existingBash, shellEnvironment, ensureWindowsShell } = require('./tools/windows-shell-bootstrap.cjs')
 const { LocalGatewayBridge, managedProviderName, managedBaseUrl } = require('./gateway-bridge.cjs')
 const { AgentSessionService } = require('./agent-session.cjs')
+const { AgentContextSettings } = require('./agent-context.cjs')
+const { AgentWorkbench } = require('./agent-workbench.cjs')
 const { AgentOrchestrator } = require('./agent-orchestrator.cjs')
 const { ExecutionBroker } = require('./execution-broker.cjs')
 const { resolvePermissionMode: resolveExecutionPermission } = require('./agent-permissions.cjs')
@@ -57,6 +59,8 @@ const {
 } = require('./elevation-intent.cjs')
 // 思考强度模板库：主进程与渲染层共用同一份判断，避免两边正则漂移。
 const { resolveThinking } = require('./thinking-presets.js')
+const DESKTOP_APP_ID = app.isPackaged ? 'com.anyu.agent' : 'com.anyu.agent.dev'
+if (process.platform === 'win32') app.setAppUserModelId(DESKTOP_APP_ID)
 
 // GPU 缓存在部分机器上会反复"拒绝访问 (0x5)"导致 GPU 进程崩溃 → 窗口关闭 → app 退出。
 // opt-in 方式（不影响默认安装与线上包）：
@@ -399,6 +403,7 @@ let pluginManager = null
 let skillManager = null
 let agentSessionService = null
 let agentOrchestrator = null
+let agentWorkbench = null
 const dependencyJobs = new Map()
 function preparePluginDependencies(record) {
   if (!record?.id || !record.dependencies || !Object.keys(record.dependencies).length) return
@@ -479,7 +484,16 @@ const gatewayBridge = new LocalGatewayBridge({
   lookup: gatewayLookup,
   userAgent: APP_USER_AGENT,
   getAccessToken: () => auth?.accessToken || '',
-  refreshAccessToken: () => refreshAuthAccessToken()
+  refreshAccessToken: () => refreshAuthAccessToken(),
+  beforeRequest: async route => {
+    if (!agentWorkbench || !route.contextKey) return
+    const runtime = [...piRuntimes.values()].find(item => item.gatewayContext === route.contextKey)
+    const record = runtime && agentSessionService?.findByPath(runtime.key)
+    if (record) await agentWorkbench.request(record.sessionId, route.requestId, route.model)
+  },
+  onResponse: (route, headers, status) => {
+    if (route.requestId && agentWorkbench) void agentWorkbench.response(route.requestId, headers['x-client-request-id'], status).catch(error => console.error('[task-billing]', error.message))
+  },
 })
 
 function timestampValue(value) {
@@ -1733,6 +1747,8 @@ function parsePiLines(runtime, chunk) {
     // 命令确认只用于主进程兑现 IPC Promise，渲染进程不会消费 response；
     // 不再把这类内部事件转发到 renderer，减少高频 IPC 噪声。
     if (message.type === 'response') continue
+    if (message.type === 'compaction_start') runtime.compacting = true
+    if (message.type === 'compaction_end') runtime.compacting = false
     if (message.type === 'agent_settled') runtime.inFlightPrompt = false
     runtime.lastEventAt = Date.now()
     if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('pi:event', { ...message, sessionKey: runtime.key })
@@ -1875,7 +1891,7 @@ function sendPi(command, runtimeArg = null) {
   // client-side timeout here can report a false failure while the task is still
   // running. They remain pending until Pi acknowledges them or the process exits.
   // 异步任务提交只等待 Pi 的接收确认，不能因长输出超过客户端等待时间而误报失败。
-  const timeoutMs = ['prompt', 'steer', 'follow_up'].includes(command.type) ? 0 : 15000
+  const timeoutMs = ['prompt', 'steer', 'follow_up', 'compact'].includes(command.type) ? 0 : 15000
   if (timeoutMs === 0) runtime.inFlightPrompt = true
   return new Promise((resolve, reject) => {
     const timer = timeoutMs > 0
@@ -1893,7 +1909,7 @@ function evictIdlePiRuntimes(keepKey, allowActiveIdle = false) {
   if (piRuntimes.size < PI_MAX_RUNTIMES) return
   // 只淘汰空闲的后台进程，按最久未使用优先；正在生成任务的绝不能杀。
   const candidates = [...piRuntimes.entries()]
-    .filter(([key, runtime]) => key !== keepKey && (allowActiveIdle || key !== piActiveKey) && !runtime.inFlightPrompt)
+    .filter(([key, runtime]) => key !== keepKey && (allowActiveIdle || key !== piActiveKey) && !runtime.inFlightPrompt && !runtime.compacting)
     .sort((left, right) => Number(left[1].lastUsedAt || 0) - Number(right[1].lastUsedAt || 0))
   for (const [key, runtime] of candidates) {
     if (piRuntimes.size < PI_MAX_RUNTIMES) return
@@ -1913,6 +1929,16 @@ async function startPiUnsafe(options = {}) {
   const requestedSession = options.sessionPath && isInside(piSessionDir(), options.sessionPath) ? path.resolve(options.sessionPath) : ''
   const key = requestedSession || `anon:${crypto.randomUUID()}`
   const existing = piRuntimes.get(key)
+  if (existing?.compacting) throw new Error('当前会话正在压缩，请等待完成')
+  const contextSettings = new AgentContextSettings(app.getPath('userData'))
+  const contextModel = (options.models || []).find(model => String(model.id || model.name || '') === String(options.model || '')) || options.models?.[0] || {}
+  const contextCwd = (requestedSession && sessionWorkingDirectory(requestedSession)) || options.cwd || app.getPath('home')
+  const contextPolicy = contextSettings.policy(contextModel, contextCwd)
+  const contextSignature = JSON.stringify(contextPolicy)
+  if (existing && existing.contextSignature !== contextSignature) {
+    if (existing.inFlightPrompt) throw new Error('当前任务仍在运行，上下文设置将在下一轮生效')
+    options = { ...options, force: true }
+  }
   const isChild = options.agentRole === 'child'
   const resolvedPermissionMode = resolvePermissionMode(options.permissionMode)
   const activeParents = [...piRuntimes.values()].filter(runtime => runtime.inFlightPrompt && runtime.startOptions?.agentRole !== 'child' && runtime !== existing).length
@@ -1953,12 +1979,11 @@ async function startPiUnsafe(options = {}) {
     credential = keyValue(record)
     if (!credential) throw new Error('所选密钥没有可用的 API Key，请刷新密钥列表后重试')
   }
-  const agentDir = options.orchestration
-    ? path.join(piAgentDir(), 'agent-configs', crypto.createHash('sha256').update(key).digest('hex').slice(0, 32))
-    : piAgentDir()
+  const agentDir = path.join(piAgentDir(), 'agent-configs', crypto.createHash('sha256').update(options.agentSessionId || key).digest('hex').slice(0, 32))
   const sessionDir = piSessionDir()
   fs.mkdirSync(sessionDir, { recursive: true })
   fs.mkdirSync(agentDir, { recursive: true })
+  contextSettings.prepare(agentDir, piAgentDir(), contextPolicy)
   const gatewayContext = managed ? crypto.randomUUID() : ''
   fs.writeFileSync(path.join(agentDir, 'models.json'), JSON.stringify(modelConfig(options.models, { managed, bridgeOrigin, gatewayContext }), null, 2), { mode: 0o600 })
   const selectedModel = (Array.isArray(options.models) ? options.models : []).find((model) => String(model?.id || model?.name || '') === String(options.model || '')) || options.models?.[0] || {}
@@ -1970,6 +1995,7 @@ async function startPiUnsafe(options = {}) {
   // 工具失败必须由 Agent 决策如何恢复，不能让一次底层异常直接终止整条对话。
   // 只传行为约束，不把任何具体错误或临时路径写进系统提示词。
   args.push('--append-system-prompt', '工具调用由你负责决策。工具失败只代表当前尝试失败：读取错误码和简短摘要，按需重试、改参数、选择替代工具或向用户说明；不要把原始堆栈、二进制内容、临时路径当成用户需求，也不要因一次工具失败终止后续对话。')
+  args.push('--append-system-prompt', '检查本机环境时优先使用 runtime_probe，逐项判断依赖，不要用 Get-Command node, python, msedge, chrome 这样的整体检查。外部 Edge/Chrome 缺失不代表权限不足，内置浏览器优先使用 browser_open；系统 Node/Python 等仅在任务需要时才验证或准备。完全权限不等于依赖已安装，也不能绕过所有系统 ACL。明确区分命令不存在、路径不存在、访问被拒绝和应用退出码非零，依据实际错误修复，不得把失败改报成功。')
   args.push('--append-system-prompt', '需要执行工具的多步骤任务，开始前用一两句普通回复说明接下来做什么。执行中在取得实质进展、发现问题或改变方案时，用简短普通回复告知用户真实进度，再继续调用工具；不要等全部完成才回复。简单问题直接回答，用户要求严格 JSON 等格式时遵守格式。不得编造进度或输出内部思维链，最终答复说明结果和验证情况。')
   if (resolvedPermissionMode === 'full' && !options.readOnly) {
     // gptFullAccess 同时启用 Pi 全部内置工具；--approve 只负责信任项目文件。
@@ -1978,8 +2004,12 @@ async function startPiUnsafe(options = {}) {
     args.push('--append-system-prompt', '当前是用户明确选择的完全权限模式：全部内置工具、文件读写、命令执行和浏览器控制均已授权。直接执行任务，不要因为权限或安全顾虑停在方案阶段，也不要请求额外确认；只有缺少必要信息或操作不可逆时才询问。完成后自行验证结果。')
   }
   if (isChild) args.push('--no-extensions')
-  if (options.readOnly) args.push('--tools', 'read,grep,find,ls')
+  if (options.readOnly) args.push('--tools', 'read,grep,find,ls,runtime_probe')
   if (options.systemPrompt) args.push('--append-system-prompt', options.systemPrompt)
+  if (options.agentSessionId && agentWorkbench) {
+    args.push('--extension', externalProcessPath('pi-workbench-extension.mjs'))
+    args.push('--append-system-prompt', 'For multi-step tasks, use task_checkpoint after meaningful milestones and before external side effects. Search project_memory_search for project conventions. MCP tools are available through mcp_tools and mcp_call only after user configuration. Report acceptance evidence and unresolved issues accurately.')
+  }
   if (requestedSession) args.push('--session', requestedSession)
   const sessionCwd = requestedSession ? sessionWorkingDirectory(requestedSession) : ''
   const requestedCwd = sessionCwd || options.cwd
@@ -1987,6 +2017,9 @@ async function startPiUnsafe(options = {}) {
   const browserBridgeConfig = await startBrowserBridge(cwd)
   const pluginPaths = pluginManager ? pluginManager.runtimeSkillPaths(cwd) : []
   for (const skillPath of pluginPaths) args.push('--skill', skillPath)
+  const runtimeProbeExtension = externalProcessPath('runtime-probe-extension.mjs')
+  if (fs.existsSync(runtimeProbeExtension)) args.push('--extension', runtimeProbeExtension)
+  else console.error(`[pi] 环境诊断扩展缺失，已跳过: ${runtimeProbeExtension}`)
   const browserExtension = externalProcessPath('pi-browser-extension.mjs')
   // 扩展缺失时不能让 Pi 直接启动失败（Pi 会以退出码 1 终止），降级为不带浏览器扩展启动。
   if (!options.readOnly) {
@@ -2003,7 +2036,7 @@ async function startPiUnsafe(options = {}) {
     if (!fs.existsSync(orchestrationExtension)) throw new Error('缺少多代理扩展，请更新桌面客户端')
     args.push('--extension', orchestrationExtension)
   }
-  const runtime = { key, gatewayContext, buffer: '', pending: new Map(), counter: 0, child: null, inFlightPrompt: false, lastUsedAt: Date.now(), lastEventAt: 0, cwd, permissionMode: resolvedPermissionMode }
+  const runtime = { key, gatewayContext, contextPolicy, contextSignature, buffer: '', pending: new Map(), counter: 0, child: null, inFlightPrompt: false, lastUsedAt: Date.now(), lastEventAt: 0, cwd, permissionMode: resolvedPermissionMode }
   let startupStderr = ''
   let stateResponse = null
   try {
@@ -2014,6 +2047,11 @@ async function startPiUnsafe(options = {}) {
     stdio: ['pipe', 'pipe', 'pipe'],
     detached: Boolean(options.orchestration && process.platform !== 'win32'),
     windowsHide: true
+  }
+  if (options.agentSessionId && agentWorkbench) {
+    const context = agentWorkbench.context(options.agentSessionId)
+    launchOptions.env.ANYU_TASK_PORT = String(context.port)
+    launchOptions.env.ANYU_TASK_TOKEN = context.token
   }
   runtime.child = resolvedPermissionMode === 'full' && process.platform === 'win32' && !isWindowsAdministrator()
     ? executionBroker.spawn(args, launchOptions)
@@ -2779,7 +2817,7 @@ function hideMainWindow() {
 
 function createTray() {
   if (tray && !tray.isDestroyed()) return tray
-  const iconPath = path.join(__dirname, 'branding', process.platform === 'win32' ? 'leta.ico' : 'logo.png')
+  const iconPath = path.join(__dirname, 'branding', process.platform === 'win32' ? 'anyu.ico' : 'anyu-mark.png')
   tray = new Tray(iconPath)
   tray.setToolTip('AnyuAgent')
   tray.setContextMenu(Menu.buildFromTemplate([
@@ -2840,9 +2878,10 @@ function createWindow() {
     width: 1440, height: 920, minWidth: 1050, minHeight: 700,
     title: 'AnyuAgent', backgroundColor: '#00000000',
     frame: false, transparent: true, roundedCorners: true, hasShadow: true,
-    icon: path.join(__dirname, 'branding', 'leta.ico'),
+    icon: path.join(__dirname, 'branding', 'anyu-mark.png'),
     webPreferences: { preload: path.join(__dirname, 'preload.cjs'), contextIsolation: true, sandbox: true, nodeIntegration: false }
   })
+  if (process.platform === 'win32') mainWindow.setAppDetails({ appId: DESKTOP_APP_ID, appIconPath: path.join(__dirname, 'branding', 'anyu.ico'), appIconIndex: 0, relaunchDisplayName: 'AnyuAgent' })
   applyRoundedWindowShape(mainWindow)
   mainWindow.once('ready-to-show', () => applyRoundedWindowShape(mainWindow))
   mainWindow.on('resize', () => scheduleRoundedWindowShape(mainWindow))
@@ -3033,19 +3072,46 @@ function writeAnyuAgentArtifacts(payload = {}) {
   return { ok: true, files: written }
 }
 
-app.whenReady().then(() => {
+async function resumeWorkbenchTask(task, message, fresh = false) {
+  const catalog = await requestApi('/integrations/anyu-agent/catalog')
+  const model = (catalog.models || []).find(item => item.id === task.model && item.group_id === task.modelSpec?.group_id && item.api === task.modelSpec?.api)
+  if (!model) throw new Error('任务原模型或分组已不可用，请重新选择模型')
+  const sessionId = fresh ? `workflow-${crypto.randomUUID()}` : task.sessionId
+  await agentOrchestrator.start({ sessionId, accessMode: 'managed', model: model.id, provider: model.provider, models: [model], cwd: task.cwd, permissionMode: task.permissionMode, team: task.team || undefined, force: true })
+  return agentOrchestrator.prompt({ sessionId, message, recoveryOf: fresh ? '' : task.id })
+}
+
+app.whenReady().then(async () => {
   Menu.setApplicationMenu(null)
   // 先读取上次提权流程留下的意图：被提权重启后，本次启动要据此恢复完整访问，
   // 并让界面直接反映"已生效"，而不是等用户再手动点一次。
   pendingElevationIntent = readElevationIntent(app.getPath('userData'))
   if (recoverPendingUpdate()) return
   loadAuth()
+  agentWorkbench = new AgentWorkbench({
+    directory: app.getPath('userData'), encrypt: protect, decrypt: unprotect,
+    getOwner: () => String(auth?.user?.id || 'local'),
+    billing: async ids => {
+      const result = await requestApi(`/usage?page=1&page_size=100&request_ids=${encodeURIComponent(ids.join(','))}`)
+      return result.items || []
+    },
+    inspect: dependencies => require('./dependency-manager.cjs').inspect(dependencies),
+    repair: dependencies => prepareDependencies(dependencies),
+    environment: () => dependencyEnvironment(shellEnvironment(process.env)),
+    resume: (task, message) => resumeWorkbenchTask(task, message),
+    workflow: (task, message) => resumeWorkbenchTask(task, message, true),
+    changed: payload => { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('agent:workbench-changed', payload) },
+    notify: (title, body) => { if (Notification.isSupported()) new Notification({ title, body }).show() },
+    log: message => console.error('[workbench]', message),
+  })
+  await agentWorkbench.init()
   // Session layer: stable conversation ids -> pi sessions, normalized events,
   // approvals and an append-only log. The renderer no longer talks to pi
   // directly for the desktop workspace.
   agentSessionService = new AgentSessionService({
     userDataDir: app.getPath('userData'),
     startRuntime: (options) => startPi(options),
+    beforePrompt: (record, run, payload) => agentWorkbench.begin(record, run, payload),
     sendCommand: (command, runtime) => sendPi(command, runtime),
     configureThinking: (runtime, level) => {
       gatewayBridge.setThinkingLevel(runtime?.gatewayContext, level)
@@ -3065,6 +3131,7 @@ app.whenReady().then(() => {
   })
   agentOrchestrator = new AgentOrchestrator({
     sessions: agentSessionService,
+    workbench: agentWorkbench,
     getCatalog: () => requestApi('/integrations/anyu-agent/catalog'),
     retireRuntime: async key => {
       const runtime = piRuntimes.get(key)
@@ -3073,6 +3140,7 @@ app.whenReady().then(() => {
       if (piRuntimes.get(key) === runtime) piRuntimes.delete(key)
     },
   })
+  agentSessionService.subscribe(event => agentWorkbench.event(event))
   pluginManager = new PluginManager(app.getPath('userData'))
   skillManager = new SkillManager(app.getPath('userData'))
   try {
@@ -3365,6 +3433,23 @@ app.whenReady().then(() => {
   ipcMain.handle('payment:open-browser', (_, payload = {}) => openPaymentBrowser(payload || {}))
   ipcMain.handle('pi:key-models', (_, keyId) => listKeyModels(keyId))
   ipcMain.handle('agent:start', (_, payload) => agentOrchestrator.start(payload || {}))
+  ipcMain.handle('agent:context', (event, action, payload = {}) => {
+    if (event.sender !== mainWindow?.webContents) throw new Error('Invalid sender')
+    const settings = new AgentContextSettings(app.getPath('userData'))
+    if (action === 'get') return settings.get()
+    if (action === 'save') return settings.save(payload)
+    if (action === 'preview') return settings.policy(payload.model || {}, payload.cwd, payload.settings)
+    if (action === 'status') return agentSessionService.contextStatus(payload)
+    if (action === 'compact') return agentSessionService.compact(payload)
+    if (action === 'cancel') return agentSessionService.abort(payload)
+    throw new Error('Unknown context action')
+  })
+  ipcMain.handle('agent:workbench', (event, action, payload) => {
+    if (!mainWindow || event.sender !== mainWindow.webContents) throw new Error('Invalid desktop sender')
+    if (action === 'child.retry') return agentOrchestrator.retryTask(payload.sessionId, payload.id)
+    if (action === 'child.merge') return agentOrchestrator.mergeTask(payload.sessionId, payload.id)
+    return agentWorkbench.dispatch(action, payload || {})
+  })
   ipcMain.handle('agent:prompt', (_, payload) => agentOrchestrator.prompt(payload || {}))
   ipcMain.handle('agent:abort', (_, payload) => agentOrchestrator.abort(payload || {}))
   ipcMain.handle('agent:approve', (_, payload) => agentSessionService.approve(payload || {}))
@@ -3590,6 +3675,21 @@ app.whenReady().then(() => {
     } finally { fs.rmSync(publication.filePath, { force: true }) }
   })
   ipcMain.handle('update:check', async () => checkForUpdate())
+  ipcMain.handle('update:release-notes', (event, acknowledge = '') => {
+    if (event.sender !== mainWindow?.webContents) throw new Error('Invalid sender')
+    const notes = require('./release-notes.json')
+    const id = `${app.getVersion()}:${notes.revision}`
+    const file = path.join(app.getPath('userData'), 'release-notes-seen.json')
+    let seen = false
+    try { seen = JSON.parse(fs.readFileSync(file, 'utf8')).id === id } catch {}
+    if (acknowledge === id) {
+      const temporary = `${file}.${process.pid}.tmp`
+      fs.writeFileSync(temporary, JSON.stringify({ id }), { mode: 0o600 })
+      fs.renameSync(temporary, file)
+      seen = true
+    }
+    return { id, version: app.getVersion(), development: !app.isPackaged, changes: notes.changes, seen }
+  })
   ipcMain.handle('update:state', () => getUpdateState())
   ipcMain.handle('update:download-install', async () => downloadAndInstallUpdate())
   ipcMain.handle('update:open-installer', () => openPendingUpdateInstaller())
@@ -3650,7 +3750,7 @@ app.whenReady().then(() => {
 app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit() })
 installGracefulQuit(app, {
   beforeStop: () => { isQuitting = true },
-  stop: stopPi,
+  stop: async () => { await stopPi(); await agentWorkbench?.close() },
   onError: error => console.error('[shutdown]', error)
 })
 }

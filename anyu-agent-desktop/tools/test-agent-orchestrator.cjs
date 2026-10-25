@@ -44,7 +44,7 @@ async function harness(t, options = {}) {
     // The directory is created uniquely by this test and contains no source.
     fs.rmSync(dir, { recursive: true, force: true })
   })
-  await host.start({ sessionId: 'parent', model: models[0].id, models: [models[0]], team, permissionMode: options.permissionMode || 'confirm' })
+  await host.start({ sessionId: 'parent', model: models[0].id, models: [models[0]], team: options.team || team, permissionMode: options.permissionMode || 'confirm' })
   await host.prompt({ sessionId: 'parent', message: 'Implement and verify' })
   const root = host.roots.get('parent')
   function finish(id, text = 'Verified result', error = '') {
@@ -59,7 +59,24 @@ test('bindings require the exact group, protocol and thinking level', () => {
   assert.equal(resolveConfig(team, models).workers[0].catalogModel, models[1])
   assert.throws(() => resolveConfig({ ...team, workers: [{ ...team.workers[0], selection: { ...team.workers[0].selection, groupId: 99 } }] }, models), /不可用/)
   assert.throws(() => resolveConfig({ ...team, workers: [{ ...team.workers[0], selection: { ...team.workers[0].selection, thinkingLevel: 'invented' } }] }, models), /思考/)
-  assert.throws(() => resolveConfig({ ...team, maxTasks: 9 }, models), /限制/)
+  assert.throws(() => resolveConfig({ ...team, maxTasks: 65 }, models), /限制/)
+  assert.equal(resolveConfig({ ...team, timeoutMinutes: 0, maxTasks: 64 }, models).timeoutMinutes, 0)
+  assert.equal(resolveConfig({ ...team, timeoutMinutes: 1440 }, models).timeoutMinutes, 1440)
+  assert.throws(() => resolveConfig({ ...team, timeoutMinutes: -1 }, models), /时限/)
+})
+
+test('unlimited duration installs no deadline and explicit limits remain effective', async t => {
+  const h = await harness(t, { team: { ...team, timeoutMinutes: 0 } })
+  assert.equal(h.root.run.timer, null)
+  h.finish('parent')
+  await tick()
+  const limited = await harness(t, { team: { ...team, timeoutMinutes: 60 } })
+  assert.equal(limited.root.run.timer._idleTimeout, 3600000)
+  limited.root.run.timer._onTimeout()
+  await waitFor(() => !limited.sessions.runs.has('parent'))
+  const result = limited.events.find(event => event.type === 'run.finished' && event.sessionId === 'parent')
+  assert.equal(result.status, 'failed')
+  assert.match(result.error, /60 分钟/)
 })
 
 test('two independent models run in isolated child sessions and do not finish their parent', async t => {
@@ -176,11 +193,11 @@ test('host enforces token context, readonly tools, depth and batch limits', asyn
   await pending
 })
 
-test('shared reads coexist and a cancelled writer cannot release an active lease early', async () => {
+test('reads and runtime diagnostics share leases and a cancelled writer cannot release them early', async () => {
   const leases = new ToolLeases(), a = { token: 'a' }, b = { token: 'b' }, c = { token: 'c' }
   const signal = new AbortController()
   await leases.acquire(a, 'read-a', 'read', signal.signal)
-  await leases.acquire(b, 'read-b', 'read', signal.signal)
+  await leases.acquire(b, 'probe-b', 'runtime_probe', signal.signal)
   const pending = leases.acquire(c, 'write', 'bash', signal.signal).catch(error => error)
   signal.abort()
   assert.equal((await pending).code, 'ERR_CANCELED')
