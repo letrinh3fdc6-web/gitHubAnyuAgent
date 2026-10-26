@@ -4,7 +4,7 @@ const assert = require('node:assert/strict')
 const fs = require('node:fs')
 const os = require('node:os')
 const path = require('node:path')
-const { AgentContextSettings, DEFAULT_CONTEXT_SETTINGS, contextPolicy, validateContextSettings } = require('../agent-context.cjs')
+const { AgentContextSettings, DEFAULT_CONTEXT_SETTINGS, contextPolicy, validateContextSettings, modelContextKey } = require('../agent-context.cjs')
 const { AgentSessionService } = require('../agent-session.cjs')
 
 function temporary(t) {
@@ -12,6 +12,24 @@ function temporary(t) {
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }))
   return directory
 }
+
+test('custom windows persist per group and protocol and reach the runtime model without mutating the catalog', t => {
+  const dir = temporary(t), settings = new AgentContextSettings(dir)
+  const model = { id: 'gpt-6-astra', group_id: 7, api: 'openai-responses', context_window: 128000 }
+  settings.save({ ...DEFAULT_CONTEXT_SETTINGS, modelWindows: { [modelContextKey(model)]: 2000000 } })
+  assert.equal(new AgentContextSettings(dir).policy(model).contextWindow, 2000000)
+  assert.equal(settings.model(model).contextWindow, 2000000)
+  assert.equal(settings.model(model).context_window, 2000000)
+  assert.equal(settings.policy(model).windowSource, 'custom')
+  assert.equal(settings.policy({ ...model, group_id: 8 }).contextWindow, 128000)
+  assert.equal(settings.policy({ ...model, api: 'openai-completions' }).contextWindow, 128000)
+  assert.equal(model.context_window, 128000)
+  assert.equal(settings.policy({ id: 'unknown' }).windowSource, 'fallback')
+  assert.throws(() => settings.save({ ...DEFAULT_CONTEXT_SETTINGS, modelWindows: { [modelContextKey(model)]: Infinity } }), /window/)
+  assert.throws(() => settings.save({ ...DEFAULT_CONTEXT_SETTINGS, modelWindows: { [modelContextKey(model)]: 0 } }), /window/)
+  settings.save(DEFAULT_CONTEXT_SETTINGS)
+  assert.equal(settings.model(model).contextWindow, 128000)
+})
 
 test('default compression targets one million tokens within each model window and leaves custom percentages intact', () => {
   const large = { context_window: 500000 }

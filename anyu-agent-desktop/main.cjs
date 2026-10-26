@@ -1931,10 +1931,12 @@ async function startPiUnsafe(options = {}) {
   const existing = piRuntimes.get(key)
   if (existing?.compacting) throw new Error('当前会话正在压缩，请等待完成')
   const contextSettings = new AgentContextSettings(app.getPath('userData'))
+  const contextPreferences = contextSettings.get()
   const contextModel = (options.models || []).find(model => String(model.id || model.name || '') === String(options.model || '')) || options.models?.[0] || {}
   const contextCwd = (requestedSession && sessionWorkingDirectory(requestedSession)) || options.cwd || app.getPath('home')
-  const contextPolicy = contextSettings.policy(contextModel, contextCwd)
+  const contextPolicy = contextSettings.policy(contextModel, contextCwd, contextPreferences)
   const contextSignature = JSON.stringify(contextPolicy)
+  options = { ...options, models: (options.models || []).map(model => contextSettings.model(model, contextPreferences)) }
   if (existing && existing.contextSignature !== contextSignature) {
     if (existing.inFlightPrompt) throw new Error('当前任务仍在运行，上下文设置将在下一轮生效')
     options = { ...options, force: true }

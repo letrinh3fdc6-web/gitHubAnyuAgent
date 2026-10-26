@@ -130,6 +130,21 @@ test('parent and child calls share a serialized request cap', async t => {
   assert.equal(h.wb.cost(parent.id).requests, 1)
 })
 
+test('explicit zero disables only the request cap and still records parent and child requests', async t => {
+  const h = await fixture(t)
+  const project = await h.wb.project(h.cwd)
+  await h.wb.settings(h.cwd, { ...project.settings, maxRequests: 0 })
+  const root = await h.begin()
+  await h.begin('child', 'session')
+  await Promise.all(Array.from({ length: 105 }, (_, index) => h.wb.request(index % 2 ? 'child' : 'session', `request-${index}`, 'model')))
+  assert.equal(h.wb.cost(root.id).requests, 105)
+  project.settings.maxRequests = 1
+  const next = await h.begin('other', '')
+  await h.wb.request('other', 'first', 'model')
+  await assert.rejects(h.wb.request('other', 'second', 'model'), error => error.code === 'TASK_REQUEST_LIMIT' && /0 为不限/.test(error.message))
+  assert.equal(h.wb.cost(next.id).requests, 1)
+})
+
 test('actual backend billing is deduplicated; pending billing and spend threshold stop new calls', async t => {
   let records = []
   const h = await fixture(t, { billing: async () => records })

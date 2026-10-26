@@ -10,7 +10,21 @@ function validateContextSettings(value) {
   if (!value || typeof value.enabled !== 'boolean' || !['auto', 'custom'].includes(value.mode)) throw new Error('Invalid context compression mode')
   if (!Number.isInteger(value.triggerPercent) || value.triggerPercent < 50 || value.triggerPercent > 90) throw new Error('Compression threshold must be between 50 and 90 percent')
   if (!Number.isSafeInteger(value.keepRecentTokens) || value.keepRecentTokens < 1000) throw new Error('Recent context must be a safe integer of at least 1000 tokens')
-  return { enabled: value.enabled, mode: value.mode, triggerPercent: value.triggerPercent, keepRecentTokens: value.keepRecentTokens }
+  const overrides = value.modelWindows
+  if (overrides !== undefined && (!overrides || typeof overrides !== 'object' || Array.isArray(overrides))) throw new Error('Invalid model context windows')
+  if (overrides && Object.entries(overrides).some(([key, tokens]) => key.length > 512 || !key || !Number.isSafeInteger(tokens) || tokens < 2048)) throw new Error('Model context window must be an integer of at least 2048 tokens')
+  return { enabled: value.enabled, mode: value.mode, triggerPercent: value.triggerPercent, keepRecentTokens: value.keepRecentTokens, ...(overrides && Object.keys(overrides).length ? { modelWindows: { ...overrides } } : {}) }
+}
+
+function modelContextKey(model = {}) {
+  return `${Number(model.group_id || model.groupId) || 0}:${String(model.api || '')}:${String(model.id || model.modelId || model.model_id || model.name || '').replace(/^models\//, '').trim().toLowerCase()}`
+}
+
+function resolveContextModel(settings, model = {}) {
+  const configured = settings.modelWindows?.[modelContextKey(model)]
+  const catalog = Number(model.contextWindow || model.context_window)
+  const window = configured ?? (Number.isSafeInteger(catalog) && catalog >= 2048 ? catalog : 128000)
+  return { ...model, contextWindow: window, context_window: window }
 }
 
 function readObject(file) {
@@ -30,7 +44,7 @@ function writeObject(file, value) {
 
 // Use Pi's native summarization and append-only history; only calculate its settings.
 function contextPolicy(settings, model, project = {}) {
-  const window = Math.floor(Number(model.contextWindow || model.context_window) || 128000)
+  const window = resolveContextModel(settings, model).contextWindow
   if (window < 2048) throw new Error('Model context window is too small')
   const targetTokens = settings.mode === 'auto' ? DEFAULT_AUTO_COMPACT_TOKENS : Math.floor(window * settings.triggerPercent / 100)
   const reserveTokens = Math.max(Math.min(16384, Math.floor(window / 4)), window - targetTokens)
@@ -43,13 +57,14 @@ function contextPolicy(settings, model, project = {}) {
   // Reserve room for the summary and subsequent messages instead of imposing a
   // fixed token cap on models with very different context windows.
   if (project.keepRecentTokens === undefined) native.keepRecentTokens = Math.min(native.keepRecentTokens, retentionLimitTokens)
-  return { native, contextWindow: window, triggerTokens, triggerPercent: Math.round(triggerTokens / window * 1000) / 10, retentionLimitTokens, retentionLimited: project.keepRecentTokens === undefined && native.keepRecentTokens < settings.keepRecentTokens, source: Object.keys(project).length ? 'project' : 'app' }
+  return { native, contextWindow: window, windowSource: settings.modelWindows?.[modelContextKey(model)] ? 'custom' : Number(model.contextWindow || model.context_window) >= 2048 ? 'catalog' : 'fallback', triggerTokens, triggerPercent: Math.round(triggerTokens / window * 1000) / 10, retentionLimitTokens, retentionLimited: project.keepRecentTokens === undefined && native.keepRecentTokens < settings.keepRecentTokens, source: Object.keys(project).length ? 'project' : 'app' }
 }
 
 class AgentContextSettings {
   constructor(directory) { this.file = path.join(directory, 'context-settings.json') }
   get() { return validateContextSettings({ ...DEFAULT_CONTEXT_SETTINGS, ...readObject(this.file) }) }
   save(value) { const settings = validateContextSettings(value); writeObject(this.file, settings); return settings }
+  model(model, settings = this.get()) { return resolveContextModel(settings, model) }
   policy(model, cwd, settings = this.get()) {
     const project = cwd ? readObject(path.join(cwd, '.pi', 'settings.json')).compaction || {} : {}
     return contextPolicy(validateContextSettings(settings), model, project)
@@ -60,4 +75,4 @@ class AgentContextSettings {
   }
 }
 
-module.exports = { AgentContextSettings, DEFAULT_CONTEXT_SETTINGS, validateContextSettings, contextPolicy }
+module.exports = { AgentContextSettings, DEFAULT_CONTEXT_SETTINGS, validateContextSettings, contextPolicy, modelContextKey, resolveContextModel }

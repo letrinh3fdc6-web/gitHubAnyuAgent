@@ -7,7 +7,7 @@ const os = require('node:os')
 const http = require('node:http')
 const { spawn } = require('node:child_process')
 const { once } = require('node:events')
-const { AgentContextSettings } = require('../agent-context.cjs')
+const { AgentContextSettings, modelContextKey } = require('../agent-context.cjs')
 
 test('bundled Pi compacts at configured threshold, keeps history and continues with summary', { timeout: 60000 }, async t => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'anyu-compaction-live-'))
@@ -32,9 +32,10 @@ test('bundled Pi compacts at configured threshold, keeps history and continues w
     await fs.rm(dir, { recursive: true, force: true })
   })
   await new Promise(resolve => upstream.listen(0, '127.0.0.1', resolve))
-  const model = { id: 'context-test', api: 'openai-completions', name: 'Context test', reasoning: false, input: ['text'], contextWindow: 32000, maxTokens: 2048, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }
+  const catalogModel = { id: 'context-test', api: 'openai-completions', name: 'Context test', reasoning: false, input: ['text'], contextWindow: 128000, maxTokens: 2048, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }
   const settings = new AgentContextSettings(dir)
-  settings.save({ enabled: true, mode: 'custom', triggerPercent: 75, keepRecentTokens: 1000 })
+  settings.save({ enabled: true, mode: 'custom', triggerPercent: 75, keepRecentTokens: 1000, modelWindows: { [modelContextKey(catalogModel)]: 32000 } })
+  const model = settings.model(catalogModel)
   settings.prepare(agentDir, dir, settings.policy(model, cwd))
   await fs.writeFile(path.join(agentDir, 'models.json'), JSON.stringify({ providers: { test: { baseUrl: `http://127.0.0.1:${upstream.address().port}/v1`, api: model.api, apiKey: 'local-only', models: [model] } } }))
   const args = ['--mode', 'rpc', '--provider', 'test', '--model', model.id, '--session-dir', sessions, '--no-context-files', '--no-skills', '--no-extensions', '--offline', '--approve']

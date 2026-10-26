@@ -24,6 +24,12 @@ async function main() {
     req.on('end', () => {
       requests.push({ url: req.url, authorization: req.headers.authorization, group: req.headers['x-anyu-group-id'], model: req.headers['x-anyu-model'], headers: req.headers, body: Buffer.concat(chunks).toString() })
       if (rejectFirst) { rejectFirst = false; res.writeHead(401, { 'Content-Type': 'application/json' }); res.end('{"message":"expired"}'); return }
+      if (req.headers['x-anyu-model'] === 'auth-stream-failure') {
+        res.writeHead(401, { 'Content-Type': 'application/json' })
+        res.write('{"message":')
+        setTimeout(() => res.destroy(), 20)
+        return
+      }
       if (req.headers['x-anyu-model'] === 'unavailable') {
         res.writeHead(503, { 'Content-Type': 'application/json' })
         res.end('{"error":{"type":"overloaded_error","message":"model unavailable"}}')
@@ -145,6 +151,13 @@ async function main() {
   })
   assert.strictEqual(unavailable.status, 503)
   assert.deepStrictEqual(await unavailable.json(), { error: { type: 'overloaded_error', message: 'model unavailable' } })
+
+  const interruptedAuth = await fetch(`${baseUrl}/responses`, {
+    method: 'POST', headers: { Authorization: `Bearer ${local.token}`, 'Content-Type': 'application/json' }, body: '{"model":"auth-stream-failure"}', signal: AbortSignal.timeout(3000),
+  })
+  assert.strictEqual(interruptedAuth.status, 502)
+  await interruptedAuth.text()
+  assert.strictEqual(refreshes, 1, 'incomplete authentication errors must not trigger a token refresh')
 
   const requestCount = requests.length
   const interrupted = await fetch(`${baseUrl}/responses`, {

@@ -276,7 +276,7 @@ class AgentSessionService {
     const record = this.sessions.get(sessionId)
     if (!record) throw new Error('Agent 会话尚未初始化')
     const message = String(payload.message || '')
-    if (!message.trim() && !Array.isArray(payload.images)) throw new Error('消息不能为空')
+    if (!message.trim() && !payload.images?.length) throw new Error('消息不能为空')
     if (this.runs.get(sessionId) || this.maintenance.has(sessionId)) throw new Error('当前会话仍在运行或压缩，请等待或先停止当前任务')
 
     let runtime = this.resolveRuntime?.(record.piSessionPath) || null
@@ -304,7 +304,7 @@ class AgentSessionService {
     record.lastStatus = 'running'
     if (!record.title) record.title = message.slice(0, 80)
     this.persist()
-    this.emit(sessionId, { type: 'run.started', input: message })
+    this.emit(sessionId, { type: 'run.started', input: message, ...(typeof payload.imageAttachmentId === 'string' ? { imageAttachmentId: payload.imageAttachmentId } : {}) })
 
     try {
       await this.beforePrompt?.(record, run, payload)
@@ -788,7 +788,7 @@ class AgentSessionService {
           isStreaming: true,
           seq,
         }
-        messages.push({ id: `${runId}-user`, runId, role: 'user', content: String(event.input || ''), createdAt: event.at, seq })
+        messages.push({ id: `${runId}-user`, runId, role: 'user', content: String(event.input || ''), ...(event.imageAttachmentId ? { imageAttachmentId: event.imageAttachmentId } : {}), createdAt: event.at, seq })
       } else if (!started || !current) {
         continue
       } else if (event.type === 'message.started') {

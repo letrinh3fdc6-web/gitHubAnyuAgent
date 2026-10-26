@@ -111,9 +111,9 @@ function responseHeaders(headers) {
   return out
 }
 
-function writeJSON(res, statusCode, message) {
+function writeJSON(res, statusCode, message, code) {
   if (res.headersSent || res.writableEnded) return
-  const body = Buffer.from(JSON.stringify({ error: { type: 'anyu_agent_bridge_error', message } }))
+  const body = Buffer.from(JSON.stringify({ error: { type: 'anyu_agent_bridge_error', ...(code ? { code } : {}), message } }))
   res.writeHead(statusCode, { 'Content-Type': 'application/json; charset=utf-8', 'Content-Length': String(body.length), 'Cache-Control': 'no-store' })
   res.end(body)
 }
@@ -214,7 +214,7 @@ class LocalGatewayBridge {
 		}
     if (this.beforeRequest && !/count[_T]okens/.test(route.upstreamPath)) {
       route.requestId = `anyu-${crypto.randomUUID()}`
-      try { await this.beforeRequest(route) } catch (error) { writeJSON(res, 409, error.message); return }
+      try { await this.beforeRequest(route) } catch (error) { writeJSON(res, Number(error.statusCode) || 409, error.message, error.code); return }
     }
 		await this.proxy(req, res, route, normalizeManagedRequestBody(route, body), true)
   }
@@ -244,6 +244,12 @@ class LocalGatewayBridge {
       const requestOptions = { method: clientRequest.method, headers, agent: this.upstreamAgent }
       if (this.lookup) requestOptions.lookup = this.lookup
       const upstream = transport.request(target, requestOptions, (upstreamResponse) => {
+        upstreamResponse.once('error', (error) => {
+          // Also cover an interrupted 401 body while waiting to refresh login.
+          if (clientResponse.headersSent) clientResponse.destroy(error)
+          else writeJSON(clientResponse, 502, error.message || '网关响应失败')
+          resolve()
+        })
         this.onResponse?.(route, upstreamResponse.headers, upstreamResponse.statusCode)
         if (upstreamResponse.statusCode === 401 && allowRefresh) {
           const chunks = []
@@ -268,14 +274,12 @@ class LocalGatewayBridge {
         if (!clientResponse.headersSent) clientResponse.writeHead(upstreamResponse.statusCode || 502, responseHeaders(upstreamResponse.headers))
         upstreamResponse.pipe(clientResponse)
         upstreamResponse.once('end', resolve)
-        upstreamResponse.once('error', (error) => {
-          // Once SSE headers are sent, a JSON error would corrupt the protocol.
-          if (clientResponse.headersSent) clientResponse.destroy(error)
-          else writeJSON(clientResponse, 502, error.message || '网关响应失败')
-          resolve()
-        })
       })
-      upstream.once('error', (error) => { writeJSON(clientResponse, 502, error.message || '无法连接网关'); resolve() })
+      upstream.once('error', (error) => {
+        if (clientResponse.headersSent) clientResponse.destroy(error)
+        else writeJSON(clientResponse, 502, error.message || '无法连接网关')
+        resolve()
+      })
       clientRequest.once('aborted', () => upstream.destroy())
       clientResponse.once('close', () => { if (!clientResponse.writableEnded) upstream.destroy() })
       upstream.end(body)

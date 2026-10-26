@@ -196,7 +196,7 @@ class AgentWorkbench {
   async settings(cwd, input) {
     const project = await this.project(cwd)
     const budget = Number(input.budget), maxRequests = Number(input.maxRequests)
-    if (!Number.isFinite(budget) || budget < 0 || !Number.isInteger(maxRequests) || maxRequests < 1 || maxRequests > 1000) throw new Error('Invalid budget or request limit')
+    if (!Number.isFinite(budget) || budget < 0 || !Number.isSafeInteger(maxRequests) || maxRequests < 0) throw new Error('Invalid budget or request limit')
     const policy = input.policy || {}
     if (!['inherit', 'confirm', 'deny'].includes(policy.shell)) throw new Error('Invalid command policy')
     if (policy.blockedTools && (!Array.isArray(policy.blockedTools) || policy.blockedTools.length > 100)) throw new Error('Invalid tool policy')
@@ -286,7 +286,7 @@ class AgentWorkbench {
       const root = this.store.state.tasks[task.rootId] || task
       if (root.settings.budget > 0) await this.syncBilling(root.id)
       const cost = this.cost(root.id)
-      if (cost.requests >= root.settings.maxRequests) throw new Error('Task request limit reached')
+      if (root.settings.maxRequests > 0 && cost.requests >= root.settings.maxRequests) throw Object.assign(new Error(`本轮已达到 ${root.settings.maxRequests} 次模型请求上限（包含主代理、子代理及重试）。请在任务控制的“验收与预算”中调整请求上限，0 为不限，然后继续任务。`), { code: 'TASK_REQUEST_LIMIT', statusCode: 409 })
       if (root.settings.budget > 0 && cost.actual >= root.settings.budget) throw new Error('Task spending threshold reached')
       // With a spend threshold, do not admit another call until the previous
       // one is settled. A single in-flight call can still exceed the threshold.
