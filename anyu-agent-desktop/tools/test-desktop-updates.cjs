@@ -15,7 +15,7 @@ function fixture(t, options = {}) {
   const artifact = { name: 'AnyuAgent-Setup-2.0.0.exe', version: '2.0.0', bytes: bytes.length, sha256: crypto.createHash('sha256').update(bytes).digest('hex') }
   const events = [], requests = [], prepared = [], quits = []
   const app = { getVersion: () => '1.0.0', isPackaged: true, getPath: kind => kind === 'exe' ? path.join(directory, 'AnyuAgent.exe') : directory }
-  const updater = new DesktopUpdater({ app, manifestUrl: 'https://updates.example.test/downloads/manifest.json', pollMs: 5,
+  const updater = new DesktopUpdater({ app, manifestUrl: 'https://updates.example.test/downloads/manifest.json', platform: 'win32', pollMs: 5,
     emit: event => events.push(event), quit: () => quits.push(true),
     fetch: async (url) => {
       requests.push(url)
@@ -52,21 +52,21 @@ test('bad package never starts an installer or quits the current application', a
   assert.deepEqual(fs.readdirSync(path.join(item.directory, 'updates')), [])
 })
 
-test('waits for active work and resumes automatically after the last task settles', async t => {
+test('waits for active work and resumes automatically after the last task settles', { timeout: 10000 }, async t => {
   let busy = true
   const item = fixture(t, { isBusy: () => busy })
   const operation = item.updater.install()
-  while (item.updater.state.phase !== 'waiting') await delay(5)
+  while (item.updater.state.phase !== 'waiting') await delay(5, undefined, { signal: t.signal })
   assert.equal(item.prepared.length, 0)
   busy = false
   assert.equal((await operation).status, 'installing')
   await delay(175)
 })
 
-test('cancelling while waiting preserves the verified download and never exits', async t => {
+test('cancelling while waiting preserves the verified download and never exits', { timeout: 10000 }, async t => {
   const item = fixture(t, { isBusy: () => true })
   const operation = item.updater.install()
-  while (item.updater.state.phase !== 'waiting') await delay(5)
+  while (item.updater.state.phase !== 'waiting') await delay(5, undefined, { signal: t.signal })
   assert.equal(item.updater.cancel(), true)
   assert.equal((await operation).status, 'cancelled')
   assert.equal(fs.readdirSync(path.join(item.directory, 'updates')).length, 1)
