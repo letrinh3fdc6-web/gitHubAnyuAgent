@@ -34,7 +34,7 @@ test('official App Server initializes, streams and resumes its isolated thread',
   })
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
   let client
-  t.after(async () => { await client?.close(); server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); await fs.rm(directory, { recursive: true, force: true }) })
+  t.after(async () => { await client?.close(); server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); await fs.rm(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }) })
   const config = {
     model: 'anyu-test', model_provider: 'anyu',
     'model_providers.anyu': { name: 'Anyu', base_url: `http://127.0.0.1:${server.address().port}/v1`, wire_api: 'responses', env_key: 'ANYU_CODEX_TEST_KEY', request_max_retries: 0, stream_max_retries: 0 },

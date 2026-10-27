@@ -4,9 +4,9 @@ const path = require('node:path')
 const { _electron } = require(process.env.ANYU_PLAYWRIGHT_MODULE || 'C:/Users/Administrator/AppData/Local/Temp/tokenrouter-source-recovery-browser-20261018/node_modules/playwright')
 
 async function main() {
-  const root = process.env.ANYU_SMOKE_ROOT || 'E:/TokenRouter-builds/full-1.0.71'
+  const root = process.env.ANYU_SMOKE_ROOT || 'E:/TokenRouter-builds/full-1.0.72'
   const output = process.env.ANYU_SMOKE_OUTPUT || root
-  const report = { version: '1.0.71', errors: [], graphicsWarnings: [], checks: [] }
+  const report = { version: '1.0.72', errors: [], graphicsWarnings: [], checks: [] }
   const env = { ...process.env, ANYU_USER_DATA_DIR: path.join(root, 'smoke-profile'), ANYU_DISABLE_GPU: '0' }
   delete env.ELECTRON_RUN_AS_NODE
   const electron = await _electron.launch({
@@ -30,7 +30,7 @@ async function main() {
       manifest: await (await fetch('/api/v1/anyu-agent/manifest')).json(),
       update: await window.anyu.checkForUpdate(),
     }))
-    assert.equal(await electron.evaluate(({ app }) => app.getVersion()), '1.0.71')
+    assert.equal(await electron.evaluate(({ app }) => app.getVersion()), '1.0.72')
     assert.equal(await electron.evaluate(({ app }) => app.isPackaged), true)
     assert.ok(JSON.stringify(info.api).includes('https://x.ailzd.com'))
     assert.equal(info.health.product, 'AnyuAgent')
@@ -50,13 +50,15 @@ async function main() {
     report.renderer = renderer
     report.updateVersion = info.update.latestVersion
     if (process.env.ANYU_SMOKE_PUBLISHED === '1') {
-      assert.equal(info.update.latestVersion, '1.0.71')
+      assert.equal(info.update.latestVersion, '1.0.72')
       if (process.platform === 'win32') {
-        assert.equal(info.update.artifact.name, 'AnyuAgent-Setup-1.0.71.exe')
+        assert.equal(info.update.artifact.name, 'AnyuAgent-Setup-1.0.72.exe')
         assert.equal(info.update.artifact.sha256, process.env.ANYU_SMOKE_WINDOWS_SHA256)
       }
       report.checks.push('published update manifest')
     }
+    await page.locator('#anyu-startup').waitFor({ state: 'detached', timeout: 30000 })
+    report.checks.push('startup overlay dismissed')
     await page.screenshot({ path: path.join(output, `${process.platform}-${process.arch}-login.png`) })
     assert.deepEqual(report.errors, [])
     report.passed = true

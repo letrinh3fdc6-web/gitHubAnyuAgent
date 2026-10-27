@@ -176,17 +176,17 @@ jobs:
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: anyuagent-v1.0.71
+          tag_name: anyuagent-v1.0.72
           target_commitish: ${{ github.sha }}
-          name: AnyuAgent 1.0.71
+          name: AnyuAgent 1.0.72
           draft: true
           make_latest: false
           body: |
-            AnyuAgent 1.0.71 adds model-aware context compression settings, task checkpoints and undo, task verification, budgets, environment recovery, isolated subagents, project memory, connectors, workflows, and consistent Anyu Windows branding. Windows and macOS share the same renderer source as the website.
+            AnyuAgent 1.0.72 includes the latest workspace renderer, desktop update progress and recovery, verified Windows update installation, and invoice quota display compatibility. Windows and macOS share the same renderer source as the website.
 
             macOS downloads include separate Apple Silicon and Intel DMG/ZIP packages. Each package includes a matching native runtime. These packages are unsigned and are not notarized.
 
-            Windows download: https://x.ailzd.com/downloads/AnyuAgent-Setup-1.0.71.exe
+            Windows download: https://x.ailzd.com/downloads/AnyuAgent-Setup-1.0.72.exe
           files: |
             release-assets/*.dmg
             release-assets/*.zip

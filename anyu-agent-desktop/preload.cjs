@@ -123,6 +123,8 @@ contextBridge.exposeInMainWorld('anyu', {
   checkForUpdate: () => ipcRenderer.invoke('update:check'),
   updateState: () => ipcRenderer.invoke('update:state'),
   downloadAndInstallUpdate: () => ipcRenderer.invoke('update:download-install'),
+  cancelUpdate: () => ipcRenderer.invoke('update:cancel'),
+  setUpdateActivity: (busy) => ipcRenderer.send('update:activity', Boolean(busy)),
   openUpdateInstaller: () => ipcRenderer.invoke('update:open-installer'),
   onUpdateProgress: (listener) => {
     const handler = (_, event) => listener(event)

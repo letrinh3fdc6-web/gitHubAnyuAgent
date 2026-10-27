@@ -40,7 +40,7 @@ protocol?.registerSchemesAsPrivileged?.([
   { scheme: 'leta-preview', privileges: { standard: true, secure: true, supportFetchAPI: true } },
   { scheme: RENDERER_SCHEME, privileges: { standard: true, secure: true, supportFetchAPI: true, corsEnabled: true, stream: true } }
 ])
-const { DEFAULT_MANIFEST_URL, compareVersions, artifactFromManifest } = require('./updater.cjs')
+const { DesktopUpdater } = require('./desktop-updates.cjs')
 const { installGracefulQuit } = require('./shutdown.cjs')
 const { PluginManager, MAX_PACKAGE_BYTES } = require('./plugin-manager.cjs')
 const { SkillManager } = require('./skill-manager.cjs')
@@ -403,8 +403,6 @@ function resolvePiRuntime(sessionKey) {
   }
   return null
 }
-let updateInProgress = false
-let recoveredUpdateState = null
 let pluginManager = null
 let skillManager = null
 let agentSessionService = null
@@ -931,271 +929,24 @@ function closeBrowserView() {
   return { ...browserState }
 }
 
-async function checkForUpdate() {
-  if (LOCAL_ONLY_API) {
-    return { ok: true, currentVersion: app.getVersion(), latestVersion: app.getVersion(), available: false, localOnly: true, message: '本机版已固定到本机服务，跳过线上更新检查' }
-  }
-  const manifestUrl = new URL(UPDATE_MANIFEST_URL)
-  manifestUrl.searchParams.set('_letaagent_cache_bust', String(Date.now()))
-  const response = await fetch(manifestUrl, {
-    headers: {
-      Accept: 'application/json',
-      'Cache-Control': 'no-cache, no-store',
-      Pragma: 'no-cache'
-    }
+let desktopUpdater = null
+let updateRendererBusy = false
+
+function getDesktopUpdater() {
+  if (!desktopUpdater) desktopUpdater = new DesktopUpdater({
+    app,
+    manifestUrl: UPDATE_MANIFEST_URL,
+    localOnly: LOCAL_ONLY_API && !process.env.ANYU_UPDATE_MANIFEST_URL,
+    emit: sendUpdateProgress,
+    isBusy: () => updateRendererBusy || Boolean(agentSessionService?.runs.size) || analysisControllers.size > 0,
+    quit: () => { isQuitting = true; app.quit() }
   })
-  const text = await response.text()
-  let manifest
-  try { manifest = text ? JSON.parse(text) : null } catch { throw new Error('更新目录不是有效 JSON') }
-  if (!response.ok) throw new Error(`更新目录不可用 (HTTP ${response.status})`)
-  const artifact = artifactFromManifest(manifest, app.getVersion(), manifestUrl.href)
-  if (new URL(artifact.url).origin !== manifestUrl.origin) throw new Error('更新包地址不属于当前更新源')
-  return { ok: true, currentVersion: app.getVersion(), latestVersion: artifact.version, available: compareVersions(artifact.version, app.getVersion()) > 0, artifact: { name: artifact.name, version: artifact.version, bytes: artifact.bytes, sha256: artifact.sha256, url: artifact.url } }
+  return desktopUpdater
 }
 
-function updaterScriptPath() { return path.join(app.getPath('temp'), `letaagent-updater-${process.pid}-${Date.now()}.ps1`) }
-
-function pendingUpdatePath() { return path.join(app.getPath('userData'), 'pending-update.json') }
-
-function writePendingUpdate(installerPath, expectedVersion) {
-  const markerPath = pendingUpdatePath()
-  fs.mkdirSync(path.dirname(markerPath), { recursive: true })
-  const marker = {
-    status: 'ready',
-    installerPath,
-    expectedVersion: String(expectedVersion || ''),
-    executablePath: app.getPath('exe'),
-    installDirectory: path.dirname(app.getPath('exe')),
-    createdAt: new Date().toISOString()
-  }
-  const temporaryPath = `${markerPath}.${process.pid}.tmp`
-  fs.writeFileSync(temporaryPath, JSON.stringify(marker, null, 2), { encoding: 'utf8', mode: 0o600 })
-  try {
-    fs.renameSync(temporaryPath, markerPath)
-  } catch (error) {
-    if (!['EEXIST', 'EPERM'].includes(error?.code)) throw error
-    fs.rmSync(markerPath, { force: true })
-    fs.renameSync(temporaryPath, markerPath)
-  }
-  return markerPath
-}
-
-function safePendingInstallerPath(installerPath) {
-  const candidate = path.resolve(String(installerPath || ''))
-  const tempRoot = path.resolve(app.getPath('temp')) + path.sep
-  return candidate.startsWith(tempRoot) && /^AnyuAgent-update-[A-Za-z0-9._-]+\.exe$/i.test(path.basename(candidate))
-    ? candidate
-    : ''
-}
-
-function openUpdateInstaller(installerPath, expectedVersion = '') {
-  const candidate = safePendingInstallerPath(installerPath)
-  if (!candidate || !fs.existsSync(candidate) || !fs.statSync(candidate).isFile()) throw new Error('更新安装包不存在，请重新下载')
-  const child = spawn(candidate, [], { detached: true, windowsHide: false, stdio: 'ignore' })
-  child.once('error', (error) => sendUpdateProgress({ phase: 'error', version: expectedVersion, message: `打开更新安装包失败：${error.message || error}` }))
-  child.unref()
-  sendUpdateProgress({ phase: 'ready', version: expectedVersion, percent: 100, message: '安装包已打开，请确认覆盖安装' })
-  return { ok: true, status: 'ready', latestVersion: String(expectedVersion || '') }
-}
-
-function openPendingUpdateInstaller() {
-  const markerPath = pendingUpdatePath()
-  let pending
-  try { pending = JSON.parse(fs.readFileSync(markerPath, 'utf8').replace(/^\uFEFF/, '')) } catch { throw new Error('没有可用的更新安装包，请重新下载') }
-  return openUpdateInstaller(pending?.installerPath, pending?.expectedVersion)
-}
-
-function scheduleWindowsInstall(installerPath, expectedVersion, markerPath = pendingUpdatePath()) {
-  const executablePath = app.getPath('exe')
-  const installDirectory = path.dirname(executablePath)
-  const scriptPath = updaterScriptPath()
-  const logPath = `${scriptPath}.log`
-  const lockPath = `${markerPath}.lock`
-  const script = [
-    'param([int]$ParentPid, [string]$Installer, [string]$Executable, [string]$InstallDirectory, [string]$ExpectedVersion, [string]$Script, [string]$Log, [string]$Marker, [string]$Lock)',
-    "$ErrorActionPreference = 'Stop'",
-    '$success = $false',
-    '$lockStream = $null',
-    '$lockAcquired = $false',
-    'function Set-MarkerStatus([string]$Status, [string]$ErrorMessage) { try { $raw = Get-Content -LiteralPath $Marker -Raw -ErrorAction SilentlyContinue; $data = if ($raw) { $raw | ConvertFrom-Json } else { [pscustomobject]@{} }; $data | Add-Member -NotePropertyName status -NotePropertyValue $Status -Force; $data | Add-Member -NotePropertyName error -NotePropertyValue $ErrorMessage -Force; $data | Add-Member -NotePropertyName logPath -NotePropertyValue $Log -Force; $data | Add-Member -NotePropertyName updatedAt -NotePropertyValue (Get-Date).ToString("o") -Force; $temporaryMarker = "$Marker.$PID.tmp"; $utf8 = New-Object System.Text.UTF8Encoding($false); [IO.File]::WriteAllText($temporaryMarker, ($data | ConvertTo-Json -Depth 8), $utf8); Move-Item -LiteralPath $temporaryMarker -Destination $Marker -Force } catch {} }',
-    'function Write-Log([string]$Message) { try { Add-Content -LiteralPath $Log -Value ("[{0}] {1}" -f (Get-Date -Format o), $Message) -Encoding utf8 } catch {} }',
-    'try {',
-    '  try { $lockStream = [IO.File]::Open($Lock, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None); $lockAcquired = $true } catch { Write-Log "另一个更新器正在运行，退出"; exit 0 }',
-    '  Write-Log "更新器启动，父进程 PID=$ParentPid，安装包=$Installer"',
-    '  $deadline = (Get-Date).AddSeconds(60)',
-    '  while ((Get-Date) -lt $deadline) {',
-    '    $parent = Get-Process -Id $ParentPid -ErrorAction SilentlyContinue',
-    '    if (-not $parent) { break }',
-    '    Start-Sleep -Milliseconds 250',
-    '  }',
-    '  $remaining = Get-Process -Id $ParentPid -ErrorAction SilentlyContinue',
-    '  if ($remaining) { Write-Log "父进程未按时退出，强制结束"; Stop-Process -Id $ParentPid -Force -ErrorAction SilentlyContinue; Start-Sleep -Seconds 2 }',
-    '  if (-not (Test-Path -LiteralPath $Installer -PathType Leaf)) { throw "更新安装包不存在: $Installer" }',
-    '  if (-not (Test-Path -LiteralPath $InstallDirectory -PathType Container)) { throw "安装目录不存在: $InstallDirectory" }',
-    '  $exitCode = 1',
-    '  for ($attempt = 1; $attempt -le 3; $attempt++) {',
-    '    # NSIS requires the quoted /D value when the install directory contains spaces.',
-    '    $installArgument = "/D=`"$InstallDirectory`""',
-    '    $installerArgs = @("/S", "/NCRC", $installArgument)',
-    '    try {',
-    '      $probe = $null',
-    '      $probe = Join-Path $InstallDirectory (".anyu-write-test-" + [guid]::NewGuid().ToString("N"))',
-    '      [IO.File]::WriteAllText($probe, "update")',
-    '      Remove-Item -LiteralPath $probe -Force -ErrorAction SilentlyContinue',
-    '      Write-Log "尝试 $attempt：直接运行安装器"',
-    '      $process = Start-Process -FilePath $Installer -ArgumentList $installerArgs -Wait -PassThru -ErrorAction Stop',
-    '    } catch {',
-    '      if ($probe) { Remove-Item -LiteralPath $probe -Force -ErrorAction SilentlyContinue }',
-    '      Write-Log "直接运行失败，尝试请求管理员权限：$($_.Exception.Message)"',
-    '      $process = Start-Process -FilePath $Installer -ArgumentList $installerArgs -Verb RunAs -Wait -PassThru -ErrorAction Stop',
-    '    }',
-    '    $exitCode = [int]$process.ExitCode',
-    '    Write-Log "安装器退出码=$exitCode"',
-    '    if ($exitCode -ne 0) {',
-    '      try { Write-Log "非零退出码，使用管理员权限重试"; $process = Start-Process -FilePath $Installer -ArgumentList $installerArgs -Verb RunAs -Wait -PassThru -ErrorAction Stop; $exitCode = [int]$process.ExitCode; Write-Log "管理员重试退出码=$exitCode" } catch { Write-Log "管理员重试失败：$($_.Exception.Message)" }',
-    '    }',
-    '    if ($exitCode -eq 0) { break }',
-    '    Start-Sleep -Seconds 2',
-    '  }',
-    '  if ($exitCode -ne 0) { throw "安装器退出码: $exitCode" }',
-    '  $target = $Executable',
-    '  $ready = $false',
-    '  for ($i = 0; $i -lt 40; $i++) {',
-    '    if (Test-Path -LiteralPath $target -PathType Leaf) { $ready = $true; break }',
-    '    Start-Sleep -Milliseconds 500',
-    '  }',
-    '  if (-not $ready) { throw "安装完成后找不到客户端: $target" }',
-    '  $installedVersion = [string](Get-Item -LiteralPath $target).VersionInfo.ProductVersion',
-    '  Write-Log "安装后版本=$installedVersion"',
-    '  if ($ExpectedVersion -and (-not $installedVersion -or -not $installedVersion.StartsWith($ExpectedVersion, [StringComparison]::OrdinalIgnoreCase))) { throw "安装版本校验失败: 期望 $ExpectedVersion，实际 $installedVersion" }',
-    '  $started = $false',
-    '  for ($launchAttempt = 1; $launchAttempt -le 3; $launchAttempt++) {',
-    '    Write-Log "尝试启动客户端 $launchAttempt"',
-    '    $client = Start-Process -FilePath $target -WorkingDirectory (Split-Path -Parent $target) -PassThru -ErrorAction SilentlyContinue',
-    '    if ($client) { Start-Sleep -Seconds 5; $running = Get-Process -Id $client.Id -ErrorAction SilentlyContinue; if ($running -and -not $running.HasExited) { $started = $true; break } }',
-    '    Start-Sleep -Seconds 1',
-    '  }',
-    '  if (-not $started) { throw "客户端重启失败: $target" }',
-    '  Write-Log "客户端已启动，更新成功"',
-    '  $success = $true',
-  '} catch {',
-    '  $failure = $_.Exception.Message',
-    '  Write-Log "更新失败：$failure"',
-    '  Set-MarkerStatus "failed" $failure',
-    '  exit 1',
-    '} finally {',
-    '  if ($lockStream) { try { $lockStream.Dispose() } catch {} }',
-    '  if ($success) {',
-    '    Remove-Item -LiteralPath $Installer -Force -ErrorAction SilentlyContinue',
-    '    Remove-Item -LiteralPath $Marker -Force -ErrorAction SilentlyContinue',
-    '  }',
-    '  if ($lockAcquired) { Remove-Item -LiteralPath $Lock -Force -ErrorAction SilentlyContinue }',
-    '  if ($lockAcquired) { Remove-Item -LiteralPath $Script -Force -ErrorAction SilentlyContinue }',
-    '}'
-  ].join('\r\n') + '\r\n'
-  // 必须写入 UTF-8 BOM：Windows PowerShell 5.1 对无 BOM 文件按 ANSI(GBK) 解析，
-  // 脚本里的中文字符串会被错位切分导致引号失配 → 脚本解析失败且一个字都不执行
-  // （表现为"更新调度后安装器静默消失"）。
-  fs.writeFileSync(scriptPath, '\uFEFF' + script, { encoding: 'utf8', mode: 0o600 })
-  const { spawn: spawnChild } = require('child_process')
-  const powershell = process.env.SystemRoot ? path.join(process.env.SystemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe') : 'powershell.exe'
-  const args = ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', scriptPath, '-ParentPid', String(process.pid), '-Installer', installerPath, '-Executable', executablePath, '-InstallDirectory', installDirectory, '-ExpectedVersion', String(expectedVersion || ''), '-Script', scriptPath, '-Log', logPath, '-Marker', markerPath, '-Lock', lockPath]
-  const child = spawnChild(powershell, args, { detached: true, windowsHide: true, stdio: 'ignore' })
-  child.once('error', (error) => {
-    try { fs.appendFileSync(logPath, `更新器启动失败: ${error.message}\r\n`, { encoding: 'utf8' }) } catch {}
-    try {
-      const marker = JSON.parse(fs.readFileSync(markerPath, 'utf8'))
-      marker.status = 'failed'; marker.error = `更新器启动失败: ${error.message}`; marker.logPath = logPath; marker.updatedAt = new Date().toISOString()
-      fs.writeFileSync(markerPath, JSON.stringify(marker, null, 2), { encoding: 'utf8', mode: 0o600 })
-    } catch {}
-  })
-  child.unref()
-  return { scriptPath, logPath, executablePath, markerPath, lockPath }
-}
-
-function recoverPendingUpdate() {
-  if (process.platform !== 'win32' || !app.isPackaged) return false
-  const markerPath = pendingUpdatePath()
-  let pending
-  try { pending = JSON.parse(fs.readFileSync(markerPath, 'utf8').replace(/^\uFEFF/, '')) } catch { return false }
-  if (pending?.status === 'failed') {
-    recoveredUpdateState = { status: 'error', message: String(pending.error || '上次自动更新失败'), logPath: String(pending.logPath || '') }
-    return false
-  }
-  const installerPath = String(pending?.installerPath || '')
-  const expectedVersion = String(pending?.expectedVersion || '')
-  if (expectedVersion && compareVersions(app.getVersion(), expectedVersion) >= 0) {
-    const safeInstallerPath = safePendingInstallerPath(installerPath)
-    try { fs.rmSync(markerPath, { force: true }); if (safeInstallerPath) fs.rmSync(safeInstallerPath, { force: true }) } catch {}
-    return false
-  }
-  const safeInstallerPath = safePendingInstallerPath(installerPath)
-  if (!safeInstallerPath || !fs.existsSync(safeInstallerPath)) {
-    try { fs.rmSync(markerPath, { force: true }) } catch {}
-    return false
-  }
-  // 更新包已经下载好时只恢复“待用户确认安装”状态，绝不静默执行或退出当前客户端。
-  recoveredUpdateState = {
-    status: 'ready',
-    latestVersion: expectedVersion,
-    message: '更新安装包已下载，点击左下角按钮打开并确认覆盖安装',
-    installerPath: safeInstallerPath
-  }
-  return false
-}
-
-function getUpdateState() {
-  return recoveredUpdateState ? { ...recoveredUpdateState } : { status: 'idle', message: '' }
-}
-
-async function downloadAndInstallUpdate() {
-  if (updateInProgress) throw new Error('更新正在进行中')
-  updateInProgress = true
-  let installerPath = ''
-  let markerPath = ''
-  try {
-    const info = await checkForUpdate()
-    if (!info.available) return { ...info, status: 'latest' }
-    if (process.platform !== 'win32') throw new Error('当前自动安装仅支持 Windows')
-    if (!app.isPackaged) throw new Error('开发模式不能自动安装更新，请使用已安装的 AnyuAgent')
-    const tempName = `AnyuAgent-update-${info.latestVersion}-${Date.now()}.exe`
-    installerPath = path.join(app.getPath('temp'), tempName)
-    sendUpdateProgress({ phase: 'downloading', version: info.latestVersion, loaded: 0, total: info.artifact.bytes, percent: 0 })
-    const response = await fetch(info.artifact.url, { headers: { Accept: 'application/octet-stream' } })
-    if (!response.ok || !response.body) throw new Error(`更新包下载失败 (HTTP ${response.status})`)
-    const file = await fs.promises.open(installerPath, 'wx', 0o700)
-    const hash = crypto.createHash('sha256')
-    let loaded = 0
-    try {
-      for await (const chunk of response.body) {
-        const buffer = Buffer.from(chunk)
-        await file.write(buffer)
-        hash.update(buffer)
-        loaded += buffer.length
-        sendUpdateProgress({ phase: 'downloading', version: info.latestVersion, loaded, total: info.artifact.bytes, percent: Math.min(100, Math.round(loaded / info.artifact.bytes * 100)) })
-      }
-      await file.sync()
-    } finally {
-      await file.close()
-    }
-    const actualSha256 = hash.digest('hex')
-    if (loaded !== info.artifact.bytes) throw new Error(`更新包大小校验失败（期望 ${info.artifact.bytes}，实际 ${loaded}）`)
-    if (actualSha256 !== info.artifact.sha256.toLowerCase()) throw new Error('更新包 SHA-256 校验失败')
-    markerPath = writePendingUpdate(installerPath, info.latestVersion)
-    // Do not stop Pi, quit Electron, or run NSIS silently. The visible installer
-    // lets the user choose the overwrite directory and close AnyuAgent at the
-    // appropriate time, avoiding a half-replaced desktop installation.
-    const opened = openUpdateInstaller(installerPath, info.latestVersion)
-    return { ...info, ...opened, status: 'ready', installerReady: true }
-  } catch (error) {
-    if (installerPath) { try { fs.rmSync(installerPath, { force: true }) } catch {} }
-    if (markerPath) { try { fs.rmSync(markerPath, { force: true }) } catch {} }
-    sendUpdateProgress({ phase: 'error', message: error.message || '自动更新失败' })
-    throw error
-  } finally {
-    updateInProgress = false
-  }
-}
+async function checkForUpdate() { return getDesktopUpdater().check() }
+async function downloadAndInstallUpdate() { return getDesktopUpdater().install() }
+function getUpdateState() { return { ...getDesktopUpdater().state } }
 
 function authFile() { return path.join(app.getPath('userData'), 'anyu-auth.json') }
 function protect(value) {
@@ -3058,6 +2809,7 @@ function createWindow() {
   if (process.platform === 'win32') mainWindow.setAppDetails({ appId: DESKTOP_APP_ID, appIconPath: path.join(__dirname, 'branding', 'anyu.ico'), appIconIndex: 0, relaunchDisplayName: 'AnyuAgent' })
   applyRoundedWindowShape(mainWindow)
   mainWindow.once('ready-to-show', () => applyRoundedWindowShape(mainWindow))
+  mainWindow.webContents.once('did-finish-load', () => getDesktopUpdater().acknowledgeLaunch())
   mainWindow.on('resize', () => scheduleRoundedWindowShape(mainWindow))
   mainWindow.on('maximize', () => applyRoundedWindowShape(mainWindow))
   mainWindow.on('unmaximize', () => scheduleRoundedWindowShape(mainWindow))
@@ -3260,7 +3012,7 @@ app.whenReady().then(async () => {
   // 先读取上次提权流程留下的意图：被提权重启后，本次启动要据此恢复完整访问，
   // 并让界面直接反映"已生效"，而不是等用户再手动点一次。
   pendingElevationIntent = readElevationIntent(app.getPath('userData'))
-  if (recoverPendingUpdate()) return
+  getDesktopUpdater().recover()
   loadAuth()
   agentWorkbench = new AgentWorkbench({
     directory: app.getPath('userData'), encrypt: protect, decrypt: unprotect,
@@ -3880,7 +3632,11 @@ app.whenReady().then(async () => {
   })
   ipcMain.handle('update:state', () => getUpdateState())
   ipcMain.handle('update:download-install', async () => downloadAndInstallUpdate())
-  ipcMain.handle('update:open-installer', () => openPendingUpdateInstaller())
+  ipcMain.handle('update:open-installer', () => downloadAndInstallUpdate())
+  ipcMain.handle('update:cancel', () => getDesktopUpdater().cancel())
+  ipcMain.on('update:activity', (event, busy) => {
+    if (event.sender === mainWindow?.webContents) updateRendererBusy = Boolean(busy)
+  })
   ipcMain.handle('app:open-external', (_, url) => { if (/^https?:/i.test(url)) return shell.openExternal(url) })
   ipcMain.handle('app:open-file', async (_, payload = {}) => {
     const requested = String(payload.path || '').trim()
