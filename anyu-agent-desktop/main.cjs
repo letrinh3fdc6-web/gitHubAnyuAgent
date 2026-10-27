@@ -11,12 +11,13 @@ const fs = require('fs')
 const path = require('path')
 const os = require('os')
 const crypto = require('crypto')
+const skillStore = require('./skill-store.cjs')
 const dns = require('node:dns')
 const net = require('node:net')
 const http = require('node:http')
 const { Agent: UndiciAgent } = require('undici')
 const QRCode = require('qrcode')
-const { normalizeBrowserBounds } = require('./browser-layout.cjs')
+const { normalizeBrowserBounds, calculateBrowserFitZoom } = require('./browser-layout.cjs')
 const { RENDERER_ORIGIN, RENDERER_SCHEME, createRendererHandler } = require('./renderer-protocol.cjs')
 const { allowedBrowserUrl, workspaceFile } = require('./browser-policy.cjs')
 const { LocalFeedback, feedbackUrl } = require('./local-feedback.cjs')
@@ -209,6 +210,7 @@ function writeAgentPermissionMode(mode) {
 }
 
 const executionBroker = new ExecutionBroker({ app, executable: () => piExecutable() })
+const codexExecutionBroker = new ExecutionBroker({ app, executable: () => process.execPath })
 
 // 读取当前进程的系统授权状态；系统权限只能由 Windows/macOS 自己授予。
 //
@@ -238,7 +240,7 @@ function systemAccessState() {
   // "没提权"和"提权了但系统没给权限"这两种完全不同的失败原因。
   const launchedElevated = isElevatedLaunch()
   if (platform === 'win32') {
-    const worker = executionBroker.state()
+    const worker = codexExecutionBroker.state().ready ? codexExecutionBroker.state() : executionBroker.state()
     return { platform, elevated, administrator: elevated, executionAdministrator: elevated || worker.ready, executionHost: elevated ? 'main' : worker.ready ? 'worker' : 'standard', executionPid: worker.pid, uacAvailable: true, canRequestElevation: !elevated && !worker.ready, fullDiskAccess: null, launchedElevated }
   }
   if (platform === 'darwin') {
@@ -251,7 +253,7 @@ async function requestSystemElevation(payload = {}) {
   if (process.platform === 'win32') {
     if (isWindowsAdministrator()) return { ok: true, restarted: false, state: systemAccessState() }
     try {
-      await executionBroker.ensure()
+      await codexExecutionBroker.ensure()
       return { ok: true, restarted: false, state: systemAccessState() }
     } catch (error) {
       return { ok: false, code: error.code || 'ELEVATION_FAILED', cancelled: error.cancelled === true, message: error.message, state: systemAccessState() }
@@ -354,8 +356,11 @@ function startWindowsShellBootstrap() {
 let tray = null
 let isQuitting = false
 let browserView = null
-let browserState = { open: false, url: '', title: '', loading: false, error: '', canGoBack: false, canGoForward: false, zoomFactor: 1 }
+let browserState = { open: false, url: '', title: '', loading: false, error: '', canGoBack: false, canGoForward: false, zoomFactor: 1, zoomMode: 'fit-width' }
 let reportedBrowserBounds = null
+let browserFitTimer = null
+let browserFitEpoch = 0
+let browserFitNeedsReset = false
 let previewRoot = ''
 let browserBridge = null
 let browserBridgeToken = ''
@@ -364,6 +369,7 @@ let previewProtocolRegistered = false
 let browserHistoryTransition = false
 let auth = null
 let authRefreshPromise = null
+let authGeneration = 0
 // 本次启动读到的提权意图。只要它还在，Pi 启动就必须保证权限模式落地；
 // 渲染进程确认生效（或用户主动改成别的模式）后才清除。
 let pendingElevationIntent = null
@@ -563,19 +569,95 @@ function setBrowserBounds(reportedBounds = reportedBrowserBounds) {
   const bounds = browserBounds()
   if (!bounds) {
     browserView.setVisible(false)
+    clearTimeout(browserFitTimer)
+    browserFitTimer = null
+    browserFitEpoch++
     return
   }
+  const previous = browserView.getBounds()
+  const wasVisible = browserView.getVisible()
   browserView.setBounds(bounds)
   browserView.setVisible(true)
+  if (!wasVisible || (browserState.zoomFactor < 0.25 && (previous.width !== bounds.width || previous.height !== bounds.height))) applyNativeBrowserZoom(browserView, browserState.zoomFactor, bounds)
+  if (previous.width !== bounds.width || previous.height !== bounds.height) scheduleBrowserFit(true)
+  else if (!browserFitTimer) scheduleBrowserFit()
 }
 
 function setBrowserZoomFactor(value = 1) {
   const parsed = Number(value)
-  const zoomFactor = Number.isFinite(parsed) ? Math.min(2, Math.max(0.5, parsed)) : 1
-  browserState = { ...browserState, zoomFactor }
-  if (browserView && !browserView.webContents.isDestroyed()) browserView.webContents.setZoomFactor(zoomFactor)
+  const zoomFactor = Number.isFinite(parsed) ? Math.min(2, Math.max(0.01, parsed)) : 1
+  clearTimeout(browserFitTimer)
+  browserFitTimer = null
+  browserFitEpoch++
+  browserFitNeedsReset = false
+  browserState = { ...browserState, zoomFactor, zoomMode: 'manual' }
+  if (browserView && !browserView.webContents.isDestroyed()) applyNativeBrowserZoom(browserView, zoomFactor)
   sendBrowserState()
   return { ...browserState }
+}
+
+function applyNativeBrowserZoom(view, factor, bounds = browserBounds()) {
+  if (factor < 0.25 && bounds) {
+    // Chromium clamps normal page zoom at 25%; device emulation also fits tall pages below it.
+    view.webContents.setZoomFactor(1)
+    view.webContents.enableDeviceEmulation({ screenPosition: 'desktop', deviceScaleFactor: 0,
+      viewSize: { width: Math.ceil(bounds.width / factor), height: Math.ceil(bounds.height / factor) }, scale: factor })
+  } else {
+    view.webContents.disableDeviceEmulation()
+    view.webContents.setZoomFactor(factor)
+  }
+}
+
+function setBrowserZoomMode(mode) {
+  if (!['fit-width', 'fit-page', 'manual'].includes(mode)) throw new Error('无效的浏览器缩放模式')
+  browserFitEpoch++
+  clearTimeout(browserFitTimer)
+  browserFitTimer = null
+  browserState = { ...browserState, zoomMode: mode }
+  sendBrowserState()
+  if (mode !== 'manual') scheduleBrowserFit(true, 0)
+  return { ...browserState }
+}
+
+function scheduleBrowserFit(reset = false, delay = 100) {
+  if (browserState.zoomMode === 'manual' || !browserBounds() || !browserView || browserView.webContents.isDestroyed()) return
+  if (reset) { browserFitEpoch++; browserFitNeedsReset = true }
+  clearTimeout(browserFitTimer)
+  browserFitTimer = setTimeout(() => { browserFitTimer = null; void fitBrowserContent() }, delay)
+  browserFitTimer.unref?.()
+}
+
+async function fitBrowserContent() {
+  const view = browserView
+  const bounds = browserBounds()
+  const epoch = browserFitEpoch
+  const mode = browserState.zoomMode
+  if (!view || view.webContents.isDestroyed() || !bounds || mode === 'manual') return
+  try {
+    const reset = browserFitNeedsReset
+    if (reset) { browserFitNeedsReset = false; applyNativeBrowserZoom(view, 1) }
+    // Only dimensions cross from the sandboxed page; page scripts cannot call host APIs.
+    const content = await view.webContents.executeJavaScriptInIsolatedWorld(1001, [{ code: `(() => {
+      const measure = () => {
+        const root = document.documentElement, body = document.body;
+        return { width: Math.max(root?.scrollWidth || 0, body?.scrollWidth || 0),
+          height: Math.max(root?.scrollHeight || 0, body?.scrollHeight || 0),
+          viewportWidth: root?.clientWidth || innerWidth, viewportHeight: innerHeight };
+      };
+      return ${reset} ? new Promise(resolve => requestAnimationFrame(() => resolve(measure()))) : measure();
+    })()` }])
+    if (epoch !== browserFitEpoch || view !== browserView || view.webContents.isDestroyed() || !browserBounds()) return
+    const currentZoom = reset ? 1 : browserState.zoomFactor
+    const factor = calculateBrowserFitZoom(bounds, content, mode, currentZoom)
+    if (reset || Math.abs(factor - browserState.zoomFactor) > 1e-8) applyNativeBrowserZoom(view, factor, bounds)
+    if (Math.abs(factor - browserState.zoomFactor) > 1e-8) {
+      browserState = { ...browserState, zoomFactor: factor }
+      sendBrowserState()
+    }
+  } catch { /* Navigation may replace the document while dimensions are being read. */ }
+  finally {
+    if (epoch === browserFitEpoch) scheduleBrowserFit(false, 1000)
+  }
 }
 
 function isAllowedBrowserUrl(value) {
@@ -650,8 +732,9 @@ function ensureBrowserView() {
     if (!browserState.url.startsWith('artifact://') && isAllowedBrowserUrl(url)) void openBrowserUrl(url).catch(() => {})
     return { action: 'deny' }
   })
-  browserView.webContents.on('did-start-loading', () => { browserState = { ...browserState, loading: true, error: '' }; sendBrowserState() })
-  browserView.webContents.on('did-stop-loading', () => { browserState = { ...browserState, loading: false, title: browserView.webContents.getTitle() || browserState.title }; sendBrowserState() })
+  browserView.webContents.on('did-start-loading', () => { browserFitEpoch++; clearTimeout(browserFitTimer); browserFitTimer = null; browserState = { ...browserState, loading: true, error: '' }; sendBrowserState() })
+  browserView.webContents.on('dom-ready', () => scheduleBrowserFit(true))
+  browserView.webContents.on('did-stop-loading', () => { browserState = { ...browserState, loading: false, title: browserView.webContents.getTitle() || browserState.title }; sendBrowserState(); scheduleBrowserFit(true) })
   browserView.webContents.on('page-title-updated', (_, title) => { browserState = { ...browserState, title: String(title || '') }; sendBrowserState() })
   browserView.webContents.on('will-navigate', (event, url) => {
     const preview = url.startsWith('leta-preview://workspace/')
@@ -832,13 +915,17 @@ async function openWorkspacePath(payload = {}) {
 }
 
 function closeBrowserView() {
+  clearTimeout(browserFitTimer)
+  browserFitTimer = null
+  browserFitEpoch++
+  browserFitNeedsReset = false
   localFeedback?.cancel()
   localDetail?.cancel()
   if (browserView && mainWindow && !mainWindow.isDestroyed()) mainWindow.contentView.removeChildView(browserView)
   if (browserView && !browserView.webContents.isDestroyed()) browserView.webContents.close()
   browserView = null
   previewRoot = ''
-  browserState = { open: false, url: '', title: '', loading: false, error: '', canGoBack: false, canGoForward: false, zoomFactor: 1 }
+  browserState = { open: false, url: '', title: '', loading: false, error: '', canGoBack: false, canGoForward: false, zoomFactor: 1, zoomMode: 'fit-width' }
   reportedBrowserBounds = null
   sendBrowserState()
   return { ...browserState }
@@ -1124,18 +1211,25 @@ function unprotect(value) {
 function loadAuth() {
   try {
     const raw = JSON.parse(fs.readFileSync(authFile(), 'utf8'))
+    if (raw.apiBase && raw.apiBase !== GATEWAY_BASE) { auth = null; return }
     auth = { accessToken: unprotect(raw.accessToken), refreshToken: unprotect(raw.refreshToken), aiHubAccessToken: unprotect(raw.aiHubAccessToken), user: raw.user || null }
-    if (!auth.accessToken) auth = null
+    if (!auth.accessToken && !auth.refreshToken) auth = null
   } catch { auth = null }
 }
 function saveAuth(data) {
+  if (data.accessToken !== auth?.accessToken || data.refreshToken !== auth?.refreshToken) authGeneration++
   auth = data
-  const out = { accessToken: protect(data.accessToken), refreshToken: protect(data.refreshToken), aiHubAccessToken: protect(data.aiHubAccessToken), user: data.user || null }
+  const out = { apiBase: GATEWAY_BASE, accessToken: protect(data.accessToken), refreshToken: protect(data.refreshToken), aiHubAccessToken: protect(data.aiHubAccessToken), user: data.user || null }
   fs.mkdirSync(path.dirname(authFile()), { recursive: true })
-  fs.writeFileSync(authFile(), JSON.stringify(out), { mode: 0o600 })
+  const temporary = `${authFile()}.${process.pid}.tmp`
+  try {
+    fs.writeFileSync(temporary, JSON.stringify(out), { mode: 0o600 })
+    fs.renameSync(temporary, authFile())
+  } finally { try { fs.rmSync(temporary, { force: true }) } catch {} }
 }
 
 function clearAuth() {
+	authGeneration++
 	auth = null
 	try { fs.rmSync(authFile(), { force: true }) } catch {}
 }
@@ -1143,13 +1237,54 @@ function clearAuth() {
 async function refreshAuthAccessToken() {
   if (!auth?.refreshToken) return ''
   if (authRefreshPromise) return authRefreshPromise
+  const generation = authGeneration
+  const refreshToken = auth.refreshToken
   authRefreshPromise = (async () => {
-    const refreshed = await requestApi('/auth/refresh', { method: 'POST', body: { refresh_token: auth.refreshToken } }, false)
-    if (!refreshed?.access_token) throw new Error('登录状态刷新失败')
-    saveAuth({ ...auth, accessToken: refreshed.access_token, refreshToken: refreshed.refresh_token || auth.refreshToken })
-    return auth.accessToken
+    try {
+      const refreshed = await requestApi('/auth/refresh', { method: 'POST', body: { refresh_token: refreshToken } }, false)
+      if (generation !== authGeneration) throw Object.assign(new Error('登录状态已改变，请重试'), { status: 409, code: 'AUTH_SESSION_CHANGED' })
+      if (!refreshed?.access_token) throw new Error('登录状态刷新失败')
+      saveAuth({ ...auth, accessToken: refreshed.access_token, refreshToken: refreshed.refresh_token || refreshToken })
+      return auth.accessToken
+    } catch (error) {
+      // Offline startup and gateway failures must not erase a remembered login.
+      if (generation === authGeneration && [401, 403].includes(Number(error.status))) clearAuth()
+      throw error
+    }
   })()
   try { return await authRefreshPromise } finally { authRefreshPromise = null }
+}
+
+function authTokenExpiresAt() {
+  try {
+    const claims = JSON.parse(Buffer.from(auth.accessToken.split('.')[1], 'base64url').toString('utf8'))
+    return Number.isFinite(claims.exp) && claims.exp > 0 ? claims.exp * 1000 : null
+  } catch { return null }
+}
+
+function desktopAuthSnapshot(error) {
+  return {
+    authenticated: Boolean(auth?.accessToken && auth?.user),
+    ...(auth ? { accessToken: auth.accessToken, refreshToken: auth.refreshToken, user: auth.user, expiresAt: authTokenExpiresAt() } : {}),
+    ...(error ? { error: { status: Number(error.status) || 0, code: error.code || '', message: error.message || '登录恢复失败' } } : {}),
+  }
+}
+
+async function restoreDesktopAuth(refresh = false) {
+  if (!auth?.accessToken && !auth?.refreshToken) return desktopAuthSnapshot()
+  const generation = authGeneration
+  try {
+    const expiresAt = authTokenExpiresAt()
+    if (refresh || !auth.accessToken || (expiresAt !== null && expiresAt <= Date.now() + 30000)) await refreshAuthAccessToken()
+    if (auth && !auth.user) {
+      const user = await requestApi('/auth/me', {}, false)
+      saveAuth({ ...auth, user: user.user || user })
+    }
+    return desktopAuthSnapshot()
+  } catch (error) {
+    if (auth && generation !== authGeneration) return desktopAuthSnapshot()
+    return desktopAuthSnapshot(error)
+  }
 }
 
 function piAgentDir() { return path.join(app.getPath('userData'), 'pi') }
@@ -1226,6 +1361,10 @@ function forkPiSession(payload = {}) {
   const target = path.join(path.dirname(source), `${stamp}Z_${sessionId}.jsonl`)
   if (fs.existsSync(target)) throw new Error('分叉目标文件已存在，请重试')
   const nextHeader = { ...header, id: sessionId, timestamp: new Date().toISOString() }
+  if (header.engine === 'codex') {
+    nextHeader.forkThreadId = header.threadId || header.forkThreadId
+    delete nextHeader.threadId
+  }
   fs.mkdirSync(path.dirname(target), { recursive: true })
   fs.writeFileSync(target, [JSON.stringify(nextHeader), ...lines.slice(1)].join('\n') + '\n', { mode: 0o600 })
   cloneSessionSidecars(source, target)
@@ -1770,6 +1909,23 @@ async function stopPiRuntime(runtime) {
   runtime.child = null
   for (const id of [...runtime.pending.keys()]) settlePiRequest(runtime, id, new Error('Pi process stopped'))
   if (!child) return
+  if (runtime.engine === 'codex') {
+    try { child.stdin?.end() } catch {}
+    await new Promise(resolve => {
+      if (child.exitCode !== null || child.signalCode) return resolve()
+      const timer = setTimeout(resolve, 6000)
+      child.once('exit', () => { clearTimeout(timer); resolve() })
+    })
+    if (child.exitCode === null && !child.signalCode) {
+      if (process.platform === 'win32' && !child.elevatedExecution && child.pid) {
+        await new Promise(resolve => execFile('taskkill.exe', ['/PID', String(child.pid), '/T', '/F'], { windowsHide: true, timeout: 3500 }, () => resolve()))
+      } else if (process.platform !== 'win32' && child.pid) {
+        try { process.kill(-child.pid, 'SIGKILL') } catch {}
+      }
+      try { child.kill('SIGKILL') } catch {}
+    }
+    return
+  }
   if (runtime.startOptions?.orchestration && runtime.inFlightPrompt && child.pid) {
     // Escalation is restricted to this owned agent's process tree.
     if (process.platform === 'win32' && !child.elevatedExecution) {
@@ -1805,6 +1961,7 @@ async function stopPi() {
     gatewayBridge.stop()
   ])
   await executionBroker.close()
+  await codexExecutionBroker.close()
 }
 
 async function stopBrowserBridge() {
@@ -1891,7 +2048,7 @@ function sendPi(command, runtimeArg = null) {
   // client-side timeout here can report a false failure while the task is still
   // running. They remain pending until Pi acknowledges them or the process exits.
   // 异步任务提交只等待 Pi 的接收确认，不能因长输出超过客户端等待时间而误报失败。
-  const timeoutMs = ['prompt', 'steer', 'follow_up', 'compact'].includes(command.type) ? 0 : 15000
+  const timeoutMs = ['prompt', 'steer', 'follow_up', 'compact'].includes(command.type) ? 0 : command.type === 'initialize_runtime' ? 60000 : 15000
   if (timeoutMs === 0) runtime.inFlightPrompt = true
   return new Promise((resolve, reject) => {
     const timer = timeoutMs > 0
@@ -1927,6 +2084,12 @@ async function startPiUnsafe(options = {}) {
   const executable = piExecutable()
   if (!fs.existsSync(executable)) throw new Error(`Pi 运行时不存在：${executable}`)
   const requestedSession = options.sessionPath && isInside(piSessionDir(), options.sessionPath) ? path.resolve(options.sessionPath) : ''
+  let savedEngine = null
+  if (requestedSession && fs.existsSync(requestedSession)) {
+    try { savedEngine = JSON.parse(fs.readFileSync(requestedSession, 'utf8').split(/\r?\n/)[0]) } catch {}
+  }
+  const useCodex = savedEngine?.engine === 'codex' || Boolean(options.agentSessionId && !requestedSession)
+  const runtimeBroker = useCodex ? codexExecutionBroker : executionBroker
   const key = requestedSession || `anon:${crypto.randomUUID()}`
   const existing = piRuntimes.get(key)
   if (existing?.compacting) throw new Error('当前会话正在压缩，请等待完成')
@@ -1934,7 +2097,7 @@ async function startPiUnsafe(options = {}) {
   const contextPreferences = contextSettings.get()
   const contextModel = (options.models || []).find(model => String(model.id || model.name || '') === String(options.model || '')) || options.models?.[0] || {}
   const contextCwd = (requestedSession && sessionWorkingDirectory(requestedSession)) || options.cwd || app.getPath('home')
-  const contextPolicy = contextSettings.policy(contextModel, contextCwd, contextPreferences)
+  const contextPolicy = { ...contextSettings.policy(contextModel, contextCwd, contextPreferences), engine: useCodex ? 'codex' : 'pi' }
   const contextSignature = JSON.stringify(contextPolicy)
   options = { ...options, models: (options.models || []).map(model => contextSettings.model(model, contextPreferences)) }
   if (existing && existing.contextSignature !== contextSignature) {
@@ -1949,7 +2112,7 @@ async function startPiUnsafe(options = {}) {
   }
   const permissionChanged = existing && existing.permissionMode !== resolvedPermissionMode
   if (permissionChanged && existing.inFlightPrompt) throw new Error('当前任务仍在运行，请停止或完成任务后应用新的权限。')
-  if (resolvedPermissionMode === 'full' && process.platform === 'win32' && !isWindowsAdministrator()) await executionBroker.ensure()
+  if (resolvedPermissionMode === 'full' && process.platform === 'win32' && !isWindowsAdministrator()) await runtimeBroker.ensure()
   if (existing?.child && existing.child.exitCode === null && existing.child.signalCode === null && !options.force && !permissionChanged) {
     // 同会话复用现有进程：切换会话因此不再中止正在运行的任务。
     existing.lastUsedAt = Date.now()
@@ -1987,7 +2150,8 @@ async function startPiUnsafe(options = {}) {
   fs.mkdirSync(agentDir, { recursive: true })
   contextSettings.prepare(agentDir, piAgentDir(), contextPolicy)
   const gatewayContext = managed ? crypto.randomUUID() : ''
-  fs.writeFileSync(path.join(agentDir, 'models.json'), JSON.stringify(modelConfig(options.models, { managed, bridgeOrigin, gatewayContext }), null, 2), { mode: 0o600 })
+  const configuredModels = modelConfig(options.models, { managed, bridgeOrigin, gatewayContext })
+  fs.writeFileSync(path.join(agentDir, 'models.json'), JSON.stringify(configuredModels, null, 2), { mode: 0o600 })
   const selectedModel = (Array.isArray(options.models) ? options.models : []).find((model) => String(model?.id || model?.name || '') === String(options.model || '')) || options.models?.[0] || {}
   const selectedModelId = String(selectedModel?.modelId || selectedModel?.model_id || selectedModel?.id || 'gpt-4o-mini').replace(/^models\//, '').trim()
   const selectedGroupId = Number(selectedModel?.groupId || selectedModel?.group_id || 0)
@@ -2038,7 +2202,7 @@ async function startPiUnsafe(options = {}) {
     if (!fs.existsSync(orchestrationExtension)) throw new Error('缺少多代理扩展，请更新桌面客户端')
     args.push('--extension', orchestrationExtension)
   }
-  const runtime = { key, gatewayContext, contextPolicy, contextSignature, buffer: '', pending: new Map(), counter: 0, child: null, inFlightPrompt: false, lastUsedAt: Date.now(), lastEventAt: 0, cwd, permissionMode: resolvedPermissionMode }
+  const runtime = { key, engine: useCodex ? 'codex' : 'pi', gatewayContext, contextPolicy, contextSignature, buffer: '', pending: new Map(), counter: 0, child: null, inFlightPrompt: false, lastUsedAt: Date.now(), lastEventAt: 0, cwd, permissionMode: resolvedPermissionMode }
   let startupStderr = ''
   let stateResponse = null
   try {
@@ -2047,7 +2211,7 @@ async function startPiUnsafe(options = {}) {
     cwd,
     env: { ...dependencyEnvironment(shellEnvironment(process.env)), PI_CODING_AGENT_DIR: agentDir, PI_CODING_AGENT_SESSION_DIR: sessionDir, ANYU_API_KEY: credential, ANYU_PERMISSION_PROFILE: resolvedPermissionMode === 'full' && !options.readOnly ? 'gptFullAccess' : '', ANYU_PERMISSION_MODE: resolvedPermissionMode, PI_SKIP_VERSION_CHECK: '1', LETA_BROWSER_BRIDGE_PORT: options.readOnly ? '' : String(browserBridgeConfig.port), LETA_BROWSER_BRIDGE_TOKEN: options.readOnly ? '' : browserBridgeConfig.token, ANYU_AGENT_BRIDGE_PORT: String(options.orchestration?.port || ''), ANYU_AGENT_BRIDGE_TOKEN: options.orchestration?.token || '', ANYU_AGENT_ROLE: options.agentRole || '', ANYU_AGENT_READ_ONLY: options.readOnly ? '1' : '' },
     stdio: ['pipe', 'pipe', 'pipe'],
-    detached: Boolean(options.orchestration && process.platform !== 'win32'),
+    detached: Boolean((useCodex || options.orchestration) && process.platform !== 'win32'),
     windowsHide: true
   }
   if (options.agentSessionId && agentWorkbench) {
@@ -2055,9 +2219,11 @@ async function startPiUnsafe(options = {}) {
     launchOptions.env.ANYU_TASK_PORT = String(context.port)
     launchOptions.env.ANYU_TASK_TOKEN = context.token
   }
+  const runtimeArgs = useCodex ? [externalProcessPath('codex-worker.cjs')] : args
+  if (useCodex) launchOptions.env.ELECTRON_RUN_AS_NODE = '1'
   runtime.child = resolvedPermissionMode === 'full' && process.platform === 'win32' && !isWindowsAdministrator()
-    ? executionBroker.spawn(args, launchOptions)
-    : spawn(executable, args, launchOptions)
+    ? runtimeBroker.spawn(runtimeArgs, launchOptions)
+    : spawn(useCodex ? process.execPath : executable, runtimeArgs, launchOptions)
   const child = runtime.child
   child.stdout.setEncoding('utf8')
   child.stderr.setEncoding('utf8')
@@ -2095,7 +2261,18 @@ async function startPiUnsafe(options = {}) {
     }
     setTimeout(check, 120)
   })
-  stateResponse = await sendPi({ type: 'get_state' }, runtime)
+  if (useCodex) {
+    const configured = configuredModels.providers[provider]?.models.find(model => model.id === selectedModelId)
+    if (!configured) throw new Error('所选模型没有可用的运行时配置，请刷新模型目录')
+    const home = savedEngine?.home && isInside(piAgentDir(), savedEngine.home) ? savedEngine.home : path.join(agentDir, 'codex')
+    stateResponse = await sendPi({ type: 'initialize_runtime', options: {
+      sessionPath: requestedSession || path.join(sessionDir, `${new Date().toISOString().replace(/[:.]/g, '-')}_${crypto.randomUUID()}.codex.jsonl`),
+      home, cwd, agentDir: piAgentDir(), skillPaths: pluginPaths,
+      model: { ...configured, provider, preferNativeResponses: managed && selectedModel.platform === 'openai' && /^gpt-[56](?:[.-]|$)/i.test(selectedModelId), maxTokens: Number(selectedModel.maxTokens || selectedModel.max_tokens || selectedModel.max_output_tokens) || undefined },
+      credential, contextPolicy, thinkingLevel: options.thinkingLevel || 'auto',
+      systemPrompt: options.systemPrompt || '', readOnly: Boolean(options.readOnly),
+    } }, runtime)
+  } else stateResponse = await sendPi({ type: 'get_state' }, runtime)
   const skillLaunch = { executable, cwd, env: { ...process.env, PI_CODING_AGENT_DIR: agentDir, ANYU_API_KEY: credential, PI_SKIP_VERSION_CHECK: '1', PI_OFFLINE: '1', ANYU_PERMISSION_MODE: '', ANYU_PERMISSION_PROFILE: '', LETA_BROWSER_BRIDGE_TOKEN: '', LETA_BROWSER_BRIDGE_PORT: '' } }
   runtime.skillLaunch = skillLaunch
   if (!options.background) piSkillLaunch = skillLaunch
@@ -2485,11 +2662,10 @@ async function requestApi(route, options = {}, retry = true) {
   const text = await response.text()
   try { payload = text ? JSON.parse(text) : null } catch { payload = { message: text } }
   if (response.status === 401 && retry && auth?.refreshToken && !route.includes('/auth/')) {
-    const refreshed = await refreshAuthAccessToken().catch(() => '')
+    const refreshed = await refreshAuthAccessToken()
     if (refreshed) {
       return requestApi(route, options, false)
     }
-    clearAuth()
   }
   if (!response.ok || (payload && payload.code && payload.code !== 0)) {
     const error = new Error(payload?.message || payload?.error || `Request failed (${response.status})`)
@@ -2670,12 +2846,10 @@ async function requestMultipart(route, fields = {}, files = [], retry = true, ma
   const text = await response.text()
   let payload = null; try { payload = text ? JSON.parse(text) : null } catch { payload = { message: text } }
   if (response.status === 401 && retry && auth?.refreshToken) {
-    const refreshed = await requestApi('/auth/refresh', { method: 'POST', body: { refresh_token: auth.refreshToken } }, false).catch(() => null)
-    if (refreshed?.access_token) {
-      saveAuth({ ...auth, accessToken: refreshed.access_token, refreshToken: refreshed.refresh_token || auth.refreshToken })
+    const refreshed = await refreshAuthAccessToken()
+    if (refreshed) {
       return requestMultipart(route, fields, files, false, maxFileBytes)
     }
-    clearAuth()
   }
   if (!response.ok || (payload && payload.code && payload.code !== 0)) {
     const error = new Error(payload?.message || payload?.error || `Request failed (${response.status})`)
@@ -2713,12 +2887,10 @@ async function requestBinary(route, retry = true) {
     throw formatNetworkError(error, buildApiUrl(route), '媒体下载')
   }
   if (response.status === 401 && retry && auth?.refreshToken) {
-    const refreshed = await requestApi('/auth/refresh', { method: 'POST', body: { refresh_token: auth.refreshToken } }, false).catch(() => null)
-    if (refreshed?.access_token) {
-      saveAuth({ ...auth, accessToken: refreshed.access_token, refreshToken: refreshed.refresh_token || auth.refreshToken })
+    const refreshed = await refreshAuthAccessToken()
+    if (refreshed) {
       return requestBinary(route, false)
     }
-    clearAuth()
   }
   if (!response.ok) throw new Error(`媒体结果不可用 (HTTP ${response.status})`)
   const data = Buffer.from(await response.arrayBuffer())
@@ -3113,11 +3285,12 @@ app.whenReady().then(async () => {
   agentSessionService = new AgentSessionService({
     userDataDir: app.getPath('userData'),
     startRuntime: (options) => startPi(options),
-    beforePrompt: (record, run, payload) => agentWorkbench.begin(record, run, payload),
+    beforePrompt: (record, run, payload) => agentWorkbench.begin(record, run, { ...payload, lazyCheckpoint: true }),
     sendCommand: (command, runtime) => sendPi(command, runtime),
-    configureThinking: (runtime, level) => {
+    configureThinking: async (runtime, level) => {
       gatewayBridge.setThinkingLevel(runtime?.gatewayContext, level)
       if (runtime?.startOptions) runtime.startOptions.thinkingLevel = level
+      if (runtime?.engine === 'codex') await sendPi({ type: 'set_thinking_level', level }, runtime)
     },
     respondUi: (response, runtime) => {
       if (!runtime?.child?.stdin?.writable) throw new Error('Agent 运行时未启动')
@@ -3145,12 +3318,7 @@ app.whenReady().then(async () => {
   agentSessionService.subscribe(event => agentWorkbench.event(event))
   pluginManager = new PluginManager(app.getPath('userData'))
   skillManager = new SkillManager(app.getPath('userData'))
-  try {
-    const bundledSkills = app.isPackaged
-      ? path.join(process.resourcesPath, 'app.asar.unpacked', 'skills')
-      : path.join(__dirname, 'skills')
-    skillManager.ensureBundled(bundledSkills)
-  } catch (error) { console.error('[skills]', error?.message || error) }
+  // Existing local skills remain intact; new skills come from the server store on demand.
   // Bash 是 Pi 编程工具的基础环境。后台准备，不阻塞窗口首屏；已有 Git Bash 直接复用。
   setTimeout(() => { void startWindowsShellBootstrap() }, 1200)
   // 环境准备放到首屏之后后台执行，不阻塞窗口打开；中断后下次启动会继续检查。
@@ -3214,27 +3382,11 @@ app.whenReady().then(async () => {
   ipcMain.handle('agent:permission-state', () => agentPermissionState())
   ipcMain.handle('agent:set-permission-mode', (_, mode) => setAgentPermissionMode(mode))
   ipcMain.handle('auth:state', async () => {
-    if (!auth?.accessToken && !auth?.refreshToken) return { authenticated: false }
-    // In the local development runtime the web renderer keeps its own copy of
-    // the JWT. Validating here rotates the token on some backends and makes the
-    // renderer's copy invalid, so trust the saved local session instead.
-    if (LOCAL_ONLY_API && auth?.accessToken && auth.user) return { authenticated: true, user: auth.user }
-    try {
-      let user
-      try {
-        user = await requestApi('/auth/me')
-      } catch (error) {
-        // 应用长时间未打开时 access token 可能过期，先轮换会话再恢复登录态。
-        if (!auth?.refreshToken || error?.status !== 401) throw error
-        const refreshed = await requestApi('/auth/refresh', { method: 'POST', body: { refresh_token: auth.refreshToken } }, false)
-        if (!refreshed?.access_token) throw error
-        saveAuth({ ...auth, accessToken: refreshed.access_token, refreshToken: refreshed.refresh_token || auth.refreshToken })
-        user = await requestApi('/auth/me', {}, false)
-      }
-      saveAuth({ ...auth, user: user.user || user })
-      return { authenticated: true, user: auth.user }
-    } catch { clearAuth(); return { authenticated: false } }
+    const state = await restoreDesktopAuth()
+    return { authenticated: state.authenticated, user: state.user || null }
   })
+  ipcMain.handle('auth:restore', () => restoreDesktopAuth())
+  ipcMain.handle('auth:refresh', () => restoreDesktopAuth(true))
   ipcMain.handle('auth:sync', (_, payload = {}) => {
     const accessToken = String(payload?.accessToken || '').trim()
     if (!accessToken) return { ok: false }
@@ -3253,9 +3405,11 @@ app.whenReady().then(async () => {
   ipcMain.handle('auth:reset-password', (_, body) => resetPassword(body))
   ipcMain.handle('auth:public-settings', () => publicSettings())
   ipcMain.handle('auth:logout', async () => {
-    try { if (auth?.refreshToken) await requestApi('/auth/logout', { method: 'POST', body: { refresh_token: auth.refreshToken } }) } catch {}
+    const previous = auth
+    clearAuth()
+    try { if (previous?.refreshToken) await requestApi('/auth/logout', { method: 'POST', headers: { Authorization: `Bearer ${previous.accessToken}` }, body: { refresh_token: previous.refreshToken } }, false) } catch {}
     await stopPi()
-    clearAuth(); return { ok: true }
+    return { ok: true }
   })
   ipcMain.handle('api:request', (_, route, options) => requestApi(route, options || {}))
   ipcMain.handle('api:stream', async (event, streamId, route, options = {}) => {
@@ -3440,7 +3594,15 @@ app.whenReady().then(async () => {
     const settings = new AgentContextSettings(app.getPath('userData'))
     if (action === 'get') return settings.get()
     if (action === 'save') return settings.save(payload)
-    if (action === 'preview') return settings.policy(payload.model || {}, payload.cwd, payload.settings)
+    if (action === 'preview') {
+      const record = agentSessionService.sessions.get(payload.sessionId)
+      let engine = 'codex'
+      if (record?.piSessionPath) {
+        engine = resolvePiRuntime(record.piSessionPath)?.engine || 'pi'
+        try { if (JSON.parse(fs.readFileSync(record.piSessionPath, 'utf8').split(/\r?\n/)[0]).engine === 'codex') engine = 'codex' } catch {}
+      }
+      return { ...settings.policy(payload.model || {}, payload.cwd, payload.settings), engine }
+    }
     if (action === 'status') return agentSessionService.contextStatus(payload)
     if (action === 'compact') return agentSessionService.compact(payload)
     if (action === 'cancel') return agentSessionService.abort(payload)
@@ -3542,7 +3704,31 @@ app.whenReady().then(async () => {
     return result.canceled ? [] : result.filePaths
   })
   ipcMain.handle('skills:list', () => skillManager?.list() || [])
+  const skillInstalls = new Set()
+  ipcMain.handle('skills:store-install', async (_, id) => {
+    if (!skillStore.idPattern.test(id) || skillInstalls.has(id)) throw new Error('技能标识无效或正在安装')
+    skillInstalls.add(id)
+    try {
+      const target = path.join(skillManager.root, id)
+      const revision = skillStore.localRevision(target)
+      if (revision) {
+        const answer = await dialog.showMessageBox(mainWindow, { type: 'question', title: '更新技能', message: '是否更新此技能？', detail: '本机原版本（含训练修改）会完整备份到 skill-backups，自定义训练规则继续保留。', buttons: ['取消', '更新'], defaultId: 1, cancelId: 0 })
+        if (answer.response !== 1) return null
+      }
+      const catalog = await requestApi('/anyu-agent/skill-store')
+      const skill = catalog?.skills?.find(item => item.id === id)
+      if (!skill) throw new Error('技能已下架或不可用，请刷新商店')
+      const route = `/anyu-agent/skill-store/skills/${encodeURIComponent(id)}/download?sha256=${encodeURIComponent(skill.sha256)}`
+      const download = () => fetchWithTimeout(buildApiUrl(route), { redirect: 'error', headers: { Authorization: `Bearer ${auth?.accessToken || ''}` }, signal: AbortSignal.timeout(60000) }, 60000)
+      let response = await download()
+      if (response.status === 401 && auth?.refreshToken) { await response.body?.cancel(); if (await refreshAuthAccessToken()) response = await download() }
+      const bytes = await skillStore.readDownload(response)
+      return await skillStore.installPackage(skillManager, skill, bytes, revision)
+    } finally { skillInstalls.delete(id) }
+  })
   ipcMain.handle('skills:read', (_, id) => skillManager.read(id))
+  ipcMain.handle('skills:training-read', (_, id) => skillManager.readTraining(id))
+  ipcMain.handle('skills:training-save', (_, payload) => skillManager.saveTraining(payload))
   ipcMain.handle('skills:install-local', async () => {
     const result = await dialog.showOpenDialog(mainWindow, { properties: ['openDirectory'] })
     if (result.canceled || !result.filePaths[0]) return null
@@ -3723,6 +3909,7 @@ app.whenReady().then(async () => {
   ipcMain.handle('agent-browser:back', () => { if (browserView?.webContents.navigationHistory.canGoBack()) { browserHistoryTransition = true; browserView.webContents.navigationHistory.goBack() }; return { ...browserState } })
   ipcMain.handle('agent-browser:forward', () => { if (browserView?.webContents.navigationHistory.canGoForward()) { browserHistoryTransition = true; browserView.webContents.navigationHistory.goForward() }; return { ...browserState } })
   ipcMain.handle('agent-browser:set-zoom-factor', (_, factor) => setBrowserZoomFactor(factor))
+  ipcMain.handle('agent-browser:set-zoom-mode', (_, mode) => setBrowserZoomMode(mode))
   ipcMain.handle('agent-browser:get-state', () => ({ ...browserState }))
   ipcMain.handle('window:action', (_, action) => {
     if (!mainWindow || mainWindow.isDestroyed()) return { ok: false }

@@ -1,14 +1,15 @@
 import http from 'node:http'
 
-export default function anyuSubagents(pi) {
+export default function anyuSubagents(pi, options = {}) {
   const port = Number(process.env.ANYU_AGENT_BRIDGE_PORT)
   const token = process.env.ANYU_AGENT_BRIDGE_TOKEN
-  if (!port || !token) return
+  if ((!port || !token) && !options.registerUnavailable) return
   const child = process.env.ANYU_AGENT_ROLE === 'child'
   const readOnly = process.env.ANYU_AGENT_READ_ONLY === '1'
   const readTools = new Set(['read', 'grep', 'find', 'ls', 'runtime_probe'])
 
   function request(route, payload, signal) {
+    if (!port || !token) return Promise.reject(new Error('Multi-agent mode is not enabled for this turn'))
     const data = JSON.stringify(payload)
     return new Promise((resolve, reject) => {
       if (signal?.aborted) { reject(new Error('任务已停止')); return }
@@ -36,6 +37,7 @@ export default function anyuSubagents(pi) {
 
   if (readOnly) pi.on('session_start', async () => { pi.setActiveTools([...readTools]) })
   pi.on('tool_call', async event => {
+    if (!port || !token) return
     if (['delegate_tasks', 'merge_task', 'retry_task'].includes(event.toolName) && !child) return
     if (readOnly && !readTools.has(event.toolName)) return { block: true, reason: '该子代理仅允许读取与分析' }
     try { await request('/acquire', { toolCallId: event.toolCallId, toolName: event.toolName }) }

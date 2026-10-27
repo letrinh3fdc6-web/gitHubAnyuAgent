@@ -25,6 +25,7 @@ class AgentWorkbench {
     this.operations = new Map()
     this.pending = new Map()
     this.requestLocks = new Map()
+    this.snapshotPreparations = new Map()
     this.getOwner = options.getOwner || (() => 'local')
   }
 
@@ -78,14 +79,28 @@ class AgentWorkbench {
       verification: [], checkpoints: [],
     }
     this.store.state.tasks[task.id] = task
+    task.lazyCheckpoint = payload.lazyCheckpoint === true && task.settings.checks.length === 0
     await this.store.save()
     try {
-      task.before = await this.snapshots.persist(`${task.id}-before`, await this.snapshots.capture(task.cwd))
+      if (!task.lazyCheckpoint) await this.prepareSnapshot(task)
       task.status = 'running'
       await this.store.save()
       this.changed(task, 'started')
       return task
     } catch (error) { task.status = 'failed'; task.error = error.message; await this.store.save(); throw error }
+  }
+
+  async prepareSnapshot(task) {
+    let pending = this.snapshotPreparations.get(task.id)
+    if (!pending && task.before) return
+    if (!pending) {
+      pending = (async () => {
+        task.before = await this.snapshots.persist(`${task.id}-before`, await this.snapshots.capture(task.cwd))
+        try { await this.store.save() } catch (error) { delete task.before; throw error }
+      })()
+      this.snapshotPreparations.set(task.id, pending)
+    }
+    try { await pending } finally { if (this.snapshotPreparations.get(task.id) === pending) this.snapshotPreparations.delete(task.id) }
   }
 
   changed(task, kind = 'updated') { this.options.changed?.({ sessionId: task?.sessionId || '', taskId: task?.id || '', kind }) }
@@ -110,9 +125,12 @@ class AgentWorkbench {
   }
 
   async finish(task, status) {
-    const after = await this.snapshots.capture(task.cwd)
-    task.after = await this.snapshots.persist(`${task.id}-after`, after)
-    task.changes = this.snapshots.changes(await this.snapshots.load(task.before), after)
+    await this.snapshotPreparations.get(task.id)
+    if (task.before || !task.lazyCheckpoint) {
+      const after = await this.snapshots.capture(task.cwd)
+      task.after = await this.snapshots.persist(`${task.id}-after`, after)
+      task.changes = this.snapshots.changes(await this.snapshots.load(task.before), after)
+    } else task.changes = []
     if (status === 'completed' && !task.parentId && task.settings.checks.length) {
       task.verification = await verify(task.cwd, task.settings.checks, this.options.environment?.() || process.env)
       task.acceptance = task.verification.every(check => check.ok) ? 'passed' : 'failed'
@@ -156,13 +174,14 @@ class AgentWorkbench {
     const task = this.task(id)
     if (ACTIVE.has(task.status)) throw new Error('Task is still active')
     await this.settled(id)
-    if (!task.after) {
+    if (!task.after && (!task.lazyCheckpoint || task.before)) {
       const after = await this.snapshots.capture(task.cwd)
       task.after = await this.snapshots.persist(`${task.id}-after`, after)
       task.changes = this.snapshots.changes(await this.snapshots.load(task.before), after)
       task.recoveredSnapshot = true
       await this.store.save()
     }
+    if (!task.changes) task.changes = []
     return task
   }
 
@@ -245,6 +264,9 @@ class AgentWorkbench {
       else if (policy.shell === 'confirm' || policy.workspaceOnly || !policy.network) decision = 'confirm'
     }
     if (!READ.has(name) && !['write', 'edit', 'bash', 'task_checkpoint', 'delegate_tasks'].includes(name) && (policy.workspaceOnly || !policy.network) && decision === 'allow') decision = 'confirm'
+    // Do not scan the project before ordinary chat. A potentially mutating
+    // tool cannot run until its rollback baseline has been persisted.
+    if (decision !== 'deny' && task.lazyCheckpoint && !READ.has(name) && name !== 'task_checkpoint') await this.prepareSnapshot(task)
     task.events.push({ at: now(), type: 'policy.decision', toolName: name, decision, ok: decision !== 'deny' })
     await this.store.save()
     return { decision, reason }
@@ -369,7 +391,7 @@ class AgentWorkbench {
     const project = await this.project(cwd)
     const tasks = Object.values(this.store.state.tasks).filter(task => task.owner === String(this.getOwner()) && (task.projectId === project.id || task.sessionId === sessionId)).sort((a, b) => b.startedAt.localeCompare(a.startedAt)).slice(0, 100).map(task => {
       const { before, after, ...rest } = task
-      return { ...rest, coverage: { complete: before?.complete && after?.complete, skipped: [...new Set([...(before?.skipped || []), ...(after?.skipped || [])])].slice(0, 30) }, cost: this.cost(task.rootId) }
+      return { ...rest, coverage: { complete: task.lazyCheckpoint && !before ? true : Boolean(before?.complete && after?.complete), skipped: [...new Set([...(before?.skipped || []), ...(after?.skipped || [])])].slice(0, 30) }, cost: this.cost(task.rootId) }
     })
     return { tasks, project: clone(project), connectors: this.connectors.list(), workflows: Object.values(this.store.state.workflows).filter(flow => flow.projectId === project.id && flow.owner === String(this.getOwner())) }
   }

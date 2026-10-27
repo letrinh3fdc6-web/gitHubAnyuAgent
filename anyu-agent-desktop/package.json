@@ -1,11 +1,14 @@
 {
   "name": "anyu-agent-desktop",
-  "version": "1.0.70",
+  "version": "1.0.71",
   "description": "AnyuAgent standalone desktop workspace",
   "main": "main.cjs",
   "author": "Anyu AI",
   "license": "MIT",
   "dependencies": {
+    "@earendil-works/pi-ai": "0.84.3",
+    "@earendil-works/pi-coding-agent": "0.84.3",
+    "@openai/codex": "0.164.0",
     "@modelcontextprotocol/sdk": "1.28.0",
     "archiver": "7.0.1",
     "parse5": "7.3.0",
@@ -19,6 +22,7 @@
     "dev": "electron .",
     "check": "node --check main.cjs && node --check preload.cjs && node --check renderer/app.js && node --check local-detail.cjs && node --check detail-thumbnails.cjs && node --check dependency-manager.cjs && node --check dependency-download.cjs && node --check agent-session.cjs && node --check skill-manager.cjs && node --check pi-approval-gate.mjs && node --check runtime-probe-extension.mjs",
     "test:runtime-probe": "node --test tools/test-runtime-probe.cjs tools/test-runtime-probe-pi-live.cjs",
+    "test:codex": "node --test tools/test-codex-client.cjs tools/test-codex-runtime.cjs",
     "test:workbench": "node --test tools/test-agent-workbench.cjs tools/test-agent-connectors.cjs tools/test-workbench-integration.cjs",
     "release:gate": "node tools/release-gate.cjs",
     "test:detail-thumbnails": "electron tools/test-detail-thumbnail-live.cjs",
@@ -89,15 +93,18 @@
     "artifactName": "AnyuAgent-Setup-${version}.exe",
     "asar": true,
     "asarUnpack": [
+      "package.json",
+      "codex-*.cjs",
+      "node_modules/**/*",
       "pi-workbench-extension.mjs",
       "pi-subagent-extension.mjs",
       "pi-browser-extension.mjs",
       "pi-approval-gate.mjs",
       "runtime-probe-extension.mjs",
-      "tools/auto_edit_worker.py",
-      "skills/**/*"
+      "tools/auto_edit_worker.py"
     ],
     "files": [
+      "codex-*.cjs",
       "agent-context.cjs",
       "release-notes.json",
       "agent-workbench.cjs",
@@ -129,7 +136,7 @@
       "detail-thumbnails.cjs",
       "skill-analysis.cjs",
       "skill-manager.cjs",
-      "skills/**/*",
+      "skill-store.cjs",
       "agent-session.cjs",
       "agent-orchestrator.cjs",
       "pi-subagent-extension.mjs",

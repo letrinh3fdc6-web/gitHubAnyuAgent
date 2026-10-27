@@ -17,7 +17,7 @@ async function fixture(t, options = {}) {
   const wb = new AgentWorkbench({ directory, encrypt: text => `encrypted:${text}`, decrypt: text => text.slice(10), getOwner: () => '1', billing: async () => [], resume: async () => ({ ok: true }), inspect: async () => ({ ready: true }), repair: async () => ({ ready: true }), ...options })
   await wb.init()
   t.after(async () => { await wb.close(); await fs.rm(directory, { recursive: true, force: true }) })
-  const begin = async (sessionId = 'session', parentSessionId = '') => wb.begin({ cwd, sessionId, parentSessionId, model: 'test', models: [], permissionMode: 'confirm' }, { runId: crypto.randomUUID(), input: 'Test task' }, {})
+  const begin = async (sessionId = 'session', parentSessionId = '', payload = {}) => wb.begin({ cwd, sessionId, parentSessionId, model: 'test', models: [], permissionMode: 'confirm' }, { runId: crypto.randomUUID(), input: 'Test task' }, payload)
   const finish = async task => { wb.event({ sessionId: task.sessionId, runId: task.id, type: 'run.finished', status: 'completed', text: 'Done' }); await wb.settled(task.id) }
   return { wb, directory, cwd, begin, finish }
 }
@@ -35,6 +35,71 @@ test('durable checkpoints survive a main-process restart and never replay automa
   await second.recovery(task.id)
   assert.equal(resumed, 1)
   assert.match(second.task(task.id).checkpoints[0].summary, /artifact/)
+})
+
+test('lazy ordinary chat and read-only tools never scan the workspace', async t => {
+  const h = await fixture(t)
+  h.wb.snapshots.capture = async () => { throw new Error('Unexpected workspace scan') }
+  const task = await h.begin('session', '', { lazyCheckpoint: true })
+  await h.wb.authorize('session', 'read', { path: 'file.txt' })
+  await h.wb.checkpoint('session', 'Answered without modifying files')
+  await h.finish(task)
+  assert.equal(task.before, undefined)
+  assert.equal(task.status, 'completed')
+  assert.deepEqual((await h.wb.reconcile(task.id)).changes, [])
+})
+
+test('lazy baseline precedes writes and retains safe rollback', async t => {
+  const h = await fixture(t)
+  await fs.writeFile(path.join(h.cwd, 'file.txt'), 'before')
+  const task = await h.begin('session', '', { lazyCheckpoint: true })
+  assert.equal(task.before, undefined)
+  await h.wb.authorize('session', 'write', { path: 'file.txt' })
+  assert.ok((await h.wb.snapshots.load(task.before)).files['file.txt'])
+  await fs.writeFile(path.join(h.cwd, 'file.txt'), 'after')
+  await h.finish(task)
+  assert.equal(task.changes.length, 1)
+  await h.wb.review(task.id, 'rollback')
+  assert.equal(await fs.readFile(path.join(h.cwd, 'file.txt'), 'utf8'), 'before')
+})
+
+test('concurrent lazy tool admissions await one persisted baseline', async t => {
+  const h = await fixture(t)
+  let release, started
+  const ready = new Promise(resolve => { started = resolve })
+  const gate = new Promise(resolve => { release = resolve })
+  const capture = h.wb.snapshots.capture.bind(h.wb.snapshots)
+  let count = 0, admitted = 0
+  h.wb.snapshots.capture = async cwd => { count++; started(); await gate; return capture(cwd) }
+  await h.begin('session', '', { lazyCheckpoint: true })
+  const first = h.wb.authorize('session', 'write', { path: 'one.txt' }).then(() => admitted++)
+  await ready
+  const second = h.wb.authorize('session', 'edit', { path: 'two.txt' }).then(() => admitted++)
+  assert.equal(admitted, 0)
+  release()
+  await Promise.all([first, second])
+  assert.equal(count, 1)
+  assert.equal(admitted, 2)
+})
+
+test('denied tools avoid snapshots; failed snapshots block allowed writes', async t => {
+  const h = await fixture(t)
+  const project = await h.wb.project(h.cwd)
+  project.settings.policy.blockedTools = ['blocked_tool']
+  h.wb.snapshots.capture = async () => { throw new Error('Snapshot failed') }
+  await h.begin('session', '', { lazyCheckpoint: true })
+  assert.equal((await h.wb.authorize('session', 'blocked_tool', {})).decision, 'deny')
+  await assert.rejects(h.wb.authorize('session', 'write', { path: 'file.txt' }), /Snapshot failed/)
+  assert.equal(h.wb.active('session').before, undefined)
+})
+
+test('configured acceptance preserves an eager baseline with lazy preference', async t => {
+  const h = await fixture(t)
+  const project = await h.wb.project(h.cwd)
+  project.settings.checks = [{ kind: 'file', path: 'result.txt' }]
+  const task = await h.begin('session', '', { lazyCheckpoint: true })
+  assert.equal(task.lazyCheckpoint, false)
+  assert.ok(task.before)
 })
 
 test('rollback restores modified/deleted files and removes only task-created files', async t => {

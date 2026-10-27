@@ -28,6 +28,22 @@ async function createSession(t) {
   return { service, events, ingest, start, end }
 }
 
+test('auto permissions do not restart a runtime that resolves to confirm', async t => {
+  const userDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'anyu-session-permission-'))
+  t.after(() => fs.rmSync(userDataDir, { recursive: true, force: true }))
+  const starts = []
+  const service = new AgentSessionService({ userDataDir, startRuntime: async options => {
+    starts.push(options)
+    return { sessionPath: 'permission.jsonl', permissionMode: options.permissionMode === 'auto' ? 'confirm' : options.permissionMode }
+  } })
+  await service.start({ sessionId: 'permission-test', permissionMode: 'auto' })
+  await service.start({ sessionId: 'permission-test', permissionMode: 'auto' })
+  assert.equal(starts[1].force, false)
+  assert.equal(service.sessions.get('permission-test').permissionMode, 'confirm')
+  await service.start({ sessionId: 'permission-test', permissionMode: 'full' })
+  assert.equal(starts[2].force, true)
+})
+
 test('a stale full session record cannot auto-approve a controlled runtime', async t => {
   const { service, events, ingest } = await createSession(t)
   t.after(() => service.stopAll())

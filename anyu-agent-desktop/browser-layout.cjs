@@ -17,4 +17,17 @@ function normalizeBrowserBounds(rect, contentBounds) {
   return { x: left, y: top, width: right - left, height: bottom - top }
 }
 
-module.exports = { normalizeBrowserBounds }
+function calculateBrowserFitZoom(bounds, content, mode = 'fit-width', currentZoom = 1) {
+  const values = [bounds?.width, bounds?.height, content?.width, content?.height, currentZoom].map(Number)
+  if (!values.every(value => Number.isFinite(value) && value > 0)) return 1
+  const [width, height, contentWidth, contentHeight, zoom] = values
+  // Leave space for the vertical scrollbar even on fixed-width desktop pages.
+  const viewportWidth = Number(content.viewportWidth) || width / zoom
+  const viewportHeight = Number(content.viewportHeight) || height / zoom
+  const fitWidth = contentWidth > viewportWidth + 1 ? Math.max(1, width - 16) / (contentWidth * zoom) : 1
+  const fitHeight = contentHeight > viewportHeight + 1 ? Math.max(1, height - 2) / (contentHeight * zoom) : 1
+  const factor = zoom * Math.min(1, fitWidth, mode === 'fit-page' ? fitHeight : 1)
+  return Math.max(0.01, Math.min(1, Math.floor((factor + 1e-9) * 10000) / 10000))
+}
+
+module.exports = { normalizeBrowserBounds, calculateBrowserFitZoom }

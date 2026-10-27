@@ -272,6 +272,7 @@ class LocalGatewayBridge {
           return
         }
         if (!clientResponse.headersSent) clientResponse.writeHead(upstreamResponse.statusCode || 502, responseHeaders(upstreamResponse.headers))
+        if (String(upstreamResponse.headers['content-type'] || '').includes('text/event-stream')) clientResponse.flushHeaders()
         upstreamResponse.pipe(clientResponse)
         upstreamResponse.once('end', resolve)
       })

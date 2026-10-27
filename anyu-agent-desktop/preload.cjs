@@ -17,6 +17,8 @@ contextBridge.exposeInMainWorld('anyu', {
   acknowledgeElevation: () => ipcRenderer.invoke('system:acknowledge-elevation'),
   openSystemPrivacySettings: (section) => ipcRenderer.invoke('system:open-privacy-settings', section),
   authState: () => ipcRenderer.invoke('auth:state'),
+  restoreAuth: () => ipcRenderer.invoke('auth:restore'),
+  refreshAuth: () => ipcRenderer.invoke('auth:refresh'),
   syncAuth: (payload) => ipcRenderer.invoke('auth:sync', payload || {}),
   login: (body) => ipcRenderer.invoke('auth:login', body),
   login2fa: (body) => ipcRenderer.invoke('auth:login2fa', body),
@@ -110,6 +112,7 @@ contextBridge.exposeInMainWorld('anyu', {
   browserBack: () => ipcRenderer.invoke('agent-browser:back'),
   browserForward: () => ipcRenderer.invoke('agent-browser:forward'),
   browserSetZoomFactor: (factor) => ipcRenderer.invoke('agent-browser:set-zoom-factor', factor),
+  browserSetZoomMode: (mode) => ipcRenderer.invoke('agent-browser:set-zoom-mode', mode),
   browserState: () => ipcRenderer.invoke('agent-browser:get-state'),
   onBrowserState: (listener) => {
     const handler = (_, event) => listener(event)
@@ -152,7 +155,10 @@ contextBridge.exposeInMainWorld('anyu', {
   chooseFiles: () => ipcRenderer.invoke('app:choose-files'),
   setWindowWidth: (width) => ipcRenderer.invoke('window:set-width', width),
   skillsList: () => ipcRenderer.invoke('skills:list'),
+  skillsStoreInstall: (id) => ipcRenderer.invoke('skills:store-install', id),
   skillsRead: (id) => ipcRenderer.invoke('skills:read', id),
+  skillsTrainingRead: (id) => ipcRenderer.invoke('skills:training-read', id),
+  skillsTrainingSave: (payload) => ipcRenderer.invoke('skills:training-save', payload),
   skillsInstallLocal: () => ipcRenderer.invoke('skills:install-local'),
   pluginState: () => ipcRenderer.invoke('plugin:state'),
   pluginMarketplace: () => ipcRenderer.invoke('plugin:marketplace'),

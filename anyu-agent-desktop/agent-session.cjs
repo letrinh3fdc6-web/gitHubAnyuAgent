@@ -132,6 +132,7 @@ class AgentSessionService {
           model: record.model || '',
           provider: record.provider || '',
           permissionMode: record.permissionMode || '',
+          requestedPermissionMode: record.requestedPermissionMode || '',
           title: record.title || '',
           createdAt: record.createdAt,
           updatedAt: record.updatedAt,
@@ -219,10 +220,11 @@ class AgentSessionService {
     const model = String(payload.model || record.model || '')
     const provider = String(payload.provider || record.provider || '')
     const models = Array.isArray(payload.models) ? payload.models : record.models || []
-    const permissionMode = String(payload.permissionMode || record.permissionMode || '')
+    const permissionMode = String(payload.permissionMode || record.requestedPermissionMode || record.permissionMode || '')
     const cwd = String(payload.cwd || record.cwd || '')
     const modelChanged = Boolean(record.model && model && record.model !== model)
-    const permissionChanged = Boolean(record.permissionMode && permissionMode && record.permissionMode !== permissionMode)
+    const previousPermission = record.requestedPermissionMode || record.permissionMode
+    const permissionChanged = Boolean(previousPermission && permissionMode && previousPermission !== permissionMode)
     const cwdChanged = Boolean(record.cwd && cwd && path.resolve(record.cwd) !== path.resolve(cwd))
 
     const started = await this.startRuntime({
@@ -242,6 +244,7 @@ class AgentSessionService {
     record.piSessionPath = String(started?.sessionPath || record.piSessionPath || '')
     record.cwd = String(started?.cwd || cwd || '')
     record.permissionMode = String(started?.permissionMode || permissionMode || '')
+    record.requestedPermissionMode = permissionMode
     record.model = model
     record.provider = provider
     record.models = models

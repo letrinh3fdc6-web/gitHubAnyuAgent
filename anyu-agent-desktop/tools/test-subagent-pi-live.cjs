@@ -9,7 +9,7 @@ const { spawn } = require('node:child_process')
 const { AgentSessionService } = require('../agent-session.cjs')
 const { AgentOrchestrator } = require('../agent-orchestrator.cjs')
 
-test('bundled Pi delegates across models, probes the runtime, executes read, and preserves DeepSeek reasoning through tool results', { timeout: 45000 }, async t => {
+for (const engine of ['pi', 'codex']) test(`${engine} delegates across models, probes the runtime, executes read, and preserves DeepSeek reasoning through tool results`, { timeout: 60000 }, async t => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'anyu-pi-subagent-'))
   const executable = path.resolve(__dirname, '../pi-runtime', process.platform === 'win32' ? 'pi.exe' : 'pi')
   const runtimes = new Map(), requests = [], events = []
@@ -26,7 +26,7 @@ test('bundled Pi delegates across models, probes the runtime, executes read, and
       const hasToolResult = body.messages.some(message => message.role === 'tool')
       const hasReadResult = body.messages.some(message => message.role === 'tool' && message.tool_call_id === 'read-1')
       if (!isParent) {
-        assert.deepEqual(body.tools.map(tool => tool.function.name).sort(), ['find', 'grep', 'ls', 'read', 'runtime_probe'])
+        assert.deepEqual(body.tools.map(tool => tool.function.name).filter(name => name !== 'request_user_input').sort(), ['find', 'grep', 'ls', 'read', 'runtime_probe'])
         if (hasToolResult) {
           const probe = body.messages.find(message => message.role === 'tool' && message.tool_call_id === 'probe-1')
           assert.equal(JSON.parse(probe.content).workspace.readable, true)
@@ -78,7 +78,7 @@ test('bundled Pi delegates across models, probes the runtime, executes read, and
     if (!runtime) return
     runtimes.delete(key)
     const closed = new Promise(resolve => runtime.child.once('exit', resolve))
-    runtime.child.kill()
+    runtime.child.stdin.end()
     await closed
   }
   sessions = new AgentSessionService({
@@ -92,7 +92,7 @@ test('bundled Pi delegates across models, probes the runtime, executes read, and
       args.push('--extension', path.resolve(__dirname, '../runtime-probe-extension.mjs'))
       if (options.readOnly) args.push('--tools', 'read,grep,find,ls,runtime_probe')
       const runtime = { key: '', pending: new Map(), buffer: '' }
-      runtime.child = spawn(executable, args, { cwd: directory, windowsHide: true, env: { ...process.env, PI_CODING_AGENT_DIR: runtimeDir, PI_SKIP_VERSION_CHECK: '1', ANYU_AGENT_BRIDGE_PORT: String(options.orchestration.port), ANYU_AGENT_BRIDGE_TOKEN: options.orchestration.token, ANYU_AGENT_ROLE: options.agentRole, ANYU_AGENT_READ_ONLY: options.readOnly ? '1' : '' }, stdio: ['pipe', 'pipe', 'pipe'] })
+      runtime.child = spawn(engine === 'codex' ? process.execPath : executable, engine === 'codex' ? [path.resolve(__dirname, '../codex-worker.cjs')] : args, { cwd: directory, windowsHide: true, env: { ...process.env, PI_CODING_AGENT_DIR: runtimeDir, PI_SKIP_VERSION_CHECK: '1', ANYU_PERMISSION_MODE: 'full', ANYU_TASK_PORT: '', ANYU_TASK_TOKEN: '', ANYU_AGENT_BRIDGE_PORT: String(options.orchestration.port), ANYU_AGENT_BRIDGE_TOKEN: options.orchestration.token, ANYU_AGENT_ROLE: options.agentRole, ANYU_AGENT_READ_ONLY: options.readOnly ? '1' : '' }, stdio: ['pipe', 'pipe', 'pipe'] })
       runtime.child.stdout.on('data', chunk => {
         runtime.buffer += chunk.toString()
         let newline
@@ -113,7 +113,11 @@ test('bundled Pi delegates across models, probes the runtime, executes read, and
         sessions.runtimeExited(runtime.key, code)
         for (const pending of runtime.pending.values()) pending.reject(new Error(`Pi exited ${code}`))
       })
-      const state = await send(runtime, { type: 'get_state' })
+      const state = engine === 'codex' ? await send(runtime, { type: 'initialize_runtime', options: {
+        sessionPath: path.join(runtimeDir, 'session.codex.jsonl'), home: path.join(runtimeDir, 'codex'), cwd: directory, agentDir: runtimeDir,
+        credential: 'local-test-only', readOnly: Boolean(options.readOnly), model: { ...configModel, provider: 'anyu-test', baseUrl },
+        contextPolicy: { contextWindow: 128000, triggerTokens: 110000, native: { enabled: true } }, systemPrompt: options.systemPrompt,
+      } }) : await send(runtime, { type: 'get_state' })
       runtime.key = state.data.sessionFile
       runtimes.set(runtime.key, runtime)
       return { sessionPath: runtime.key, cwd: directory, permissionMode: 'confirm' }
@@ -137,7 +141,7 @@ test('bundled Pi delegates across models, probes the runtime, executes read, and
   await host.prompt({ sessionId: 'live-parent', message: 'Delegate the marker verification.' })
   const final = await result
   assert.deepEqual(errors, [])
-  assert.equal(final.status, 'completed')
+  assert.equal(final.status, 'completed', JSON.stringify({ final, tail: events.slice(-4) }))
   assert.equal(final.text, marker)
   assert.equal(requests.length, 5)
   assert.ok(events.some(event => event.type === 'subagent.updated' && event.task.status === 'completed'))

@@ -6,8 +6,8 @@ const crypto = require('node:crypto')
 
 const root = path.resolve(__dirname, '..')
 const portable = process.argv.includes('--portable')
-const tests = ['test-agent-context.cjs', 'test-agent-workbench.cjs', 'test-agent-connectors.cjs', 'test-workbench-integration.cjs', 'test-agent-session.cjs', 'test-agent-orchestrator.cjs', 'test-runtime-probe.cjs']
-if (!portable) tests.push('test-context-pi-live.cjs', 'test-runtime-probe-pi-live.cjs', 'test-subagent-pi-live.cjs', 'test-approval-pi-live.cjs', 'test-workbench-pi-live.cjs')
+const tests = ['test-agent-context.cjs', 'test-agent-workbench.cjs', 'test-agent-connectors.cjs', 'test-workbench-integration.cjs', 'test-agent-session.cjs', 'test-agent-orchestrator.cjs', 'test-runtime-probe.cjs', 'test-auth-memory.cjs']
+if (!portable) tests.push('test-context-pi-live.cjs', 'test-runtime-probe-pi-live.cjs', 'test-subagent-pi-live.cjs', 'test-approval-pi-live.cjs', 'test-workbench-pi-live.cjs', 'test-codex-client.cjs', 'test-codex-runtime.cjs', 'test-codex-provider.cjs')
 const commands = [
   ['--test', ...tests.map(file => path.join('tools', file))],
   ['tools/test-packaged-extension-path.cjs'],
@@ -19,7 +19,7 @@ for (const args of commands) {
   report.checks.push({ command: args, passed: result.status === 0 })
   if (result.status !== 0) break
 }
-for (const file of ['main.cjs', 'agent-workbench.cjs', 'workspace-checkpoints.cjs', 'agent-orchestrator.cjs', 'pi-workbench-extension.mjs', 'package-lock.json']) report.sources[file] = crypto.createHash('sha256').update(fs.readFileSync(path.join(root, file))).digest('hex')
+for (const file of ['main.cjs', 'agent-workbench.cjs', 'workspace-checkpoints.cjs', 'agent-orchestrator.cjs', 'pi-workbench-extension.mjs', 'codex-client.cjs', 'codex-provider.cjs', 'codex-tools.cjs', 'codex-runtime.cjs', 'codex-worker.cjs', 'package-lock.json']) report.sources[file] = crypto.createHash('sha256').update(fs.readFileSync(path.join(root, file))).digest('hex')
 report.passed = report.checks.length === commands.length && report.checks.every(check => check.passed)
 const output = path.join(root, 'test-results')
 fs.mkdirSync(output, { recursive: true })

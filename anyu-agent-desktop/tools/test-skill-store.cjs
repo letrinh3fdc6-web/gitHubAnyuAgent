@@ -1,0 +1,75 @@
+const { test } = require('node:test')
+const assert = require('node:assert/strict')
+const fs = require('node:fs')
+const os = require('node:os')
+const path = require('node:path')
+const { createHash } = require('node:crypto')
+const archiver = require('archiver')
+const { Writable } = require('node:stream')
+const { SkillManager } = require('../skill-manager.cjs')
+const { decodePackage, installPackage, localRevision, readDownload } = require('../skill-store.cjs')
+const content = '---\nname: demo\ndescription: Demo skill\n---\n# Rules\n'
+async function zip(files) {
+  const chunks = []
+  const archive = archiver('zip')
+  const output = new Writable({ write(chunk, encoding, done) { chunks.push(chunk); done() } })
+  const complete = new Promise((resolve, reject) => { output.on('finish', resolve); archive.on('error', reject) })
+  archive.pipe(output)
+  for (const [name, value] of Object.entries(files)) archive.append(value, { name })
+  await archive.finalize(); await complete
+  return Buffer.concat(chunks)
+}
+const metadata = bytes => ({ id: 'demo', version: '1.0.0', sha256: createHash('sha256').update(bytes).digest('hex') })
+test('install, update and preserve trained originals and custom rules', async t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'anyu-store-test-'))
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }))
+  const manager = new SkillManager(directory)
+  const bytes = await zip({ 'SKILL.md': content, 'scripts/run.py': 'print(1)' })
+  await installPackage(manager, metadata(bytes), bytes, '')
+  assert.equal(manager.list()[0].storeSha256, metadata(bytes).sha256)
+  fs.writeFileSync(path.join(manager.root, 'demo/SKILL.md'), `${content}\nLocally trained`)
+  const rules = manager.readTraining('demo')
+  manager.saveTraining({ id: 'demo', customRules: 'Company preferences', revision: rules.revision })
+  const revision = localRevision(path.join(manager.root, 'demo'))
+  const next = await zip({ 'SKILL.md': `${content}\nNew version`, 'scripts/run.py': 'print(2)' })
+  await installPackage(manager, { ...metadata(next), version: '2.0.0' }, next, revision)
+  assert.equal(manager.readTraining('demo').customRules, 'Company preferences')
+  assert.equal(manager.list()[0].storeVersion, '2.0.0')
+  const backups = fs.readdirSync(path.join(directory, 'skill-backups'))
+  assert.equal(backups.length, 1)
+  assert.match(fs.readFileSync(path.join(directory, 'skill-backups', backups[0], 'SKILL.md'), 'utf8'), /Locally trained/)
+  await assert.rejects(installPackage(manager, metadata(bytes), bytes, revision), /已变更/)
+  await assert.rejects(installPackage(manager, metadata(bytes), next, localRevision(path.join(manager.root, 'demo'))), /SHA-256/)
+  assert.match(manager.read('demo').content, /New version/)
+})
+test('server seeds contain full resources and are accepted by the independent desktop validator', async () => {
+  for (const id of ['pptx', 'xlsx']) {
+    const bytes = fs.readFileSync(path.resolve(__dirname, '../../../../backend/internal/anyuagent/skillstore/assets', `${id}.zip`))
+    const files = await decodePackage(bytes)
+    assert(files.some(f => f.name === 'SKILL.md')); assert(files.some(f => f.name === 'LICENSE.txt')); assert(files.some(f => f.name.startsWith('scripts/')))
+  }
+})
+test('a failure after atomic replacement restores the original local version', async t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'anyu-store-rollback-'))
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }))
+  const manager = new SkillManager(directory)
+  const original = await zip({ 'SKILL.md': content })
+  await installPackage(manager, metadata(original), original, '')
+  fs.writeFileSync(path.join(manager.root, 'ANYU_TRAINING.md'), 'x'.repeat(17000))
+  const target = path.join(manager.root, 'demo')
+  const before = localRevision(target)
+  const update = await zip({ 'SKILL.md': `${content}\nUpdate` })
+  await assert.rejects(installPackage(manager, metadata(update), update, before), /训练规则/)
+  assert.equal(localRevision(target), before)
+  assert.equal(fs.readFileSync(path.join(target, 'SKILL.md'), 'utf8'), content)
+})
+test('package validation rejects collisions, training overrides and Windows device paths', async () => {
+  for (const name of ['skill.md', 'ANYU_TRAINING.md', 'con.txt', 'scripts/bad.', '.anyu-store.json']) {
+    await assert.rejects(decodePackage(await zip({ 'SKILL.md': content, [name]: 'bad' })))
+  }
+})
+test('download bounds and HTTP failures are enforced', async () => {
+  assert.equal((await readDownload(new Response('test'))).toString(), 'test')
+  await assert.rejects(readDownload(new Response('bad', { status: 403 })), /403/)
+  await assert.rejects(readDownload(new Response('small', { headers: { 'content-length': String(17 * 1024 * 1024) } })), /超限/)
+})
