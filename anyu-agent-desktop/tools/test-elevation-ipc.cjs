@@ -7,7 +7,7 @@ const { EventEmitter } = require('node:events')
 const { spawnSync } = require('node:child_process')
 
 const childMode = process.argv[2]
-const workDir = process.env.ANYU_PERMISSION_TEST_PROFILE || fs.mkdtempSync(path.join(os.tmpdir(), 'anyu-permission-ipc-'))
+const workDir = fs.realpathSync(process.env.ANYU_PERMISSION_TEST_PROFILE || fs.mkdtempSync(path.join(os.tmpdir(), 'anyu-permission-ipc-')))
 const handlers = new Map()
 let boot
 let ready = false
