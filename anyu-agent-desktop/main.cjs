@@ -205,7 +205,13 @@ function writeAgentPermissionMode(mode) {
   const normalized = normalizeAgentPermissionMode(mode)
   const target = agentPermissionFile()
   fs.mkdirSync(path.dirname(target), { recursive: true })
-  fs.writeFileSync(target, JSON.stringify({ mode: normalized, updatedAt: Date.now() }, null, 2), { encoding: 'utf8', mode: 0o600 })
+  const temporary = `${target}.${crypto.randomUUID()}.tmp`
+  try {
+    fs.writeFileSync(temporary, JSON.stringify({ mode: normalized, updatedAt: Date.now() }, null, 2), { encoding: 'utf8', mode: 0o600 })
+    fs.renameSync(temporary, target)
+  } finally {
+    fs.rmSync(temporary, { force: true })
+  }
   return normalized
 }
 
@@ -256,7 +262,8 @@ async function requestSystemElevation(payload = {}) {
     if (isWindowsAdministrator()) return { ok: true, restarted: false, state: systemAccessState() }
     try {
       await executionBroker.ensure()
-      return { ok: true, restarted: false, state: systemAccessState() }
+      const result = readAgentPermissionMode() === 'full' ? await setAgentPermissionMode('full') : null
+      return { ok: true, restarted: Boolean(result?.restarted), deferred: result?.deferred || 0, state: systemAccessState() }
     } catch (error) {
       return { ok: false, code: error.code || 'ELEVATION_FAILED', cancelled: error.cancelled === true, message: error.message, state: systemAccessState() }
     }
@@ -340,6 +347,10 @@ function modelInputCapabilities(model, id, api) {
 }
 function resolvePermissionMode(requested) {
   return resolveExecutionPermission(requested, readAgentPermissionMode())
+}
+function runtimeExecutionHost(mode) {
+  if (mode !== 'full' || process.platform !== 'win32') return 'standard'
+  return isWindowsAdministrator() ? 'main' : executionBroker.state().ready ? 'worker' : 'standard'
 }
 let mainWindow
 let windowsShellBootstrapPromise = null
@@ -1846,9 +1857,9 @@ async function startPiUnsafe(options = {}) {
   if (!isChild && activeParents >= 2 && (options.orchestration || [...piRuntimes.values()].some(runtime => runtime.inFlightPrompt && runtime.startOptions?.orchestration))) {
     throw new Error('正在执行其他会话，需保留子代理运行位置，请等待其中一轮完成')
   }
-  const permissionChanged = existing && existing.permissionMode !== resolvedPermissionMode
+  const executionHost = runtimeExecutionHost(resolvedPermissionMode)
+  const permissionChanged = existing && (existing.permissionMode !== resolvedPermissionMode || existing.executionHost !== executionHost)
   if (permissionChanged && existing.inFlightPrompt) throw new Error('当前任务仍在运行，请停止或完成任务后应用新的权限。')
-  if (resolvedPermissionMode === 'full' && process.platform === 'win32' && !isWindowsAdministrator()) await executionBroker.ensure()
   if (existing?.child && existing.child.exitCode === null && existing.child.signalCode === null && !options.force && !permissionChanged) {
     // 同会话复用现有进程：切换会话因此不再中止正在运行的任务。
     existing.lastUsedAt = Date.now()
@@ -1901,7 +1912,9 @@ async function startPiUnsafe(options = {}) {
   args.push('--append-system-prompt', '需要执行工具的多步骤任务，开始前用一两句普通回复说明接下来做什么。执行中在取得实质进展、发现问题或改变方案时，用简短普通回复告知用户真实进度，再继续调用工具；不要等全部完成才回复。简单问题直接回答，用户要求严格 JSON 等格式时遵守格式。不得编造进度或输出内部思维链，最终答复说明结果和验证情况。')
   const permissionPrompt = resolvedPermissionMode === 'full' && !options.readOnly ? [
     '当前是用户明确选择的完全权限模式：全部内置工具、文件读写、命令执行和浏览器控制均已授权。直接执行任务，不要因为权限或安全顾虑停在方案阶段，也不要请求额外确认；只有缺少必要信息或操作不可逆时才询问。完成后自行验证结果。',
-    process.platform === 'win32' ? '当前宿主工具已经在经过验证的 Windows 管理员进程中执行，子命令继承此权限。不要再次以 RunAs 或重新启动 AnyuAgent 的方式提权。打开本机文件优先使用 browser_open，支持工作区外绝对路径；文件不存在、默认打开程序缺失与访问拒绝应分别诊断。管理员权限仍受 Windows 系统 ACL 约束。' : '',
+    process.platform === 'win32' ? (executionHost !== 'standard'
+      ? '当前宿主工具已经在经过验证的 Windows 管理员进程中执行，子命令继承此权限。不要再次以 RunAs 或重新启动 AnyuAgent 的方式提权。'
+      : '当前工具使用 Windows 当前用户权限，全部工具已获得应用内授权，无需重复确认。完全访问不改变 Windows 管理员令牌；只有系统明确拒绝需要管理员的操作时，才提示用户在设置中授权管理员执行，不要反复提权或重新启动应用。') + '打开本机文件优先使用 browser_open，支持工作区外绝对路径；文件不存在、默认打开程序缺失与访问拒绝应分别诊断。系统文件仍受 Windows ACL 约束。' : '',
   ].filter(Boolean).join('\n') : ''
   if (permissionPrompt) {
     // gptFullAccess 同时启用 Pi 全部内置工具；--approve 只负责信任项目文件。
@@ -1942,7 +1955,7 @@ async function startPiUnsafe(options = {}) {
     if (!fs.existsSync(orchestrationExtension)) throw new Error('缺少多代理扩展，请更新桌面客户端')
     args.push('--extension', orchestrationExtension)
   }
-  const runtime = { key, engine: useCodex ? 'codex' : 'pi', gatewayContext, contextPolicy, contextSignature, buffer: '', pending: new Map(), counter: 0, child: null, inFlightPrompt: false, lastUsedAt: Date.now(), lastEventAt: 0, cwd, permissionMode: resolvedPermissionMode }
+  const runtime = { key, engine: useCodex ? 'codex' : 'pi', gatewayContext, contextPolicy, contextSignature, buffer: '', pending: new Map(), counter: 0, child: null, inFlightPrompt: false, lastUsedAt: Date.now(), lastEventAt: 0, cwd, permissionMode: resolvedPermissionMode, executionHost }
   let startupStderr = ''
   let stateResponse = null
   try {
@@ -1961,7 +1974,7 @@ async function startPiUnsafe(options = {}) {
   }
   const runtimeArgs = useCodex ? [externalProcessPath('codex-worker.cjs')] : args
   if (useCodex) launchOptions.env.ELECTRON_RUN_AS_NODE = '1'
-  runtime.child = resolvedPermissionMode === 'full' && process.platform === 'win32' && !isWindowsAdministrator()
+  runtime.child = executionHost === 'worker'
     ? executionBroker.spawn(runtimeArgs, { ...launchOptions, target: useCodex ? 'codex' : 'pi' })
     : spawn(useCodex ? process.execPath : executable, runtimeArgs, launchOptions)
   const child = runtime.child
@@ -2154,17 +2167,13 @@ function agentPermissionState() {
     mode,
     activeMode: activePiRuntime()?.child ? activePiRuntime().permissionMode : null,
     runtimeCount: [...piRuntimes.values()].filter(runtime => runtime.child).length,
-    ready: mode !== 'full' || access.platform !== 'win32' || access.executionAdministrator === true,
+    ready: true,
     systemAccess: access,
   }
 }
 
 async function applyAgentPermissionMode(mode) {
   const normalized = normalizeAgentPermissionMode(mode)
-  if (normalized === 'full' && process.platform === 'win32') {
-    const elevation = await requestSystemElevation()
-    if (!elevation.ok) return { ...elevation, ...agentPermissionState() }
-  }
   writeAgentPermissionMode(normalized)
   acknowledgeElevationIntent()
   let restarted = 0
@@ -2176,7 +2185,7 @@ async function applyAgentPermissionMode(mode) {
   runtimes.sort((left, right) => Number(right.key === activeKey) - Number(left.key === activeKey))
   for (const runtime of runtimes) {
     if (!runtime?.startOptions) continue
-    if (runtime.permissionMode === resolveExecutionPermission(normalized)) continue
+    if (runtime.permissionMode === resolveExecutionPermission(normalized) && runtime.executionHost === runtimeExecutionHost(resolveExecutionPermission(normalized))) continue
     // A running team holds an immutable permission snapshot for the whole turn.
     if (runtime.startOptions.agentRole === 'child') continue
     if (runtime.inFlightPrompt) { deferred += 1; continue }
@@ -2726,6 +2735,7 @@ function showMainWindow() {
 }
 
 function hideMainWindow() {
+  createTray()
   if (mainWindow && !mainWindow.isDestroyed()) mainWindow.hide()
 }
 
@@ -2740,6 +2750,7 @@ function createTray() {
     { label: '退出 AnyuAgent', click: () => { isQuitting = true; app.quit() } }
   ]))
   tray.on('double-click', () => showMainWindow())
+  tray.on('click', () => showMainWindow())
   return tray
 }
 
@@ -2792,7 +2803,7 @@ function createWindow() {
     width: 1440, height: 920, minWidth: 1050, minHeight: 700,
     title: 'AnyuAgent', backgroundColor: '#00000000',
     frame: false, transparent: true, roundedCorners: true, hasShadow: true,
-    icon: path.join(__dirname, 'branding', 'anyu-mark.png'),
+    icon: path.join(__dirname, 'branding', process.platform === 'win32' ? 'anyu.ico' : 'anyu-mark.png'),
     webPreferences: { preload: path.join(__dirname, 'preload.cjs'), contextIsolation: true, sandbox: true, nodeIntegration: false }
   })
   if (process.platform === 'win32') mainWindow.setAppDetails({ appId: DESKTOP_APP_ID, appIconPath: path.join(__dirname, 'branding', 'anyu.ico'), appIconIndex: 0, relaunchDisplayName: 'AnyuAgent' })
@@ -2996,6 +3007,13 @@ async function resumeWorkbenchTask(task, message, fresh = false) {
   return agentOrchestrator.prompt({ sessionId, message, recoveryOf: fresh ? '' : task.id })
 }
 
+if (!app.requestSingleInstanceLock()) {
+  app.quit()
+} else {
+app.on('second-instance', () => {
+  if (app.isReady()) showMainWindow()
+  else app.once('ready', () => showMainWindow())
+})
 app.whenReady().then(async () => {
   Menu.setApplicationMenu(null)
   // 先读取上次提权流程留下的意图：被提权重启后，本次启动要据此恢复完整访问，
@@ -3655,7 +3673,6 @@ app.whenReady().then(async () => {
     if (action === 'minimize') mainWindow.minimize()
     else if (action === 'maximize') mainWindow.isMaximized() ? mainWindow.unmaximize() : mainWindow.maximize()
     else if (action === 'close') {
-      isQuitting = true
       mainWindow.close()
       return { ok: true, maximized: false }
     }
@@ -3673,7 +3690,7 @@ app.whenReady().then(async () => {
     return { ok: true, width: nextWidth, clamped: nextWidth !== width }
   })
   createWindow()
-  app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow() })
+  app.on('activate', () => showMainWindow())
 })
 app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit() })
 installGracefulQuit(app, {
@@ -3681,4 +3698,5 @@ installGracefulQuit(app, {
   stop: async () => { await stopPi(); await agentWorkbench?.close() },
   onError: error => console.error('[shutdown]', error)
 })
+}
 }

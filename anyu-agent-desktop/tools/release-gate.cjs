@@ -9,6 +9,8 @@ const portable = process.argv.includes('--portable')
 const tests = ['test-agent-context.cjs', 'test-agent-workbench.cjs', 'test-agent-connectors.cjs', 'test-workbench-integration.cjs', 'test-agent-session.cjs', 'test-agent-orchestrator.cjs', 'test-runtime-probe.cjs', 'test-auth-memory.cjs']
 if (!portable) tests.push('test-context-pi-live.cjs', 'test-runtime-probe-pi-live.cjs', 'test-subagent-pi-live.cjs', 'test-approval-pi-live.cjs', 'test-workbench-pi-live.cjs', 'test-codex-client.cjs', 'test-codex-runtime.cjs', 'test-codex-provider.cjs')
 const commands = [
+  ['tools/test-elevation-ipc.cjs'],
+  ['--test', 'tools/test-agent-permissions.cjs', 'tools/test-permission-no-restart.cjs', 'tools/test-execution-broker.cjs', 'tools/test-local-file-access.cjs'],
   ['tools/test-updater.cjs'],
   ['--test', 'tools/test-desktop-updates.cjs', 'tools/test-windows-update.cjs', 'tools/test-shutdown.cjs'],
   ['--test', ...tests.map(file => path.join('tools', file))],

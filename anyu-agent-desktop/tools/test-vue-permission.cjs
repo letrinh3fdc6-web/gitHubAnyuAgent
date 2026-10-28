@@ -45,12 +45,14 @@ test('Vue preserves the previous selection after cancellation and displays the r
   assert.equal(h.context.permissionBusy.value, false)
 })
 
-test('Vue distinguishes persisted full permission from effective privilege after an ordinary launch', async () => {
-  const h = harness({ mode: 'full', activeMode: null, ready: false, systemAccess: { platform: 'win32', executionAdministrator: false } })
+test('Vue restores full access without a pending authorization label while keeping administrator status accurate', async () => {
+  const h = harness({ mode: 'full', activeMode: null, ready: true, systemAccess: { platform: 'win32', executionAdministrator: false } })
   await h.context.load()
   assert.equal(h.context.activePermissionMode.value, null)
-  assert.match(h.context.permissionNotice.value, /尚未授权/)
-  assert.match(h.context.label('full'), /待授权/)
+  assert.equal(h.context.permissionNotice.value, '')
+  assert.equal(h.context.label('full'), '完全权限')
+  assert.equal(h.context.systemAccess.value.executionAdministrator, false)
+  assert.equal(h.elevations(), 0)
   h.context.systemAccess.value.executionAdministrator = true
   assert.equal(h.context.label('full'), '完全权限')
 })
