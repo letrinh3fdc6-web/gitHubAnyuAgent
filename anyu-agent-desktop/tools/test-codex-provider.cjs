@@ -92,3 +92,87 @@ test('native requests reuse their upstream connection', async t => {
   for (let i = 0; i < 2; i++) await (await f.request()).text()
   assert.equal(f.requests[0].port, f.requests[1].port)
 })
+
+test('Claude streams summaries immediately and preserves signatures through tool rounds', async t => {
+  let finish
+  const ending = new Promise(resolve => { finish = resolve })
+  t.after(() => finish())
+  let round = 0
+  const f = await fixture(t, async (req, res) => {
+    const first = ++round === 1
+    res.writeHead(200, { 'Content-Type': 'text/event-stream' })
+    const send = event => res.write(`event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`)
+    send({ type: 'message_start', message: { id: 'msg_test', model: req.body.model, usage: { input_tokens: 3, output_tokens: 0 } } })
+    if (first) {
+      send({ type: 'content_block_start', index: 0, content_block: { type: 'thinking', thinking: '' } })
+      send({ type: 'content_block_delta', index: 0, delta: { type: 'thinking_delta', thinking: 'Public summary.' } })
+      send({ type: 'content_block_delta', index: 0, delta: { type: 'signature_delta', signature: 'OPAQUE_SIGNATURE' } })
+      send({ type: 'content_block_stop', index: 0 })
+      send({ type: 'content_block_start', index: 1, content_block: { type: 'tool_use', id: 'tool_one', name: 'read', input: {} } })
+      await ending
+      send({ type: 'content_block_delta', index: 1, delta: { type: 'input_json_delta', partial_json: '{"path":"input.txt"}' } })
+      send({ type: 'content_block_stop', index: 1 })
+    } else {
+      send({ type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } })
+      send({ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'Done.' } })
+      send({ type: 'content_block_stop', index: 0 })
+    }
+    send({ type: 'message_delta', delta: { stop_reason: first ? 'tool_use' : 'end_turn' }, usage: { output_tokens: 5 } })
+    send({ type: 'message_stop' }); res.end()
+  }, { id: 'claude-opus-5-5', api: 'anthropic-messages', reasoning: true, preferNativeResponses: false, maxTokens: 64000, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } })
+  f.bridge.getThinking = () => 'xhigh'
+  const activity = []; f.bridge.onProviderActivity = type => activity.push(type)
+  const tools = [{ type: 'function', name: 'read', parameters: { type: 'object', properties: { path: { type: 'string' } } } }]
+  const response = await f.request({ tools })
+  assert.equal(response.status, 200)
+  const reader = response.body.getReader()
+  let output = ''
+  while (!output.includes('Public summary.')) { const chunk = await reader.read(); assert.equal(chunk.done, false); output += new TextDecoder().decode(chunk.value) }
+  assert.match(output, /response.created/)
+  assert.ok(!output.includes('response.completed'))
+  assert.ok(!output.includes('function_call_arguments.done'))
+  assert.deepEqual(f.requests[0].body.thinking, { type: 'adaptive', display: 'summarized' })
+  assert.equal(f.requests[0].body.output_config.effort, 'xhigh')
+  assert.equal(f.requests[0].body.fallbacks, undefined)
+  finish()
+  for (;;) { const chunk = await reader.read(); if (chunk.done) break; output += new TextDecoder().decode(chunk.value) }
+  assert.deepEqual(activity, ['thinking_start', 'toolcall_start'])
+  const events = output.split('\n').filter(line => line.startsWith('data: ')).map(line => JSON.parse(line.slice(6)))
+  const result = events.find(event => event.type === 'response.completed').response
+  assert.deepEqual(result.output[0].summary, [{ type: 'summary_text', text: 'Public summary.' }])
+  assert.ok(!JSON.stringify(events.filter(event => event.type.includes('summary'))).includes('OPAQUE_SIGNATURE'))
+  const next = await f.request({ tools, input: [ ...result.output, { type: 'function_call_output', call_id: 'tool_one', output: 'FILE_CONTENT' } ] })
+  assert.match(await next.text(), /Done\./)
+  const history = f.requests[1].body.messages.find(message => message.role === 'assistant')
+  assert.deepEqual(history.content.find(part => part.type === 'thinking'), { type: 'thinking', thinking: 'Public summary.', signature: 'OPAQUE_SIGNATURE' })
+})
+
+for (const [id, level, expectedThinking, effort] of [
+  ['claude-opus-5-5', 'auto', { type: 'adaptive', display: 'summarized' }, undefined],
+  ['claude-opus-5', 'xhigh', { type: 'adaptive', display: 'summarized' }, 'xhigh'],
+  ['claude-opus-4-6', 'auto', undefined, undefined],
+  ['claude-sonnet-5-5', 'between_tools', { type: 'between_tools', display: 'summarized' }, 'high'],
+]) test(`Claude native configuration: ${id} ${level}`, async t => {
+  const f = await fixture(t, (_req, res) => { res.writeHead(400); res.end('{"type":"error","error":{"type":"invalid_request_error","message":"fixture completed"}}') }, { id, api: 'anthropic-messages', reasoning: true, preferNativeResponses: false })
+  f.bridge.getThinking = () => level
+  assert.equal((await f.request()).status, 400)
+  assert.deepEqual(f.requests[0].body.thinking, expectedThinking)
+  assert.equal(f.requests[0].body.output_config?.effort, effort)
+  assert.equal(f.requests[0].body.fallbacks, undefined)
+})
+
+test('Claude native stream errors retain their diagnostic after response headers', async t => {
+  const f = await fixture(t, (req, res) => {
+    res.writeHead(200, { 'Content-Type': 'text/event-stream' })
+    const events = [
+      { type: 'message_start', message: { id: 'msg_error', model: req.body.model, usage: { input_tokens: 3, output_tokens: 0 } } },
+      { type: 'error', error: { type: 'overloaded_error', message: 'Claude fixture overloaded' } },
+    ]
+    res.end(events.map(event => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join(''))
+  }, { id: 'claude-opus-5-5', api: 'anthropic-messages', preferNativeResponses: false, reasoning: true, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } })
+  const response = await f.request()
+  const body = await response.text()
+  assert.match(body, /response.failed/)
+  assert.match(body, /Claude fixture overloaded/)
+  assert.doesNotMatch(body, /response.completed/)
+})

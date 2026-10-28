@@ -19,7 +19,7 @@ const { Agent: UndiciAgent } = require('undici')
 const QRCode = require('qrcode')
 const { normalizeBrowserBounds, calculateBrowserFitZoom } = require('./browser-layout.cjs')
 const { RENDERER_ORIGIN, RENDERER_SCHEME, createRendererHandler } = require('./renderer-protocol.cjs')
-const { allowedBrowserUrl, workspaceFile } = require('./browser-policy.cjs')
+const { allowedBrowserUrl, workspaceFile, localFilePath, ArtifactPreviews } = require('./browser-policy.cjs')
 const { LocalFeedback, feedbackUrl } = require('./local-feedback.cjs')
 const { detailThumbnail } = require('./detail-thumbnails.cjs')
 // 旧版/损坏安装包可能漏带可选详情图模块；不能因此让整个主进程启动崩溃。
@@ -209,14 +209,16 @@ function writeAgentPermissionMode(mode) {
   return normalized
 }
 
-const executionBroker = new ExecutionBroker({ app, executable: () => piExecutable() })
-const codexExecutionBroker = new ExecutionBroker({ app, executable: () => process.execPath })
+const executionBroker = new ExecutionBroker({ app, executables: () => ({ pi: piExecutable(), codex: process.execPath }) })
+executionBroker.on('state', () => {
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('agent:permission-changed')
+})
 
 // 读取当前进程的系统授权状态；系统权限只能由 Windows/macOS 自己授予。
 //
 // 判定结果缓存：提权流程会连续调用多次（提权前判定 + 提权后回报状态），
-// 每次都同步拉起 PowerShell 会明显拖慢界面。缓存只在单进程内有效，
-// 提权必然重启进程，所以不存在"缓存掩盖了提权结果"的问题。
+// 每次都同步拉起 PowerShell 会明显拖慢界面。此缓存仅表示界面进程的令牌，
+// 独立管理员执行进程的实际状态始终从 executionBroker 读取。
 let windowsAdministratorCache = null
 
 function isWindowsAdministrator() {
@@ -240,7 +242,7 @@ function systemAccessState() {
   // "没提权"和"提权了但系统没给权限"这两种完全不同的失败原因。
   const launchedElevated = isElevatedLaunch()
   if (platform === 'win32') {
-    const worker = codexExecutionBroker.state().ready ? codexExecutionBroker.state() : executionBroker.state()
+    const worker = executionBroker.state()
     return { platform, elevated, administrator: elevated, executionAdministrator: elevated || worker.ready, executionHost: elevated ? 'main' : worker.ready ? 'worker' : 'standard', executionPid: worker.pid, uacAvailable: true, canRequestElevation: !elevated && !worker.ready, fullDiskAccess: null, launchedElevated }
   }
   if (platform === 'darwin') {
@@ -253,7 +255,7 @@ async function requestSystemElevation(payload = {}) {
   if (process.platform === 'win32') {
     if (isWindowsAdministrator()) return { ok: true, restarted: false, state: systemAccessState() }
     try {
-      await codexExecutionBroker.ensure()
+      await executionBroker.ensure()
       return { ok: true, restarted: false, state: systemAccessState() }
     } catch (error) {
       return { ok: false, code: error.code || 'ELEVATION_FAILED', cancelled: error.cancelled === true, message: error.message, state: systemAccessState() }
@@ -361,7 +363,7 @@ let reportedBrowserBounds = null
 let browserFitTimer = null
 let browserFitEpoch = 0
 let browserFitNeedsReset = false
-let previewRoot = ''
+const artifactPreviews = new ArtifactPreviews()
 let browserBridge = null
 let browserBridgeToken = ''
 const browserBridgeCwds = new Set()
@@ -693,19 +695,14 @@ function artifactDataUrl(filePath) {
   return `data:${mime};base64,${data.toString('base64')}`
 }
 
-// 工作区协议只服务可预览的静态资源，禁止任意文件类型与越界读取。
+// 预览协议只服务本次选中的文件及其静态资源，不向网页开放整台电脑。
 const PREVIEW_MIME = { '.html': 'text/html', '.htm': 'text/html', '.css': 'text/css', '.js': 'text/javascript', '.mjs': 'text/javascript', '.json': 'application/json', '.csv': 'text/csv', '.md': 'text/markdown', '.txt': 'text/plain', '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp', '.gif': 'image/gif', '.svg': 'image/svg+xml', '.pdf': 'application/pdf', '.woff': 'font/woff', '.woff2': 'font/woff2', '.ico': 'image/x-icon' }
 const PREVIEW_CSP = "default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' data: blob:; font-src 'self' data:; connect-src 'none'; form-action 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'"
 
 async function previewResponse(request) {
   try {
     const referer = String(request.referrer || request.headers?.get?.('referer') || '')
-    if (referer && !referer.startsWith('leta-preview://workspace/')) throw new Error('跨站资源请求不允许')
-    const url = new URL(request.url)
-    if (url.hostname !== 'workspace' || !previewRoot) throw new Error('预览不可用')
-    const candidate = workspaceFile(previewRoot, `.${decodeURIComponent(url.pathname)}`)
-    const real = await fs.promises.realpath(candidate)
-    workspaceFile(previewRoot, path.relative(previewRoot, real))
+    const real = artifactPreviews.resolve(request.url, referer)
     const stat = await fs.promises.stat(real)
     const mime = PREVIEW_MIME[path.extname(real).toLowerCase()]
     if (!stat.isFile() || !mime || stat.size > BROWSER_ARTIFACT_MAX_BYTES) throw new Error('文件类型或大小不支持预览')
@@ -713,7 +710,7 @@ async function previewResponse(request) {
     const display = ['application/json', 'text/csv', 'text/markdown', 'text/plain'].includes(mime)
     const body = display ? `<!doctype html><meta charset="utf-8"><style>body{font:13px ui-monospace,Consolas,monospace;padding:24px;white-space:pre-wrap;word-break:break-word;color:#202124;background:#fff}</style><pre>${escapeArtifactText(data.toString('utf8'))}</pre>` : data
     return new Response(body, { headers: { 'Content-Type': display ? 'text/html; charset=utf-8' : `${mime}${mime.startsWith('text/') ? '; charset=utf-8' : ''}`, 'Content-Security-Policy': PREVIEW_CSP, 'X-Content-Type-Options': 'nosniff' } })
-  } catch { return new Response('预览文件不存在或不在工作区内', { status: 404 }) }
+  } catch { return new Response('预览文件不存在、无权读取或预览已失效', { status: 404 }) }
 }
 
 function ensureBrowserView() {
@@ -735,16 +732,18 @@ function ensureBrowserView() {
   browserView.webContents.on('did-stop-loading', () => { browserState = { ...browserState, loading: false, title: browserView.webContents.getTitle() || browserState.title }; sendBrowserState(); scheduleBrowserFit(true) })
   browserView.webContents.on('page-title-updated', (_, title) => { browserState = { ...browserState, title: String(title || '') }; sendBrowserState() })
   browserView.webContents.on('will-navigate', (event, url) => {
-    const preview = url.startsWith('leta-preview://workspace/')
+    const preview = artifactPreviews.has(url) && (browserHistoryTransition || new URL(url).host === new URL(browserView.webContents.getURL()).host)
     if (browserState.url.startsWith('artifact://') && !browserHistoryTransition ? !preview : !isAllowedBrowserUrl(url) && !(browserHistoryTransition && preview)) event.preventDefault()
   })
   browserView.webContents.on('will-redirect', (event, url) => {
-    if (browserState.url.startsWith('artifact://') ? !url.startsWith('leta-preview://workspace/') : !isAllowedBrowserUrl(url)) event.preventDefault()
+    if (browserState.url.startsWith('artifact://') ? !artifactPreviews.has(url) || new URL(url).host !== new URL(browserView.webContents.getURL()).host : !isAllowedBrowserUrl(url)) event.preventDefault()
   })
   browserView.webContents.on('did-navigate', (_, url) => {
     browserHistoryTransition = false
-    const displayUrl = url.startsWith('leta-preview://workspace/') && previewRoot
-      ? `artifact://${path.resolve(previewRoot, `.${decodeURIComponent(new URL(url).pathname)}`)}` : url
+    let displayUrl = url
+    if (artifactPreviews.has(url)) {
+      try { displayUrl = `artifact://${artifactPreviews.resolve(url)}` } catch {}
+    }
     browserState = { ...browserState, url: displayUrl }
     browserState = { ...browserState, canGoBack: browserView.webContents.navigationHistory.canGoBack(), canGoForward: browserView.webContents.navigationHistory.canGoForward() }
     sendBrowserState()
@@ -832,22 +831,17 @@ async function createPaymentQrDataUrl(value) {
 
 
 async function openBrowserArtifact(payload = {}) {
-  const cwd = path.resolve(String(payload.cwd || ''))
-  const requested = String(payload.path || '').trim()
-  if (!cwd || !path.isAbsolute(cwd) || !requested) throw new Error('结果文件位置无效')
-  if (!fs.existsSync(cwd) || !fs.statSync(cwd).isDirectory()) throw new Error('工作目录不存在')
-  const candidate = path.resolve(cwd, requested)
-  if (!isInside(cwd, candidate) || !fs.existsSync(candidate)) throw new Error('只能预览当前工作目录中的结果文件')
-  if (!isInside(fs.realpathSync(cwd), fs.realpathSync(candidate))) throw new Error('结果文件不能指向工作目录外')
-  const realRoot = fs.realpathSync(cwd)
-  const realCandidate = fs.realpathSync(candidate)
-  if (!PREVIEW_MIME[path.extname(realCandidate).toLowerCase()] || fs.statSync(realCandidate).size > BROWSER_ARTIFACT_MAX_BYTES) throw new Error('当前文件类型或大小不支持内置预览')
+  const candidate = localFilePath(payload.cwd, payload.path)
+  const stat = fs.statSync(candidate)
+  if (!stat.isFile() || !PREVIEW_MIME[path.extname(candidate).toLowerCase()] || stat.size > BROWSER_ARTIFACT_MAX_BYTES) {
+    await openWorkspacePath({ path: candidate })
+    return { ...browserState, openedExternally: true, path: candidate }
+  }
   const view = ensureBrowserView()
-  previewRoot = realRoot
+  const previewUrl = artifactPreviews.open(candidate, payload.cwd)
   browserState = { ...browserState, open: true, url: `artifact://${candidate}`, title: path.basename(candidate), loading: true, error: '' }
   sendBrowserState({ reveal: true })
-  const relative = path.relative(realRoot, realCandidate).split(path.sep).map(encodeURIComponent).join('/')
-  void view.webContents.loadURL(`leta-preview://workspace/${relative}`).catch((error) => {
+  void view.webContents.loadURL(previewUrl).catch((error) => {
     browserState = { ...browserState, loading: false, error: error.message || '结果预览失败' }
     sendBrowserState()
   })
@@ -855,20 +849,17 @@ async function openBrowserArtifact(payload = {}) {
 }
 
 function inspectWorkspaceArtifacts(payload = {}) {
-  const cwd = path.resolve(String(payload.cwd || ''))
+  const cwd = String(payload.cwd || '')
   const requestedPaths = Array.isArray(payload.paths) ? payload.paths.slice(0, 32) : []
-  if (!cwd || !path.isAbsolute(cwd)) throw new Error('结果文件位置无效')
-  if (!fs.existsSync(cwd) || !fs.statSync(cwd).isDirectory()) throw new Error('工作目录不存在')
   const previewExtensions = new Set(['.html', '.htm', '.json', '.csv', '.md', '.txt', '.png', '.jpg', '.jpeg', '.webp', '.gif', '.svg', '.pdf'])
   const textExtensions = new Set(['.html', '.htm', '.json', '.csv', '.md', '.txt', '.js', '.cjs', '.mjs', '.ts', '.tsx', '.jsx', '.css', '.go', '.py', '.yaml', '.yml', '.sql'])
   const unique = new Map()
   for (const requested of requestedPaths) {
     const raw = String(requested || '').trim().replace(/^['"`]|['"`]$/g, '')
     if (!raw) continue
-    const candidate = path.resolve(cwd, raw)
-    if (!isInside(cwd, candidate) || !fs.existsSync(candidate)) continue
-    if (!isInside(fs.realpathSync(cwd), fs.realpathSync(candidate))) continue
-    const relativePath = path.relative(cwd, candidate) || path.basename(candidate)
+    let candidate
+    try { candidate = localFilePath(cwd, raw) } catch { continue }
+    const relativePath = path.isAbsolute(cwd) && isInside(cwd, candidate) ? path.relative(cwd, candidate) || path.basename(candidate) : candidate
     const stats = fs.statSync(candidate)
     if (stats.isDirectory()) {
       unique.set(candidate.toLowerCase(), { path: relativePath, name: path.basename(candidate), extension: '', size: 0, lineCount: 0, directory: true, previewable: false })
@@ -893,15 +884,7 @@ function inspectWorkspaceArtifacts(payload = {}) {
 }
 
 async function openWorkspacePath(payload = {}) {
-  const cwd = path.resolve(String(payload.cwd || ''))
-  const requested = String(payload.path || '').trim()
-  if (!cwd || !path.isAbsolute(cwd) || !requested) throw new Error('路径位置无效')
-  if (!fs.existsSync(cwd) || !fs.statSync(cwd).isDirectory()) throw new Error('工作目录不存在')
-  const candidate = path.resolve(cwd, requested)
-  if ((!isInside(cwd, candidate) && candidate !== cwd) || !fs.existsSync(candidate)) throw new Error('路径不存在或越界')
-  const real = fs.realpathSync(candidate)
-  const realRoot = fs.realpathSync(cwd)
-  if ((!isInside(realRoot, real) && real !== realRoot) || !isInside(cwd, candidate) && candidate !== cwd) throw new Error('路径不能指向工作目录外')
+  const real = localFilePath(payload.cwd, payload.path)
   if (payload.mode === 'explorer') {
     if (process.platform === 'win32') spawn('explorer.exe', [fs.statSync(real).isDirectory() ? real : `/select,${real}`], { detached: true, windowsHide: true }).unref()
     else shell.showItemInFolder(real)
@@ -922,7 +905,7 @@ function closeBrowserView() {
   if (browserView && mainWindow && !mainWindow.isDestroyed()) mainWindow.contentView.removeChildView(browserView)
   if (browserView && !browserView.webContents.isDestroyed()) browserView.webContents.close()
   browserView = null
-  previewRoot = ''
+  artifactPreviews.clear()
   browserState = { open: false, url: '', title: '', loading: false, error: '', canGoBack: false, canGoForward: false, zoomFactor: 1, zoomMode: 'fit-width' }
   reportedBrowserBounds = null
   sendBrowserState()
@@ -1712,7 +1695,6 @@ async function stopPi() {
     gatewayBridge.stop()
   ])
   await executionBroker.close()
-  await codexExecutionBroker.close()
 }
 
 async function stopBrowserBridge() {
@@ -1765,7 +1747,11 @@ async function startBrowserBridge(cwd) {
           const filePath = String(payload.path || '').trim()
           if (Boolean(url) === Boolean(filePath)) throw new Error('必须指定一个网页或文件')
           if (url) await openBrowserUrl(url)
-          else await openBrowserArtifact({ path: filePath, cwd: requested })
+          else {
+            const result = await openBrowserArtifact({ path: filePath, cwd: requested })
+            response.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' }); response.end(JSON.stringify(result))
+            return
+          }
           response.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' }); response.end('OK')
           return
         }
@@ -1840,7 +1826,6 @@ async function startPiUnsafe(options = {}) {
     try { savedEngine = JSON.parse(fs.readFileSync(requestedSession, 'utf8').split(/\r?\n/)[0]) } catch {}
   }
   const useCodex = savedEngine?.engine === 'codex' || Boolean(options.agentSessionId && !requestedSession)
-  const runtimeBroker = useCodex ? codexExecutionBroker : executionBroker
   const key = requestedSession || `anon:${crypto.randomUUID()}`
   const existing = piRuntimes.get(key)
   if (existing?.compacting) throw new Error('当前会话正在压缩，请等待完成')
@@ -1863,7 +1848,7 @@ async function startPiUnsafe(options = {}) {
   }
   const permissionChanged = existing && existing.permissionMode !== resolvedPermissionMode
   if (permissionChanged && existing.inFlightPrompt) throw new Error('当前任务仍在运行，请停止或完成任务后应用新的权限。')
-  if (resolvedPermissionMode === 'full' && process.platform === 'win32' && !isWindowsAdministrator()) await runtimeBroker.ensure()
+  if (resolvedPermissionMode === 'full' && process.platform === 'win32' && !isWindowsAdministrator()) await executionBroker.ensure()
   if (existing?.child && existing.child.exitCode === null && existing.child.signalCode === null && !options.force && !permissionChanged) {
     // 同会话复用现有进程：切换会话因此不再中止正在运行的任务。
     existing.lastUsedAt = Date.now()
@@ -1914,11 +1899,15 @@ async function startPiUnsafe(options = {}) {
   args.push('--append-system-prompt', '工具调用由你负责决策。工具失败只代表当前尝试失败：读取错误码和简短摘要，按需重试、改参数、选择替代工具或向用户说明；不要把原始堆栈、二进制内容、临时路径当成用户需求，也不要因一次工具失败终止后续对话。')
   args.push('--append-system-prompt', '检查本机环境时优先使用 runtime_probe，逐项判断依赖，不要用 Get-Command node, python, msedge, chrome 这样的整体检查。外部 Edge/Chrome 缺失不代表权限不足，内置浏览器优先使用 browser_open；系统 Node/Python 等仅在任务需要时才验证或准备。完全权限不等于依赖已安装，也不能绕过所有系统 ACL。明确区分命令不存在、路径不存在、访问被拒绝和应用退出码非零，依据实际错误修复，不得把失败改报成功。')
   args.push('--append-system-prompt', '需要执行工具的多步骤任务，开始前用一两句普通回复说明接下来做什么。执行中在取得实质进展、发现问题或改变方案时，用简短普通回复告知用户真实进度，再继续调用工具；不要等全部完成才回复。简单问题直接回答，用户要求严格 JSON 等格式时遵守格式。不得编造进度或输出内部思维链，最终答复说明结果和验证情况。')
-  if (resolvedPermissionMode === 'full' && !options.readOnly) {
+  const permissionPrompt = resolvedPermissionMode === 'full' && !options.readOnly ? [
+    '当前是用户明确选择的完全权限模式：全部内置工具、文件读写、命令执行和浏览器控制均已授权。直接执行任务，不要因为权限或安全顾虑停在方案阶段，也不要请求额外确认；只有缺少必要信息或操作不可逆时才询问。完成后自行验证结果。',
+    process.platform === 'win32' ? '当前宿主工具已经在经过验证的 Windows 管理员进程中执行，子命令继承此权限。不要再次以 RunAs 或重新启动 AnyuAgent 的方式提权。打开本机文件优先使用 browser_open，支持工作区外绝对路径；文件不存在、默认打开程序缺失与访问拒绝应分别诊断。管理员权限仍受 Windows 系统 ACL 约束。' : '',
+  ].filter(Boolean).join('\n') : ''
+  if (permissionPrompt) {
     // gptFullAccess 同时启用 Pi 全部内置工具；--approve 只负责信任项目文件。
     // 配置档会启用全部内置工具；不再传显式白名单，以保留插件和扩展工具。
     args.push('--permission-profile', 'gptFullAccess', '--approve')
-    args.push('--append-system-prompt', '当前是用户明确选择的完全权限模式：全部内置工具、文件读写、命令执行和浏览器控制均已授权。直接执行任务，不要因为权限或安全顾虑停在方案阶段，也不要请求额外确认；只有缺少必要信息或操作不可逆时才询问。完成后自行验证结果。')
+    args.push('--append-system-prompt', permissionPrompt)
   }
   if (isChild) args.push('--no-extensions')
   if (options.readOnly) args.push('--tools', 'read,grep,find,ls,runtime_probe')
@@ -1973,7 +1962,7 @@ async function startPiUnsafe(options = {}) {
   const runtimeArgs = useCodex ? [externalProcessPath('codex-worker.cjs')] : args
   if (useCodex) launchOptions.env.ELECTRON_RUN_AS_NODE = '1'
   runtime.child = resolvedPermissionMode === 'full' && process.platform === 'win32' && !isWindowsAdministrator()
-    ? runtimeBroker.spawn(runtimeArgs, launchOptions)
+    ? executionBroker.spawn(runtimeArgs, { ...launchOptions, target: useCodex ? 'codex' : 'pi' })
     : spawn(useCodex ? process.execPath : executable, runtimeArgs, launchOptions)
   const child = runtime.child
   child.stdout.setEncoding('utf8')
@@ -2021,7 +2010,7 @@ async function startPiUnsafe(options = {}) {
       home, cwd, agentDir: piAgentDir(), skillPaths: pluginPaths,
       model: { ...configured, provider, preferNativeResponses: managed && selectedModel.platform === 'openai' && /^gpt-[56](?:[.-]|$)/i.test(selectedModelId), maxTokens: Number(selectedModel.maxTokens || selectedModel.max_tokens || selectedModel.max_output_tokens) || undefined },
       credential, contextPolicy, thinkingLevel: options.thinkingLevel || 'auto',
-      systemPrompt: options.systemPrompt || '', readOnly: Boolean(options.readOnly),
+      systemPrompt: [options.systemPrompt, permissionPrompt].filter(Boolean).join('\n\n'), readOnly: Boolean(options.readOnly),
     } }, runtime)
   } else stateResponse = await sendPi({ type: 'get_state' }, runtime)
   const skillLaunch = { executable, cwd, env: { ...process.env, PI_CODING_AGENT_DIR: agentDir, ANYU_API_KEY: credential, PI_SKIP_VERSION_CHECK: '1', PI_OFFLINE: '1', ANYU_PERMISSION_MODE: '', ANYU_PERMISSION_PROFILE: '', LETA_BROWSER_BRIDGE_TOKEN: '', LETA_BROWSER_BRIDGE_PORT: '' } }
@@ -3638,23 +3627,17 @@ app.whenReady().then(async () => {
     if (event.sender === mainWindow?.webContents) updateRendererBusy = Boolean(busy)
   })
   ipcMain.handle('app:open-external', (_, url) => { if (/^https?:/i.test(url)) return shell.openExternal(url) })
-  ipcMain.handle('app:open-file', async (_, payload = {}) => {
-    const requested = String(payload.path || '').trim()
-    const cwd = String(payload.cwd || '').trim()
-    if (!requested || !cwd || !path.isAbsolute(cwd)) throw new Error('文件打开位置无效')
-    if (!fs.existsSync(cwd) || !fs.statSync(cwd).isDirectory()) throw new Error('工作目录不存在')
-    const candidate = path.resolve(cwd, requested)
-    if (!isInside(cwd, candidate) && candidate !== path.resolve(cwd)) throw new Error('只能打开当前工作目录中的文件')
-    if (!fs.existsSync(candidate) || !fs.statSync(candidate).isFile()) throw new Error('文件不存在：' + requested)
-    if (!isInside(fs.realpathSync(cwd), fs.realpathSync(candidate))) throw new Error('文件不能指向工作目录外')
-    const error = await shell.openPath(candidate)
-    if (error) throw new Error(error)
-    return { ok: true, path: candidate }
+  const trustedFileRequest = (event) => {
+    if (event.sender !== mainWindow?.webContents || (event.senderFrame && event.senderFrame !== mainWindow.webContents.mainFrame)) throw new Error('文件打开请求来源无效')
+  }
+  ipcMain.handle('app:open-file', async (event, payload = {}) => {
+    trustedFileRequest(event)
+    return openWorkspacePath(payload)
   })
-  ipcMain.handle('app:open-path', (_, payload = {}) => openWorkspacePath(payload))
-  ipcMain.handle('app:inspect-artifacts', (_, payload = {}) => inspectWorkspaceArtifacts(payload))
+  ipcMain.handle('app:open-path', (event, payload = {}) => { trustedFileRequest(event); return openWorkspacePath(payload) })
+  ipcMain.handle('app:inspect-artifacts', (event, payload = {}) => { trustedFileRequest(event); return inspectWorkspaceArtifacts(payload) })
   ipcMain.handle('agent-browser:open-url', (_, url) => openBrowserUrl(url))
-  ipcMain.handle('agent-browser:open-artifact', (_, payload = {}) => openBrowserArtifact(payload))
+  ipcMain.handle('agent-browser:open-artifact', (event, payload = {}) => { trustedFileRequest(event); return openBrowserArtifact(payload) })
   ipcMain.on('agent-browser:set-bounds', (_, bounds) => setBrowserBounds(bounds))
   ipcMain.handle('agent-browser:close', () => closeBrowserView())
   ipcMain.handle('agent-browser:reload', async () => {

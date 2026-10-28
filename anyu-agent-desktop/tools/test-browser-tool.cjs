@@ -12,7 +12,7 @@ async function main() {
     request.on('data', (chunk) => { body += chunk })
     request.on('end', () => {
       requests.push({ token: request.headers['x-leta-token'], body: JSON.parse(body) })
-      response.writeHead(200); response.end('OK')
+      response.writeHead(200); response.end(JSON.parse(body).path.endsWith('.docx') ? JSON.stringify({ openedExternally: true }) : 'OK')
     })
   })
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
@@ -25,6 +25,10 @@ async function main() {
     assert.deepEqual(requests[0].body, { url: '', path: 'result.html', cwd: 'C:\\workspace' })
     assert.match(result.content[0].text, /result\.html/)
     await assert.rejects(tool.execute('call-2', { path: 'a.html', url: 'https://example.com' }, null, null, { cwd: 'C:\\workspace' }))
+    const external = await tool.execute('call-3', { path: 'D:\\documents\\report.docx' }, null, null, { cwd: 'C:\\workspace' })
+    assert.match(external.content[0].text, /系统默认程序/)
+    assert.equal(external.details.openedExternally, true)
+    assert.equal(requests.at(-1).body.path, 'D:\\documents\\report.docx')
     console.log('browser_open extension protocol: passed')
   } finally { server.close() }
 }

@@ -109,6 +109,52 @@ test('official engine uses native Responses for a preferred GPT Chat catalog ent
   assert.ok(f.events.some(e => e.type === 'tool_execution_end'))
 })
 
+test('official engine forwards Claude summaries before the final reply', { timeout: 30000 }, async t => {
+  let finish
+  const ending = new Promise(resolve => { finish = resolve })
+  t.after(() => finish())
+  const f = await fixture(t, { api: 'anthropic-messages', model: { id: 'claude-opus-5-5', reasoning: true }, handler: async (_req, res, body) => {
+    res.writeHead(200, { 'Content-Type': 'text/event-stream' })
+    const send = event => res.write(`event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`)
+    send({ type: 'message_start', message: { id: 'msg_thinking', model: body.model, usage: { input_tokens: 3, output_tokens: 0 } } })
+    send({ type: 'content_block_start', index: 0, content_block: { type: 'thinking', thinking: '' } })
+    send({ type: 'content_block_delta', index: 0, delta: { type: 'thinking_delta', thinking: 'Public summary.' } })
+    send({ type: 'content_block_delta', index: 0, delta: { type: 'signature_delta', signature: 'PRIVATE_SIGNATURE' } })
+    send({ type: 'content_block_stop', index: 0 })
+    await ending
+    send({ type: 'content_block_start', index: 1, content_block: { type: 'text', text: '' } })
+    send({ type: 'content_block_delta', index: 1, delta: { type: 'text_delta', text: 'FINAL' } })
+    send({ type: 'content_block_stop', index: 1 })
+    send({ type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: { output_tokens: 5 } })
+    send({ type: 'message_stop' }); res.end()
+  } })
+  await f.command('set_thinking_level', { level: 'xhigh' })
+  await f.command('prompt', { message: 'Hello' })
+  const thinking = await f.event(e => e.type === 'message_update' && e.assistantMessageEvent?.type === 'thinking_delta')
+  assert.equal(thinking.assistantMessageEvent.delta, 'Public summary.')
+  assert.ok(!f.events.some(e => e.type === 'agent_settled'))
+  assert.deepEqual(f.requests[0].body.thinking, { type: 'adaptive', display: 'summarized' })
+  assert.equal(f.requests[0].body.output_config.effort, 'xhigh')
+  finish()
+  assert.equal((await f.event(e => e.type === 'agent_settled')).error, '')
+  assert.ok(!JSON.stringify(f.events).includes('PRIVATE_SIGNATURE'))
+  assert.equal(f.events.filter(e => e.type === 'message_end').at(-1).message.content[0].text, 'FINAL')
+})
+
+test('official engine exposes a Claude SSE failure instead of a generic disconnect', { timeout: 30000 }, async t => {
+  const f = await fixture(t, { api: 'anthropic-messages', model: { id: 'claude-opus-5-5', reasoning: true }, handler: (_req, res, body) => {
+    res.writeHead(200, { 'Content-Type': 'text/event-stream' })
+    res.end([
+      { type: 'message_start', message: { id: 'msg_failure', model: body.model, usage: { input_tokens: 3, output_tokens: 0 } } },
+      { type: 'error', error: { type: 'overloaded_error', message: 'Claude fixture overloaded' } },
+    ].map(event => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join(''))
+  } })
+  await f.command('prompt', { message: 'Hello' })
+  const done = await f.event(e => e.type === 'agent_settled')
+  assert.match(done.error, /Claude fixture overloaded/)
+  assert.ok(f.requests.length <= 3)
+})
+
 for (const api of ['openai-responses', 'openai-completions', 'anthropic-messages', 'google-generative-ai']) {
   test(`official engine: ${api} image + tool + next turn + resume`, { timeout: 50000 }, async t => {
     const f = await fixture(t, { api })

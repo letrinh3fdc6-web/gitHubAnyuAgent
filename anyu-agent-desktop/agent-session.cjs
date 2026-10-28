@@ -496,7 +496,7 @@ class AgentSessionService {
       const message = event.message || event.assistantMessage
       if (message?.role === 'assistant') {
         const replace = Boolean(run?.error || run?.retrying)
-        if (run) { run.text = ''; run.thinking = ''; run.error = '' }
+        if (run) { run.text = ''; run.error = '' }
         if (run) run.retrying = false
         this.emit(sessionId, { type: 'message.started', messageId: message?.id || message?.messageId || crypto.randomUUID(), replace })
       }
@@ -505,6 +505,11 @@ class AgentSessionService {
 
     if (event.type === 'message_update') {
       const update = event.assistantMessageEvent || event.messageEvent
+      if (update?.type === 'thinking_start') {
+        if (run?.thinking && !run.thinking.endsWith('\n\n')) run.thinking += '\n\n'
+        this.emit(sessionId, { type: 'thinking.started' })
+        return
+      }
       if (update?.type === 'toolcall_start') {
         this.emit(sessionId, { type: 'tool.preparing' })
         return
@@ -813,6 +818,12 @@ class AgentSessionService {
         current.retrying = true
       } else if (event.type === 'context.compacting' || event.type === 'context.compacted') {
         current.streamStatus = event.type === 'context.compacting' ? 'compacting' : 'waiting'
+      } else if (event.type === 'thinking.started' || event.type === 'thinking.delta') {
+        if (event.type === 'thinking.started' && current.thinking && !current.thinking.endsWith('\n\n')) current.thinking += '\n\n'
+        if (event.delta) current.thinking = (current.thinking || '') + event.delta
+        current.streamStatus = 'thinking'
+      } else if (event.type === 'tool.preparing') {
+        current.streamStatus = 'preparing_tool'
       } else if (event.type === 'message.delta') {
         delete current.streamStatus
         current.content += event.delta
@@ -849,6 +860,7 @@ class AgentSessionService {
         current.isError = event.status === 'failed'
         if (event.error) current.error = event.error
         if (event.text) current.content = event.text
+        if (!current.thinking && event.thinking) current.thinking = event.thinking
         if (current.isError && !current.content) current.content = event.error || 'Agent 运行失败'
         const part = current.parts.at(-1)
         if (part?.kind === 'text') part.content = current.content

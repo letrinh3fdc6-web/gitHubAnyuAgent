@@ -1,6 +1,6 @@
 {
   "name": "anyu-agent-desktop",
-  "version": "1.0.72",
+  "version": "1.0.74",
   "description": "AnyuAgent standalone desktop workspace",
   "main": "main.cjs",
   "author": "Anyu AI",
@@ -32,7 +32,7 @@
     "test:route-mode": "node tools/test-route-mode.cjs",
     "test:media-skill": "node tools/test-media-skill-trigger.cjs",
     "test:browser-layout": "node tools/test-browser-layout.cjs",
-    "test:browser-policy": "node tools/test-browser-policy.cjs",
+    "test:browser-policy": "node tools/test-browser-policy.cjs && node --test tools/test-local-file-access.cjs",
     "test:browser-tool": "node tools/test-browser-tool.cjs",
     "test:browser-live": "electron tools/test-browser-live.cjs",
     "test:feedback-live": "electron tools/test-feedback-live.cjs",

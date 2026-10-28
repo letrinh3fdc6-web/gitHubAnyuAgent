@@ -47,6 +47,8 @@ class CodexRuntime {
     this.tools = await new CodexTools({ ...options, ask: (request, signal) => this.ask(request, signal), emit: event => this.emit(event) }).initialize()
     this.bridge = await new CodexProviderBridge({ model: options.model, credential: options.credential, getThinking: () => this.thinking, onModelRequest: () => {
       if (!this.compaction) this.emit({ type: 'turn_start' })
+    }, onProviderActivity: type => {
+      if (!this.compaction) this.emit({ type: 'message_update', assistantMessageEvent: { type } })
     } }).start()
     // Provider catalog entries declare tools supported by this host. Preserve
     // the exact upstream model id without inheriting app-specific tool modes.

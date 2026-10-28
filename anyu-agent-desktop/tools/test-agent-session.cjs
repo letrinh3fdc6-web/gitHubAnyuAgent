@@ -44,6 +44,28 @@ test('auto permissions do not restart a runtime that resolves to confirm', async
   assert.equal(starts[2].force, true)
 })
 
+test('thinking before assistant text survives tools, completion and log replay', async t => {
+  const { service, events, ingest, start, end } = await createSession(t)
+  const thinking = text => {
+    ingest({ type: 'message_update', assistantMessageEvent: { type: 'thinking_start' } })
+    ingest({ type: 'message_update', assistantMessageEvent: { type: 'thinking_delta', delta: text } })
+  }
+  thinking('First summary.')
+  start()
+  end('Checking.', '', 'toolUse')
+  ingest({ type: 'tool_execution_start', toolCallId: 'read-1', toolName: 'read', args: {} })
+  ingest({ type: 'tool_execution_end', toolCallId: 'read-1', toolName: 'read', result: { content: [{ type: 'text', text: 'file' }] } })
+  thinking('Second summary.')
+  start()
+  end('Done.')
+  ingest({ type: 'agent_settled' })
+  assert.equal(events.at(-1).thinking, 'First summary.\n\nSecond summary.')
+  const message = service.snapshot({ sessionId: 'retry-test' }).messages.at(-1)
+  assert.equal(message.thinking, events.at(-1).thinking)
+  assert.equal(message.content, 'Done.')
+  assert.equal(message.isStreaming, false)
+})
+
 test('a stale full session record cannot auto-approve a controlled runtime', async t => {
   const { service, events, ingest } = await createSession(t)
   t.after(() => service.stopAll())

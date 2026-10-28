@@ -27,14 +27,14 @@ export default function (pi) {
   pi.registerTool({
     name: 'browser_open',
     label: '打开右侧浏览器',
-    description: '在 LetaAgent 右侧内置浏览器打开网页 URL，或预览当前工作区中的 HTML、图片、PDF 等文件。需要向用户展示可直接操作或查看的页面时使用。',
-    promptSnippet: 'Open a website or workspace result in the right-side browser',
+    description: '在 AnyuAgent 右侧内置浏览器打开网页、HTML、图片、PDF 等本机文件，支持工作区外、桌面及其他盘符的绝对路径。其他文件和文件夹交给系统默认程序打开。打开本机文件优先使用本工具，无需另行启动管理员应用。',
+    promptSnippet: 'Open a website or any local file, including files outside the workspace',
     promptGuidelines: ['Use browser_open to show a completed HTML page or website in the right-side preview when it helps the user inspect the result.'],
     parameters: {
       type: 'object',
       properties: {
         url: { type: 'string', description: 'HTTP(S) page URL; specify either url or path' },
-        path: { type: 'string', description: 'Workspace-relative or absolute path of an existing previewable file; specify either path or url' }
+        path: { type: 'string', description: 'Relative to the workspace, or an absolute local path/file URL anywhere on the computer; specify either path or url' }
       },
       additionalProperties: false
     },
@@ -42,8 +42,8 @@ export default function (pi) {
       const url = String(params.url || '').trim()
       const filePath = String(params.path || '').trim()
       if (Boolean(url) === Boolean(filePath)) throw new Error('必须且只能提供 url 或 path')
-      await bridgeRequest('/open', { url, path: filePath, cwd: ctx.cwd }, signal)
-      return { content: [{ type: 'text', text: `已在右侧浏览器打开：${url || filePath}` }], details: { url: url || undefined, path: filePath || undefined } }
+      const result = await bridgeRequest('/open', { url, path: filePath, cwd: ctx.cwd }, signal)
+      return { content: [{ type: 'text', text: `已在${result?.openedExternally ? '系统默认程序' : '右侧浏览器'}打开：${url || filePath}` }], details: { url: url || undefined, path: filePath || undefined, openedExternally: result?.openedExternally === true } }
     }
   })
 

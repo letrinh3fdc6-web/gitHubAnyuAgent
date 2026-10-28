@@ -96,11 +96,12 @@ function toProviderContext(body, model) {
 }
 
 class CodexProviderBridge {
-  constructor({ model, credential, getThinking = () => 'auto', onModelRequest = () => {} }) {
+  constructor({ model, credential, getThinking = () => 'auto', onModelRequest = () => {}, onProviderActivity = () => {} }) {
     this.model = model
     this.credential = credential
     this.getThinking = getThinking
     this.onModelRequest = onModelRequest
+    this.onProviderActivity = onProviderActivity
     this.token = crypto.randomBytes(32).toString('base64url')
     this.sockets = new Set()
     this.controllers = new Set()
@@ -218,17 +219,36 @@ class CodexProviderBridge {
     const provider = await import(`@earendil-works/pi-ai/api/${api}`)
     const context = toProviderContext(body, this.model)
     const level = this.getThinking()
+    const claude = api === 'anthropic-messages' && /^claude-/i.test(this.model.id)
+    const claudeId = this.model.id.toLowerCase().replaceAll('.', '-')
+    const adaptiveClaude = claude && /^claude-(?:opus-4-[6-8]|sonnet-4-6|(?:opus|sonnet|haiku|fable|mythos)-5|mythos-preview)(?:-|$)/.test(claudeId)
     const reasoning = level === 'auto' ? undefined : level === 'off' ? undefined : level
     const requestId = crypto.randomBytes(24).toString('hex')
     const transport = { status: 502, signal }
     this.providerRequests.set(requestId, transport)
     const explicitMax = Number.isSafeInteger(this.model.maxTokens) && this.model.maxTokens > 0
-    const knownMax = !explicitMax && api === 'anthropic-messages' ? Object.values((await import('@earendil-works/pi-ai/providers/anthropic.models')).ANTHROPIC_MODELS).find(model => model.id === this.model.id)?.maxTokens : undefined
-    const model = { ...this.model, api, maxTokens: explicitMax ? this.model.maxTokens : knownMax || 65536, baseUrl: `${new URL(this.origin).origin}/provider/${requestId}${new URL(this.model.baseUrl).pathname}`, ...(level === 'off' ? { reasoning: false } : {}) }
+    const known = api === 'anthropic-messages' && (claude || !explicitMax) ? Object.values((await import('@earendil-works/pi-ai/providers/anthropic.models')).ANTHROPIC_MODELS).find(model => model.id === this.model.id) : undefined
+    const model = { ...(claude ? known : {}), ...this.model, api, maxTokens: explicitMax ? this.model.maxTokens : known?.maxTokens || 65536, baseUrl: `${new URL(this.origin).origin}/provider/${requestId}${new URL(this.model.baseUrl).pathname}`, ...(level === 'off' ? { reasoning: false } : {}) }
+    if (claude) {
+      // Do not import SDK fallback models: the selected group owns model routing.
+      model.compat = { ...(known?.compat?.supportsTemperature === false ? { supportsTemperature: false } : {}), forceAdaptiveThinking: adaptiveClaude, ...this.model.compat }
+      model.thinkingLevelMap = { ...(adaptiveClaude ? { xhigh: 'xhigh', max: 'max' } : {}), ...known?.thinkingLevelMap, ...this.model.thinkingLevelMap }
+    }
     const stream = provider.streamSimple(model, context, {
       apiKey: this.credential, signal, reasoning, maxRetries: 0, timeoutMs: 15 * 60000,
       onResponse: response => { transport.status = response.status },
       onPayload: payload => {
+        if (claude && level === 'auto') {
+          delete payload.thinking
+          if (payload.output_config) delete payload.output_config.effort
+          // Keep upstream default effort; opt in only to the public summary.
+          if (adaptiveClaude && !claudeId.includes('-4-')) payload.thinking = { type: 'adaptive', display: 'summarized' }
+        } else if (adaptiveClaude) {
+          const limited = level === 'off' || level === 'between_tools'
+          payload.thinking = { type: level === 'off' ? 'disabled' : level === 'between_tools' ? 'between_tools' : 'adaptive' }
+          payload.output_config = { ...payload.output_config, effort: limited ? 'high' : level }
+        }
+        if (claude && payload.thinking && payload.thinking.type !== 'disabled') payload.thinking.display = 'summarized'
         // Anthropic requires max_tokens. Other protocols keep their upstream
         // default unless the catalogue explicitly declares an output limit.
         if (!explicitMax && api !== 'anthropic-messages') {
@@ -241,6 +261,7 @@ class CodexProviderBridge {
     const id = `resp_${crypto.randomUUID().replace(/-/g, '')}`
     const response = { id, object: 'response', created_at: Math.floor(Date.now() / 1000), model: model.id, status: 'in_progress', output: [] }
     let sequence = 0, begun = false, thinking = ''
+    const thinkingDeltas = new Set()
     const items = new Map()
     const send = async event => {
       if (signal.aborted) throw new Error('Model request cancelled')
@@ -270,16 +291,26 @@ class CodexProviderBridge {
         error.code = transport.code
         throw error
       }
+      if (claude && event.type === 'start') await start()
+      if (claude && (event.type === 'thinking_start' || event.type === 'toolcall_start') && !event.partial?.content[event.contentIndex]?.redacted) {
+        await start()
+        this.onProviderActivity(event.type)
+      }
       if (event.type === 'text_delta') {
         const entry = await textItem(event.contentIndex)
         entry.item.content[0].text += event.delta
         await send({ type: 'response.output_text.delta', output_index: entry.index, item_id: entry.item.id, content_index: 0, delta: event.delta })
       }
-      if (event.type === 'thinking_delta') {
+      const publicThinking = !event.partial?.content[event.contentIndex]?.redacted
+      const thinkingFallback = claude && event.type === 'thinking_end' && !thinkingDeltas.has(event.contentIndex)
+      if (publicThinking && (event.type === 'thinking_delta' || thinkingFallback)) {
+        const delta = thinkingFallback ? event.content : event.delta
+        if (!delta) continue
+        thinkingDeltas.add(event.contentIndex)
         await start()
         if (!thinking) await send({ type: 'response.reasoning_summary_part.added', output_index: 0, item_id: `rs_${id}`, summary_index: 0, part: { type: 'summary_text', text: '' } })
-        thinking += event.delta
-        await send({ type: 'response.reasoning_summary_text.delta', output_index: 0, item_id: `rs_${id}`, summary_index: 0, delta: event.delta })
+        thinking += delta
+        await send({ type: 'response.reasoning_summary_text.delta', output_index: 0, item_id: `rs_${id}`, summary_index: 0, delta })
       }
       if (event.type !== 'done') continue
       if (event.reason === 'length') throw new Error('Model output limit reached before the turn completed')
@@ -320,6 +351,12 @@ class CodexProviderBridge {
       return
     }
     throw new Error('Provider stream ended without completion')
+    } catch (error) {
+      if (!claude || !begun || res.destroyed || signal.aborted) throw error
+      // Once SSE has started, preserve the provider failure instead of closing
+      // the socket and turning every native error into a generic disconnect.
+      await send({ type: 'response.failed', response: { ...response, status: 'failed', error: { code: error.code || 'server_error', message: error.message } } })
+      res.end()
     } finally { this.providerRequests.delete(requestId) }
   }
 }

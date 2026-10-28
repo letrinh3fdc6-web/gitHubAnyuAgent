@@ -10,8 +10,11 @@ let boot
 let ready = false
 let elevationError = null
 let quitCount = 0
+let testWindow
+const openedFiles = []
 class FakeWindow {
-  constructor() { this.webContents = { setWindowOpenHandler() {}, send() {}, on() {} } }
+  constructor() { testWindow = this; this.webContents = { setWindowOpenHandler() {}, send() {}, on() {}, once() {} } }
+  setAppDetails() {}
   loadURL() { return Promise.resolve() }
   loadFile() {}
   on() {}
@@ -25,15 +28,16 @@ class FakeWindow {
 }
 class FakeTray { isDestroyed() { return false } setToolTip() {} setContextMenu() {} on() {} }
 class FakeBroker {
+  on() {}
   state() { return { ready, pid: ready ? 12345 : null } }
   async ensure() { if (elevationError) throw elevationError; ready = true; return this.state() }
   async close() { ready = false }
 }
 const electron = {
-  app: { setPath() {}, getPath: () => workDir, on() {}, whenReady: () => ({ then: fn => { boot = fn } }), quit: () => { quitCount++ }, getVersion: () => 'test', isPackaged: true },
+  app: { setAppUserModelId() {}, commandLine: { appendSwitch() {} }, setPath() {}, getPath: () => workDir, on() {}, whenReady: () => ({ then: fn => { boot = fn } }), quit: () => { quitCount++ }, getVersion: () => 'test', isPackaged: true },
   BrowserWindow: FakeWindow, Tray: FakeTray,
   ipcMain: { handle: (name, fn) => handlers.set(name, fn), on() {} },
-  safeStorage: { isEncryptionAvailable: () => false }, shell: { openExternal: async () => {} },
+  safeStorage: { isEncryptionAvailable: () => false }, shell: { openExternal: async () => {}, openPath: async file => { openedFiles.push(file); return '' } },
   protocol: { handle() {}, registerSchemesAsPrivileged() {} },
   session: { defaultSession: { webRequest: { onHeadersReceived() {} }, protocol: { handle() {} }, setPermissionRequestHandler() {}, setPermissionCheckHandler() {} } },
   dialog: {}, Menu: { setApplicationMenu() {}, buildFromTemplate: () => ({}) },
@@ -88,6 +92,20 @@ async function main() {
     assert.equal(controlled.activeMode, null)
     assert.equal(JSON.parse(fs.readFileSync(path.join(workDir, 'anyu-permission.json'), 'utf8')).mode, 'confirm')
     assert.equal(quitCount, 0, 'Permission changes must keep the UI alive')
+    const workspace = path.join(workDir, 'workspace')
+    fs.mkdirSync(workspace)
+    const outside = path.join(workDir, 'external-file.txt')
+    fs.writeFileSync(outside, 'external file')
+    const event = { sender: testWindow.webContents }
+    for (const channel of ['app:open-file', 'app:open-path']) {
+      assert.equal((await handlers.get(channel)(event, { cwd: workspace, path: outside })).path, outside)
+      await assert.rejects(async () => handlers.get(channel)({ sender: {} }, { path: outside }), /来源无效/)
+    }
+    const result = await handlers.get('agent-browser:open-artifact')(event, { path: workspace })
+    assert.equal(result.openedExternally, true, 'Directories open with the system file manager')
+    assert.deepEqual(openedFiles, [outside, outside, workspace])
+    const artifacts = handlers.get('app:inspect-artifacts')(event, { cwd: workspace, paths: [outside] })
+    assert.equal(artifacts.artifacts[0].path, outside)
     console.log('Permission IPC: cancellation, failure, actual privilege, persistence and no UI restart passed')
   } finally {
     Module._load = originalLoad

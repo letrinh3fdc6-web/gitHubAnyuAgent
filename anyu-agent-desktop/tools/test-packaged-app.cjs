@@ -4,9 +4,9 @@ const path = require('node:path')
 const { _electron } = require(process.env.ANYU_PLAYWRIGHT_MODULE || 'C:/Users/Administrator/AppData/Local/Temp/tokenrouter-source-recovery-browser-20261018/node_modules/playwright')
 
 async function main() {
-  const root = process.env.ANYU_SMOKE_ROOT || 'E:/TokenRouter-builds/full-1.0.72'
+  const root = process.env.ANYU_SMOKE_ROOT || 'E:/TokenRouter-builds/full-1.0.74'
   const output = process.env.ANYU_SMOKE_OUTPUT || root
-  const report = { version: '1.0.72', errors: [], graphicsWarnings: [], checks: [] }
+  const report = { version: '1.0.74', errors: [], graphicsWarnings: [], checks: [] }
   const env = { ...process.env, ANYU_USER_DATA_DIR: path.join(root, 'smoke-profile'), ANYU_DISABLE_GPU: '0' }
   delete env.ELECTRON_RUN_AS_NODE
   const electron = await _electron.launch({
@@ -20,7 +20,7 @@ async function main() {
       if (process.platform === 'darwin' && process.env.CI && error.message === 'Error creating WebGL context.') report.graphicsWarnings.push('Hosted macOS runner cannot render the decorative WebGL scene.')
       else report.errors.push(error.message)
     })
-    await page.waitForURL('anyu-app://desktop/login**', { timeout: 60000 })
+    await page.waitForURL(url => url.protocol === 'anyu-app:' && (url.pathname.includes('/login') || url.hash.includes('/login')), { timeout: 60000 })
     await page.locator('input[type="password"]').waitFor({ timeout: 60000 })
     const info = await page.evaluate(async () => ({
       build: await window.anyu.appBuildInfo(),
@@ -30,7 +30,7 @@ async function main() {
       manifest: await (await fetch('/api/v1/anyu-agent/manifest')).json(),
       update: await window.anyu.checkForUpdate(),
     }))
-    assert.equal(await electron.evaluate(({ app }) => app.getVersion()), '1.0.72')
+    assert.equal(await electron.evaluate(({ app }) => app.getVersion()), '1.0.74')
     assert.equal(await electron.evaluate(({ app }) => app.isPackaged), true)
     assert.ok(JSON.stringify(info.api).includes('https://x.ailzd.com'))
     assert.equal(info.health.product, 'AnyuAgent')
@@ -50,9 +50,9 @@ async function main() {
     report.renderer = renderer
     report.updateVersion = info.update.latestVersion
     if (process.env.ANYU_SMOKE_PUBLISHED === '1') {
-      assert.equal(info.update.latestVersion, '1.0.72')
+      assert.equal(info.update.latestVersion, '1.0.74')
       if (process.platform === 'win32') {
-        assert.equal(info.update.artifact.name, 'AnyuAgent-Setup-1.0.72.exe')
+        assert.equal(info.update.artifact.name, 'AnyuAgent-Setup-1.0.74.exe')
         assert.equal(info.update.artifact.sha256, process.env.ANYU_SMOKE_WINDOWS_SHA256)
       }
       report.checks.push('published update manifest')

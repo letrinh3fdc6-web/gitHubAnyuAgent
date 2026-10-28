@@ -9,15 +9,17 @@ const { once } = require('node:events')
 const { ExecutionBroker } = require('../execution-broker.cjs')
 const { launchElevated, quoteWindowsArgument } = require('../windows-elevation.cjs')
 const { resolvePermissionMode } = require('../agent-permissions.cjs')
+const { VERSION, send } = require('../execution-protocol.cjs')
 
 const windows = { skip: process.platform !== 'win32', timeout: 20000 }
 const tick = () => new Promise(resolve => setTimeout(resolve, 20))
 async function waitFor(check) { for (let n = 0; n < 250; n++) { if (check()) return; await tick() } assert.ok(check()) }
-function harness(t, { administrator = true, packaged = true, intruder = false } = {}) {
+function harness(t, { administrator = true, packaged = true, intruder = false, executables } = {}) {
   const workers = []
   const broker = new ExecutionBroker({
     app: { isPackaged: packaged, getPath: () => process.execPath, getAppPath: () => 'C:\\App with spaces\\AnyuAgent' },
     executable: () => process.execPath,
+    executables,
     timeout: 5000,
     launch: async (_executable, argv) => {
       if (!packaged) assert.equal(argv.shift(), 'C:\\App with spaces\\AnyuAgent')
@@ -25,7 +27,7 @@ function harness(t, { administrator = true, packaged = true, intruder = false } 
         const socket = net.connect(argv[1])
         socket.on('error', () => {})
         await once(socket, 'connect')
-        socket.end(JSON.stringify({ type: 'hello', version: 1, token: '0'.repeat(64), administrator: true, pid: process.pid }) + '\n')
+        socket.end(JSON.stringify({ type: 'hello', version: VERSION, token: '0'.repeat(64), administrator: true, pid: process.pid }) + '\n')
       }
       const worker = spawn(process.execPath, [path.join(__dirname, 'execution-worker-fixture.cjs'), ...argv], {
         env: { ...process.env, ANYU_TEST_ADMIN: administrator ? '1' : '0' }, windowsHide: true, stdio: ['ignore', 'ignore', 'pipe'],
@@ -35,6 +37,7 @@ function harness(t, { administrator = true, packaged = true, intruder = false } 
       return worker.pid
     },
   })
+  broker.testWorkers = workers
   t.after(async () => {
     await broker.close()
     await waitFor(() => workers.every(worker => worker.exitCode !== null))
@@ -100,6 +103,33 @@ test('worker without an administrator token is rejected', windows, async t => {
   const broker = harness(t, { administrator: false })
   await assert.rejects(broker.ensure(), { code: 'ELEVATION_NOT_VERIFIED' })
   assert.equal(broker.state().ready, false)
+})
+
+test('both engines share one authorization and only launch registered targets', windows, async t => {
+  const broker = harness(t, { executables: () => ({ pi: process.execPath, codex: path.join(process.env.SystemRoot, 'System32', 'whoami.exe') }) })
+  const states = []
+  broker.on('state', state => states.push(state.ready))
+  await Promise.all([broker.ensure(), broker.ensure()])
+  const run = async (target, args) => {
+    await broker.ensure()
+    const child = broker.spawn(args, { target, cwd: os.tmpdir(), env: process.env })
+    let output = ''
+    child.stdout.on('data', chunk => { output += chunk })
+    assert.equal((await once(child, 'exit'))[0], 0)
+    return output.trim()
+  }
+  assert.equal(await run('pi', ['-e', 'process.stdout.write("pi engine")']), 'pi engine')
+  assert.match(await run('codex', []), /\\/)
+  assert.equal(broker.testWorkers.length, 1, 'Engine switches must reuse the authorized worker')
+  assert.throws(() => broker.spawn([], { target: 'powershell', cwd: os.tmpdir(), env: process.env }), /未授权/)
+  assert.throws(() => broker.spawn([], { target: 'toString', cwd: os.tmpdir(), env: process.env }), /未授权/)
+  await broker.close()
+  assert.equal(states[0], true)
+  assert.equal(states.at(-1), false)
+  await broker.ensure()
+  assert.equal(broker.testWorkers.length, 2, 'A closed worker must be verified again')
+  send(broker.socket, { type: 'spawn', id: require('node:crypto').randomUUID(), target: 'unregistered', args: [], cwd: os.tmpdir(), env: process.env })
+  await waitFor(() => !broker.state().ready)
 })
 
 test('disconnect terminates active child processes and invalidates effective privilege', windows, async t => {

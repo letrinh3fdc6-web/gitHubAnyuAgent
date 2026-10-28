@@ -1,6 +1,14 @@
 const MAX_FRAME_BYTES = 2 * 1024 * 1024
 const CHUNK_BYTES = 48 * 1024
 const WORKER_FLAG = '--anyu-execution-worker'
+const VERSION = 2
+
+function executionTargets(value) {
+  const path = require('node:path')
+  const entries = value && typeof value === 'object' && !Array.isArray(value) ? Object.entries(value) : []
+  if (!entries.length || entries.length > 4 || entries.some(([key, file]) => !/^[a-z][a-z0-9_-]{0,31}$/.test(key) || typeof file !== 'string' || !path.isAbsolute(file))) throw new Error('Invalid execution targets')
+  return Object.freeze(Object.assign(Object.create(null), Object.fromEntries(entries)))
+}
 
 function send(socket, message, callback) {
   if (!socket || socket.destroyed) {
@@ -28,4 +36,4 @@ function receive(socket, onMessage, onError) {
   })
 }
 
-module.exports = { send, receive, CHUNK_BYTES, WORKER_FLAG }
+module.exports = { send, receive, CHUNK_BYTES, WORKER_FLAG, VERSION, executionTargets }

@@ -8,9 +8,10 @@ const ts = require('../../../../frontend/node_modules/typescript')
 const source = fs.readFileSync(path.join(__dirname, '../../../../frontend/src/views/public/AnyuAgentWorkspaceView.vue'), 'utf8')
 function extract(start, end) { return source.slice(source.indexOf(start), source.indexOf(end, source.indexOf(start))) }
 const code = ts.transpileModule([
+  extract('function permissionLabel(', 'function closeComposerMenus('),
   extract('function normalizePermissionMode(', 'function openWorkspaceSettings('),
   extract('async function applyPermissionMode(', 'async function openPrivacySettings('),
-  'this.apply = applyPermissionMode; this.load = loadPermissionState; this.elevate = requestElevation;',
+  'this.apply = applyPermissionMode; this.load = loadPermissionState; this.elevate = requestElevation; this.label = permissionLabel;',
 ].join('\n'), { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText
 
 function harness(result, native = true) {
@@ -49,6 +50,9 @@ test('Vue distinguishes persisted full permission from effective privilege after
   await h.context.load()
   assert.equal(h.context.activePermissionMode.value, null)
   assert.match(h.context.permissionNotice.value, /尚未授权/)
+  assert.match(h.context.label('full'), /待授权/)
+  h.context.systemAccess.value.executionAdministrator = true
+  assert.equal(h.context.label('full'), '完全权限')
 })
 
 test('browser preview cannot claim an active local execution permission', async () => {

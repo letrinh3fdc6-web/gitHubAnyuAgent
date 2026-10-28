@@ -11,6 +11,11 @@ contextBridge.exposeInMainWorld('anyu', {
   },
   systemAccessState: () => ipcRenderer.invoke('system:state'),
   agentPermissionState: () => ipcRenderer.invoke('agent:permission-state'),
+  onPermissionChanged: listener => {
+    const handler = () => listener()
+    ipcRenderer.on('agent:permission-changed', handler)
+    return () => ipcRenderer.removeListener('agent:permission-changed', handler)
+  },
   setAgentPermissionMode: (mode) => ipcRenderer.invoke('agent:set-permission-mode', mode),
   requestSystemElevation: (payload) => ipcRenderer.invoke('system:request-elevation', payload || {}),
   elevationIntent: () => ipcRenderer.invoke('system:elevation-intent'),

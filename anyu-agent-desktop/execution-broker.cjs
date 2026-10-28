@@ -3,7 +3,7 @@ const crypto = require('node:crypto')
 const { EventEmitter } = require('node:events')
 const { PassThrough, Writable } = require('node:stream')
 const { launchElevated } = require('./windows-elevation.cjs')
-const { send, receive, CHUNK_BYTES, WORKER_FLAG } = require('./execution-protocol.cjs')
+const { send, receive, CHUNK_BYTES, WORKER_FLAG, VERSION, executionTargets } = require('./execution-protocol.cjs')
 
 class RemoteChild extends EventEmitter {
   constructor(broker, id) {
@@ -45,10 +45,12 @@ class RemoteChild extends EventEmitter {
   }
 }
 
-class ExecutionBroker {
-  constructor({ app, executable, launch = launchElevated, timeout = 105000 }) {
+class ExecutionBroker extends EventEmitter {
+  constructor({ app, executable, executables, launch = launchElevated, timeout = 105000 }) {
+    super()
     this.app = app
-    this.executable = executable
+    this.executables = executables || (() => ({ default: executable() }))
+    this.targets = null
     this.launch = launch
     this.timeout = timeout
     this.children = new Map()
@@ -67,7 +69,7 @@ class ExecutionBroker {
   async connect() {
     const endpoint = `\\\\.\\pipe\\anyu-exec-${crypto.randomBytes(24).toString('hex')}`
     const token = crypto.randomBytes(32).toString('hex')
-    const executable = this.executable()
+    const targets = executionTargets(this.executables())
     const server = net.createServer()
     this.server = server
     let accepted = null
@@ -88,7 +90,9 @@ class ExecutionBroker {
           accepted = candidate.socket
           this.socket = accepted
           this.workerPid = launchedPid
+          this.targets = targets
           send(accepted, { type: 'authorize' })
+          this.emit('state', this.state())
           resolve(this.state())
         }
         timer = setTimeout(() => reject(Object.assign(new Error('管理员执行进程握手超时，请重试。'), { code: 'WORKER_TIMEOUT' })), this.timeout)
@@ -107,7 +111,7 @@ class ExecutionBroker {
           receive(socket, message => {
             if (!authenticated) {
               const supplied = Buffer.from(String(message.token || ''))
-              if (candidate || message.type !== 'hello' || message.version !== 1 || supplied.length !== token.length || !crypto.timingSafeEqual(supplied, Buffer.from(token))) { socket.destroy(); return }
+              if (candidate || message.type !== 'hello' || message.version !== VERSION || supplied.length !== token.length || !crypto.timingSafeEqual(supplied, Buffer.from(token))) { socket.destroy(); return }
               authenticated = true
               clearTimeout(authTimer)
               candidate = { socket, hello: message }
@@ -116,7 +120,7 @@ class ExecutionBroker {
           }, error => { if (socket === accepted) this.disconnect(error) })
         })
         server.listen(endpoint, () => {
-          const args = [...(this.app.isPackaged ? [] : [this.app.getAppPath()]), WORKER_FLAG, endpoint, token, executable]
+          const args = [...(this.app.isPackaged ? [] : [this.app.getAppPath()]), WORKER_FLAG, endpoint, token, JSON.stringify(targets)]
           Promise.resolve().then(() => this.launch(this.app.getPath('exe'), args)).then(pid => { launchedPid = pid; verify() }, reject)
         })
       })
@@ -132,12 +136,13 @@ class ExecutionBroker {
       throw error
     } finally { clearTimeout(timer); this.cancelConnect = null }
   }
-  spawn(args, { cwd, env }) {
+  spawn(args, { cwd, env, target = 'default' }) {
     if (!this.state().ready) throw new Error('管理员执行进程未就绪')
+    if (!Object.hasOwn(this.targets, target)) throw new Error('执行目标未授权')
     const id = crypto.randomUUID()
     const child = new RemoteChild(this, id)
     this.children.set(id, child)
-    send(this.socket, { type: 'spawn', id, args, cwd, env })
+    send(this.socket, { type: 'spawn', id, target, args, cwd, env })
     return child
   }
   onMessage(message) {
@@ -150,6 +155,7 @@ class ExecutionBroker {
   }
   disconnect(error) {
     this.workerPid = null
+    this.targets = null
     const socket = this.socket
     this.socket = null
     socket?.destroy()
@@ -158,6 +164,7 @@ class ExecutionBroker {
       child.finish(-1, null)
     }
     this.children.clear()
+    this.emit('state', this.state())
   }
   async close() {
     if (this.connecting) {

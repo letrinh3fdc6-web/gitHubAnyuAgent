@@ -1,7 +1,7 @@
 const net = require('node:net')
 const path = require('node:path')
 const { spawn, execFile } = require('node:child_process')
-const { send, receive, CHUNK_BYTES, WORKER_FLAG } = require('./execution-protocol.cjs')
+const { send, receive, CHUNK_BYTES, WORKER_FLAG, VERSION, executionTargets } = require('./execution-protocol.cjs')
 
 function probeAdministrator() {
   return new Promise((resolve, reject) => {
@@ -25,8 +25,9 @@ function killTree(child) {
 // The worker has no renderer, login state, shell RPC, or network listener.
 async function runExecutionWorker(app, { isAdministrator = probeAdministrator, args = process.argv } = {}) {
   const flag = args.indexOf(WORKER_FLAG)
-  const [endpoint, token, executable] = args.slice(flag + 1, flag + 4)
-  if (process.platform !== 'win32' || !/^\\\\\.\\pipe\\anyu-exec-[a-f0-9]{48}$/.test(endpoint || '') || !/^[a-f0-9]{64}$/.test(token || '') || !path.isAbsolute(executable || '')) throw new Error('Invalid execution worker launch')
+  const [endpoint, token, serializedTargets] = args.slice(flag + 1, flag + 4)
+  if (flag < 0 || process.platform !== 'win32' || !/^\\\\\.\\pipe\\anyu-exec-[a-f0-9]{48}$/.test(endpoint || '') || !/^[a-f0-9]{64}$/.test(token || '')) throw new Error('Invalid execution worker launch')
+  const targets = executionTargets(JSON.parse(serializedTargets))
   await app.whenReady()
   const administrator = await isAdministrator()
   const children = new Map()
@@ -41,7 +42,7 @@ async function runExecutionWorker(app, { isAdministrator = probeAdministrator, a
     await Promise.all([...children.values()].map(killTree))
     app.exit(0)
   }
-  socket.on('connect', () => send(socket, { type: 'hello', version: 1, token, pid: process.pid, administrator }))
+  socket.on('connect', () => send(socket, { type: 'hello', version: VERSION, token, pid: process.pid, administrator }))
   socket.on('error', () => { void shutdown() })
   socket.on('close', () => { void shutdown() })
   app.on('before-quit', event => { if (!closing) { event.preventDefault(); socket.destroy(); void shutdown() } })
@@ -52,6 +53,8 @@ async function runExecutionWorker(app, { isAdministrator = probeAdministrator, a
     const id = String(message.id || '')
     if (!/^[a-f0-9-]{36}$/.test(id)) throw new Error('Invalid execution id')
     if (message.type === 'spawn') {
+      if (!Object.hasOwn(targets, message.target)) throw new Error('Execution target not authorized')
+      const executable = targets[message.target]
       if (children.has(id) || children.size >= 16 || !Array.isArray(message.args) || !message.args.every(arg => typeof arg === 'string') || !path.isAbsolute(message.cwd || '') || !message.env || typeof message.env !== 'object') throw new Error('Invalid execution request')
       let child
       try {
