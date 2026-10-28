@@ -7,7 +7,7 @@ const { pathToFileURL } = require('node:url')
 const { localFilePath, ArtifactPreviews } = require('../browser-policy.cjs')
 
 function fixture(t) {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'anyu-local-files-'))
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'anyu-local-files-')))
   const cwd = path.join(root, 'workspace')
   const outside = path.join(root, 'outside folder')
   fs.mkdirSync(cwd)
