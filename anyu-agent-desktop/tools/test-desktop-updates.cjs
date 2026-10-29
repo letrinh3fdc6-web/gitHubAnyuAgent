@@ -33,6 +33,8 @@ test('one click downloads, verifies, commits install and quits once; repeated cl
   assert.equal(first, updater.install())
   assert.equal((await first).status, 'installing')
   assert.equal(prepared.length, 1)
+  assert.equal(path.basename(prepared[0].installerPath), 'AnyuAgent-Setup.exe')
+  assert.equal(path.basename(path.dirname(prepared[0].installerPath)), prepared[0].sha256)
   assert.equal(readMarker(updater.markerPath).status, 'installing')
   assert(events.some(event => event.phase === 'downloading' && event.percent === 100))
   assert(events.some(event => event.phase === 'verifying'))
@@ -49,7 +51,7 @@ test('bad package never starts an installer or quits the current application', a
   assert.equal(item.updater.state.phase, 'error')
   assert.equal(item.prepared.length, 0)
   assert.equal(item.quits.length, 0)
-  assert.deepEqual(fs.readdirSync(path.join(item.directory, 'updates')), [])
+  assert.deepEqual(fs.readdirSync(path.join(item.directory, 'updates', item.artifact.sha256)), [])
 })
 
 test('waits for active work and resumes automatically after the last task settles', { timeout: 10000 }, async t => {
@@ -82,6 +84,31 @@ test('helper bootstrap failure leaves the old application open; retry reuses ver
   assert.equal(calls, 2)
   assert.equal(item.requests.filter(url => url.endsWith('.exe')).length, 1)
   assert.equal(item.quits.length, 0)
+})
+
+test('verified downloads from the old hash filename are reused under the branded installer name', async t => {
+  const item = fixture(t)
+  const cache = path.join(item.directory, 'updates')
+  fs.mkdirSync(cache)
+  const legacyPath = path.join(cache, `AnyuAgent-update-${item.artifact.sha256}.exe`)
+  fs.writeFileSync(legacyPath, item.bytes)
+  assert.equal((await item.updater.install()).status, 'installing')
+  assert.equal(item.requests.filter(url => url.endsWith('.exe')).length, 0)
+  assert.equal(path.basename(item.prepared[0].installerPath), 'AnyuAgent-Setup.exe')
+  assert.deepEqual(fs.readFileSync(item.prepared[0].installerPath), item.bytes)
+  assert.equal(fs.existsSync(legacyPath), true)
+  await delay(175)
+})
+
+test('a corrupted legacy cache is not trusted when migrating to the branded installer name', async t => {
+  const item = fixture(t)
+  const cache = path.join(item.directory, 'updates')
+  fs.mkdirSync(cache)
+  fs.writeFileSync(path.join(cache, `AnyuAgent-update-${item.artifact.sha256}.exe`), Buffer.alloc(item.bytes.length))
+  assert.equal((await item.updater.install()).status, 'installing')
+  assert.equal(item.requests.filter(url => url.endsWith('.exe')).length, 1)
+  assert.deepEqual(fs.readFileSync(item.prepared[0].installerPath), item.bytes)
+  await delay(175)
 })
 
 test('recovering an interrupted update does not auto-run an installer and exposes its diagnostic', t => {

@@ -35,20 +35,32 @@ function Read-UpdateStatus {
 
 function Get-InstallScope {
     $root = [IO.Path]::GetFullPath($config.installDirectory).TrimEnd('\')
-    foreach ($hive in @('HKCU', 'HKLM')) {
+    foreach ($hive in @('HKLM', 'HKCU')) {
         foreach ($branch in @('Software\Microsoft\Windows\CurrentVersion\Uninstall', 'Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall')) {
             foreach ($entry in @(Get-ItemProperty -Path "${hive}:\$branch\*" -ErrorAction SilentlyContinue)) {
-                if ($entry.InstallLocation -and ([string]$entry.InstallLocation).TrimEnd('\') -eq $root) {
-                    if ($hive -eq 'HKLM') { return '--allusers' }
-                    return '--currentuser'
+                $location = $entry.InstallLocation
+                if (-not $location -and $entry.PSChildName) {
+                    # Electron-builder stores the location under Software\<app GUID>.
+                    $installBranch = if ($branch.Contains('WOW6432Node')) { 'Software\WOW6432Node' } else { 'Software' }
+                    $installation = Get-ItemProperty -LiteralPath "${hive}:\$installBranch\$($entry.PSChildName)" -ErrorAction SilentlyContinue
+                    $location = $installation.InstallLocation
+                }
+                if ($location -and ([string]$location).TrimEnd('\') -eq $root) {
+                    if ($hive -eq 'HKLM') { return '/allusers' }
+                    return '/currentuser'
                 }
             }
         }
     }
     foreach ($programRoot in @($env:ProgramFiles, ${env:ProgramFiles(x86)}, $env:ProgramW6432)) {
-        if ($programRoot -and $root.StartsWith($programRoot.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase)) { return '--allusers' }
+        if ($programRoot -and $root.StartsWith($programRoot.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase)) { return '/allusers' }
     }
-    return '--currentuser'
+    return '/currentuser'
+}
+
+function Get-InstallerFailure([int]$ExitCode) {
+    if ($ExitCode -eq 1223) { return 'Windows 安装授权未完成或已取消。请重新打开 AnyuAgent 重试，并在系统授权窗口选择“是”。' }
+    return "安装器返回错误 $ExitCode。请查看 $env:TEMP\AnyuAgent-install.log"
 }
 
 try {
@@ -107,16 +119,22 @@ try {
     if ($inspect.ExitCode -ne 0) { throw '旧版本仍有进程占用安装目录，尚未开始安装。' }
 
     Set-UpdateStatus 'installing'
-    Show-Phase '正在安装新版…'
+    $installScope = Get-InstallScope
+    Write-UpdateLog "Install scope: $installScope"
+    if ($installScope -eq '/allusers') {
+        Show-Phase '正在安装新版。如出现 Windows 系统授权，请选择“是”…'
+    } else {
+        Show-Phase '正在安装新版…'
+    }
     # NSIS /D must be last and its value must NOT be surrounded by quotes.
-    $arguments = '/S --updated ' + (Get-InstallScope) + ' /D=' + $config.installDirectory
+    $arguments = '/S --updated ' + $installScope + ' /D=' + $config.installDirectory
     $installer = Start-Process -FilePath $config.installerPath -ArgumentList $arguments -WindowStyle Hidden -PassThru
     $deadline = [DateTime]::UtcNow.AddMinutes(8)
     while (-not $installer.HasExited -and [DateTime]::UtcNow -lt $deadline) { Pump-Window; Start-Sleep -Milliseconds 150; $installer.Refresh() }
     if (-not $installer.HasExited) { throw '安装仍在进行，未启动客户端。请查看安装日志后重试。' }
     $installer.WaitForExit()
     Write-UpdateLog "Installer exit code: $($installer.ExitCode)"
-    if ($installer.ExitCode -ne 0) { throw "安装器返回错误 $($installer.ExitCode)。请查看 $env:TEMP\AnyuAgent-install.log" }
+    if ($installer.ExitCode -ne 0) { throw (Get-InstallerFailure $installer.ExitCode) }
     $installedVersion = [Diagnostics.FileVersionInfo]::GetVersionInfo($config.executablePath).ProductVersion
     $normalized = [regex]::Match($installedVersion, '^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?').Value
     if ($normalized -ne $config.expectedVersion.TrimStart('v')) { throw "安装版本核对失败：期望 $($config.expectedVersion)，实际 $installedVersion" }

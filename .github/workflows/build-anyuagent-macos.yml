@@ -176,17 +176,17 @@ jobs:
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: anyuagent-v1.0.75
+          tag_name: anyuagent-v1.0.76
           target_commitish: ${{ github.sha }}
-          name: AnyuAgent 1.0.75
+          name: AnyuAgent 1.0.76
           draft: true
           make_latest: false
           body: |
-            AnyuAgent 1.0.75 remembers full access across restarts, keeps background tasks in the tray when the window closes, restores the existing window when reopened, and uses Anyu application icons. This is a desktop-only release; website and backend are unchanged. The existing Windows silent update flow is retained.
+            AnyuAgent 1.0.76 remembers full access across restarts, keeps background tasks in the tray when the window closes, restores the existing window when reopened, and uses Anyu application icons. This release includes the current desktop renderer with independent Nano Banana, Gemini and Grok image prices and Gemini image group support. Website and backend are released together through blue/green deployment. The existing Windows silent update flow is retained.
 
             macOS downloads include separate Apple Silicon and Intel DMG/ZIP packages. Each package includes a matching native runtime. These packages are unsigned and are not notarized.
 
-            Windows download: https://x.ailzd.com/downloads/AnyuAgent-Setup-1.0.75.exe
+            Windows download: https://x.ailzd.com/downloads/AnyuAgent-Setup-1.0.76.exe
           files: |
             release-assets/*.dmg
             release-assets/*.zip

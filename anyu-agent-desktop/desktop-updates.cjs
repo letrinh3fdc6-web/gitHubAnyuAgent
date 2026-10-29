@@ -77,11 +77,19 @@ class DesktopUpdater {
       if (this.platform !== 'win32') throw new Error('当前自动安装仅支持 Windows，请从下载页面获取适合此系统的安装包。')
       if (!this.app.isPackaged) throw new Error('开发模式不覆盖安装，请使用已安装的 AnyuAgent 测试自动更新。')
       const { artifact } = info
-      const cache = path.join(this.app.getPath('userData'), 'updates')
+      const cacheRoot = path.join(this.app.getPath('userData'), 'updates')
+      const cache = path.join(cacheRoot, artifact.sha256)
       fs.mkdirSync(cache, { recursive: true })
-      installerPath = path.join(cache, `AnyuAgent-update-${artifact.sha256}.exe`)
+      installerPath = path.join(cache, 'AnyuAgent-Setup.exe')
       this.setState('verifying', { version: artifact.version, message: '正在校验更新包…' })
       verified = await this.verify(installerPath, artifact)
+      if (!verified) {
+        const legacyPath = path.join(cacheRoot, `AnyuAgent-update-${artifact.sha256}.exe`)
+        if (await this.verify(legacyPath, artifact)) {
+          await fs.promises.copyFile(legacyPath, installerPath)
+          verified = await this.verify(installerPath, artifact)
+        }
+      }
       signal.throwIfAborted()
       if (!verified) {
         const combined = AbortSignal.any([signal, AbortSignal.timeout(15 * 60 * 1000)])
