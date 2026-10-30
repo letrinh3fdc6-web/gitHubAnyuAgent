@@ -1,6 +1,7 @@
 {
-  "revision": "20261030-image-families-1.0.77",
+  "revision": "20261030-full-release-1.0.78",
   "changes": [
+    "同步最新网页工作区构建，保留生图、会话、权限与后台任务能力。",
     "统一 GPT Image、nanoBanana、Gemini Image 与 Grok Imagine 生图尺寸选择和 AI 规划校验。",
     "生图分组与模型在目录刷新后保留有效选择，兼容 Gemini 原生分组。",
     "Nano Banana、Gemini 与 Grok 生图模型独立展示分组维护的每张价格。",
