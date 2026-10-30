@@ -1,6 +1,8 @@
 {
-  "revision": "20261029-image-pricing-1.0.76",
+  "revision": "20261030-image-families-1.0.77",
   "changes": [
+    "统一 GPT Image、nanoBanana、Gemini Image 与 Grok Imagine 生图尺寸选择和 AI 规划校验。",
+    "生图分组与模型在目录刷新后保留有效选择，兼容 Gemini 原生分组。",
     "Nano Banana、Gemini 与 Grok 生图模型独立展示分组维护的每张价格。",
     "支持 Gemini 原生生图分组，保留原有 GPT 生图入口与模型协议。",
     "关闭窗口保留托盘与后台任务，点击托盘或再次打开应用恢复原窗口。",

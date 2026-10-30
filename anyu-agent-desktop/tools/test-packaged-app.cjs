@@ -4,9 +4,9 @@ const path = require('node:path')
 const { _electron } = require(process.env.ANYU_PLAYWRIGHT_MODULE || 'C:/Users/Administrator/AppData/Local/Temp/tokenrouter-source-recovery-browser-20261018/node_modules/playwright')
 
 async function main() {
-  const root = process.env.ANYU_SMOKE_ROOT || 'E:/TokenRouter-builds/agent-1.0.76'
+  const root = process.env.ANYU_SMOKE_ROOT || 'E:/TokenRouter-builds/agent-1.0.77'
   const output = process.env.ANYU_SMOKE_OUTPUT || root
-  const report = { version: '1.0.76', errors: [], graphicsWarnings: [], checks: [] }
+  const report = { version: '1.0.77', errors: [], graphicsWarnings: [], checks: [] }
   const env = { ...process.env, ANYU_USER_DATA_DIR: path.join(root, 'smoke-profile'), ANYU_DISABLE_GPU: '0' }
   delete env.ELECTRON_RUN_AS_NODE
   const launch = () => _electron.launch({ executablePath: process.env.ANYU_SMOKE_EXECUTABLE || path.join(root, 'artifacts/win-unpacked/AnyuAgent.exe'), args: process.platform === 'win32' ? ['--use-angle=swiftshader', '--enable-unsafe-swiftshader'] : [], env, timeout: 60000 })
