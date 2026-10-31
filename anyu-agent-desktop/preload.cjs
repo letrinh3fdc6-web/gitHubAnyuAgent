@@ -153,6 +153,17 @@ contextBridge.exposeInMainWorld('anyu', {
   agentEvents: (payload) => ipcRenderer.invoke('agent:events', payload || {}),
   agentSnapshot: (payload) => ipcRenderer.invoke('agent:snapshot', payload || {}),
   agentSessions: () => ipcRenderer.invoke('agent:sessions'),
+  pets: (action, payload = {}) => ipcRenderer.invoke('pet:command', action, payload),
+  onPetEvent: (listener) => {
+    const handler = (_, payload) => listener(payload)
+    ipcRenderer.on('pet:event', handler)
+    return () => ipcRenderer.removeListener('pet:event', handler)
+  },
+  onPetNavigate: (listener) => {
+    const handler = (_, payload) => listener(payload)
+    ipcRenderer.on('pet:open-main', handler)
+    return () => ipcRenderer.removeListener('pet:open-main', handler)
+  },
   onAgentEvent: (listener) => {
     const handler = (_, payload) => listener(payload)
     ipcRenderer.on('agent:event', handler)

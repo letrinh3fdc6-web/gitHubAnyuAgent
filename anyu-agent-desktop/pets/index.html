@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; media-src 'self' data: blob:; connect-src 'none'"><title>Anyu 桌面伙伴</title><link rel="stylesheet" href="pet.css"></head>
+<body>
+  <main id="actor" hidden>
+    <div id="bubble" role="status" hidden></div>
+    <canvas id="stage" aria-label="桌面伙伴，点击聊天，拖动移动" tabindex="0" role="button"></canvas>
+    <nav id="pet-tools" aria-label="伙伴操作">
+      <button id="drag-handle" title="拖动伙伴" aria-label="拖动伙伴"><i data-lucide="move"></i></button>
+      <button data-action="chat" title="聊天" aria-label="聊天"><i data-lucide="message-circle"></i></button>
+      <button data-motion="pat" title="摸摸头" aria-label="摸摸头"><i data-lucide="heart"></i></button>
+      <button data-motion="snack" title="喂点心" aria-label="喂点心"><i data-lucide="cookie"></i></button>
+      <button data-motion="dance" title="跳支舞" aria-label="跳支舞"><i data-lucide="music"></i></button>
+      <button data-action="actions" title="动作册" aria-label="动作册"><i data-lucide="sparkles"></i></button>
+      <button data-action="link-open" title="连线伙伴" aria-label="连线伙伴"><i data-lucide="link"></i></button>
+      <button data-action="settings" title="设置" aria-label="设置"><i data-lucide="settings-2"></i></button>
+    </nav>
+    <button id="actor-link-state" hidden title="断开连线" aria-label="断开连线"><i data-lucide="unlink"></i><span></span></button>
+    <section id="action-menu" hidden><select id="motion-picker" aria-label="选择表情或动作"></select><button id="play-motion" type="button" title="播放动作" aria-label="播放动作"><i data-lucide="play"></i></button></section>
+  </main>
+  <main id="chat" hidden>
+    <header><img id="portrait" alt=""><div><strong id="name"></strong><small id="model-name"></small></div><button id="open-memory" title="记忆" aria-label="记忆"><i data-lucide="book-open"></i></button><button data-action="link-open" title="连线伙伴" aria-label="连线伙伴"><i data-lucide="link"></i></button><button data-action="new-chat" title="新对话" aria-label="新对话"><i data-lucide="square-pen"></i></button><button data-action="expand" title="在主窗口打开" aria-label="在主窗口打开"><i data-lucide="expand"></i></button><button data-action="close-chat" title="收起" aria-label="收起"><i data-lucide="x"></i></button></header>
+    <section id="link-bar" hidden><div><strong id="link-title"></strong><small id="link-progress"></small></div><button id="disconnect-link" title="断开连线" aria-label="断开连线"><i data-lucide="unlink"></i></button><button id="return-chat" hidden title="返回个人聊天" aria-label="返回个人聊天"><i data-lucide="arrow-left"></i></button></section>
+    <button id="load-history" type="button" hidden>更早的消息</button>
+    <div id="messages" role="log" aria-live="polite"></div>
+    <div id="approval" hidden><p id="approval-text"></p><div><button id="approve">允许一次</button><button id="reject">拒绝</button></div></div>
+    <p id="status" role="status"></p>
+    <div id="attachments"></div>
+    <div id="references" aria-label="参考文件"></div>
+    <form id="composer">
+      <div id="skill-menu" role="listbox" aria-label="技能" hidden></div>
+      <div id="attachment-menu" role="menu" aria-label="添加参考" hidden>
+        <button type="button" id="attach-image" role="menuitem"><i data-lucide="image-plus"></i>图片</button>
+        <button type="button" id="attach-file" role="menuitem"><i data-lucide="file-plus"></i>文件</button>
+        <button type="button" id="attach-folder" role="menuitem"><i data-lucide="folder-plus"></i>文件夹</button>
+      </div>
+      <textarea id="message" rows="2" placeholder="说点什么，或交给我一个任务…" aria-label="消息"></textarea>
+      <footer><button type="button" id="attach" title="添加参考" aria-label="添加参考"><i data-lucide="plus"></i></button><input id="files" type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple hidden><button type="button" id="mention-skill" title="选择技能" aria-label="选择技能" aria-expanded="false"><i data-lucide="at-sign"></i></button><button type="button" data-action="settings" title="角色设置" aria-label="角色设置"><i data-lucide="settings-2"></i></button><span id="count"></span><button type="button" id="stop" hidden title="停止" aria-label="停止"><i data-lucide="square"></i></button><button type="submit" id="send" title="发送" aria-label="发送"><i data-lucide="arrow-up"></i></button></footer>
+    </form>
+  </main>
+  <dialog id="link-dialog"><form id="link-form"><div class="link-heading"><strong>连线伙伴</strong><button id="close-link-dialog" type="button" title="关闭" aria-label="关闭"><i data-lucide="x"></i></button></div><label for="link-peer">对话伙伴</label><select id="link-peer" required></select><label for="link-topic">话题</label><textarea id="link-topic" rows="3" maxlength="2000" placeholder="今天的小确幸，或一个感兴趣的话题"></textarea><p id="link-error" role="alert"></p><button id="start-link" type="submit"><i data-lucide="link"></i>开始连线</button></form></dialog>
+  <dialog id="image-viewer"><button id="close-image" title="关闭" aria-label="关闭"><i data-lucide="x"></i></button><img id="full-image" alt="图片预览"><a id="download-image" download="anyu-image.png"><i data-lucide="download"></i>下载图片</a></dialog>
+  <dialog id="memory-dialog" aria-labelledby="memory-title">
+    <div class="memory-heading"><strong id="memory-title">记忆</strong><button id="memory-folder" title="打开记忆目录" aria-label="打开记忆目录"><i data-lucide="folder-open"></i></button><button id="close-memory" title="关闭" aria-label="关闭记忆"><i data-lucide="x"></i></button></div>
+    <div class="memory-notes-label"><label for="memory-notes">长期记忆</label><button id="memory-save" type="button"><i data-lucide="save"></i>保存</button></div>
+    <textarea id="memory-notes" rows="3" maxlength="8000" aria-label="长期记忆"></textarea>
+    <form id="memory-search-form"><input id="memory-query" type="search" placeholder="搜索对话记忆" aria-label="搜索对话记忆" maxlength="200"><button type="submit" title="搜索" aria-label="搜索记忆"><i data-lucide="search"></i></button></form>
+    <div class="memory-summary"><span id="memory-total"></span><span id="memory-feedback" role="status"></span></div>
+    <div id="memory-records"></div><button id="memory-more" type="button" hidden>更早的记录</button>
+  </dialog>
+  <script src="../node_modules/lucide/dist/umd/lucide.min.js"></script><script src="../node_modules/marked/lib/marked.umd.js"></script><script src="../node_modules/dompurify/dist/purify.min.js"></script><script src="behaviors.js"></script><script src="stage.js"></script><script src="composer.js"></script><script src="memory.js"></script><script src="pet.js"></script>
+</body></html>

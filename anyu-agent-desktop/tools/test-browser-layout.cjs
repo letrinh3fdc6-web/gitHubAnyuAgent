@@ -1,7 +1,7 @@
 const assert = require('node:assert/strict')
 const fs = require('node:fs')
 const path = require('node:path')
-const { normalizeBrowserBounds, calculateBrowserFitZoom } = require('../browser-layout.cjs')
+const { normalizeBrowserBounds, calculateBrowserFitZoom, limitBrowserZoom } = require('../browser-layout.cjs')
 
 assert.deepEqual(
   normalizeBrowserBounds({ x: 720, y: 90, width: 420, height: 650 }, { width: 1200, height: 800 }),
@@ -20,6 +20,16 @@ assert.equal(calculateBrowserFitZoom(viewport, { width: 1200, height: 2400 }, 'f
 assert.equal(calculateBrowserFitZoom(viewport, { width: 420, height: 2400 }), 1)
 assert.equal(calculateBrowserFitZoom(viewport, { width: 1247, height: 2400, viewportWidth: 1247, viewportHeight: 1782 }, 'fit-width', 0.3366), 0.3366, 'fit must not progressively shrink pages that already fit')
 assert.equal(calculateBrowserFitZoom(viewport, { width: 0, height: 2400 }), 1)
+for (const bounds of [{ width: 640, height: 720 }, { width: 350, height: 900 }, { width: 2000, height: 1600 }]) {
+  const factor = calculateBrowserFitZoom(bounds, { width: 1200, height: 200000 }, 'fit-page')
+  if (factor < 0.25) {
+    assert(Math.ceil(bounds.width / factor) <= 4096)
+    assert(Math.ceil(bounds.height / factor) <= 4096)
+    assert(bounds.width * bounds.height / factor ** 2 <= 8 * 1024 * 1024)
+  }
+  assert.equal(limitBrowserZoom(bounds, 0.01), factor)
+}
+assert.equal(limitBrowserZoom(viewport, 0.75), 0.75)
 
 const root = path.resolve(__dirname, '..')
 const main = fs.readFileSync(path.join(root, 'main.cjs'), 'utf8')

@@ -4,9 +4,9 @@ const path = require('node:path')
 const { _electron } = require(process.env.ANYU_PLAYWRIGHT_MODULE || 'C:/Users/Administrator/AppData/Local/Temp/tokenrouter-source-recovery-browser-20261018/node_modules/playwright')
 
 async function main() {
-  const root = process.env.ANYU_SMOKE_ROOT || 'E:/TokenRouter-builds/agent-1.0.78'
+  const root = process.env.ANYU_SMOKE_ROOT || 'E:/TokenRouter-builds/agent-1.0.79'
   const output = process.env.ANYU_SMOKE_OUTPUT || root
-  const report = { version: '1.0.78', errors: [], graphicsWarnings: [], checks: [] }
+  const report = { version: '1.0.79', errors: [], graphicsWarnings: [], checks: [] }
   const env = { ...process.env, ANYU_USER_DATA_DIR: path.join(root, 'smoke-profile'), ANYU_DISABLE_GPU: '0' }
   delete env.ELECTRON_RUN_AS_NODE
   const launch = () => _electron.launch({ executablePath: process.env.ANYU_SMOKE_EXECUTABLE || path.join(root, 'artifacts/win-unpacked/AnyuAgent.exe'), args: process.platform === 'win32' ? ['--use-angle=swiftshader', '--enable-unsafe-swiftshader'] : [], env, timeout: 60000 })
@@ -67,4 +67,4 @@ async function main() {
     console.log(JSON.stringify(report))
   } finally { await electron.close().catch(() => {}) }
 }
-main().catch(error => { console.error(error); process.exitCode = 1 })
+main().catch(error => { fs.writeFileSync(path.join(process.env.ANYU_SMOKE_OUTPUT || 'E:/TokenRouter-builds/agent-1.0.79', process.platform + '-' + process.arch + '-smoke-error.txt'), error.stack || String(error)); console.error(error); process.exitCode = 1 })

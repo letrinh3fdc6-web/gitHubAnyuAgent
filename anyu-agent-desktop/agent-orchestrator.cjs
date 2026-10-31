@@ -111,7 +111,7 @@ class AgentOrchestrator {
     return this.listening
   }
 
-  async start(payload) {
+  async start(payload, { systemPrompt = '' } = {}) {
     const sessionId = String(payload.sessionId || '')
     if (!/^[A-Za-z0-9._:-]{1,160}$/.test(sessionId)) throw new Error('会话标识无效')
     const previousRun = this.roots.get(sessionId)?.run
@@ -119,7 +119,8 @@ class AgentOrchestrator {
     if (this.sessions.runs.has(sessionId) || this.roots.get(sessionId)?.run) throw new Error('当前会话仍在运行')
     const previous = this.roots.get(sessionId)
     if (!payload.team?.enabled) {
-      const result = await this.sessions.start({ ...payload, force: Boolean(payload.force || previous), runtimeOptions: {} })
+      const promptChanged = systemPrompt && this.sessions.sessions.get(sessionId)?.runtimeOptions?.systemPrompt !== systemPrompt
+      const result = await this.sessions.start({ ...payload, force: Boolean(payload.force || previous || promptChanged), runtimeOptions: systemPrompt ? { systemPrompt } : {} })
       if (previous) this.contexts.delete(previous.context.token)
       this.roots.delete(sessionId)
       return result
@@ -130,14 +131,14 @@ class AgentOrchestrator {
     if (!model || !PROTOCOLS.has(model.api)) throw new Error('主代理模型不在当前可用目录中')
     const port = await this.listen()
     const context = previous?.context || { token: crypto.randomBytes(32).toString('hex'), sessionId, role: 'parent' }
-    const signature = JSON.stringify(config)
+    const signature = JSON.stringify([config, systemPrompt])
     const root = { sessionId, config, context, run: null, signature }
     this.contexts.set(context.token, context)
     this.roots.set(sessionId, root)
     try {
       return await this.sessions.start({
         ...payload, models: [model], force: Boolean(payload.force || !previous || signature !== previous.signature),
-        runtimeOptions: { agentRole: 'parent', orchestration: { port, token: context.token }, systemPrompt: `多代理已开启。你负责理解用户需求、规划、验收和最终答复。可用执行子代理：${JSON.stringify(config.workers.map(worker => ({ id: worker.id, model: worker.selection.model })))}。简单问题可直接回答；适合委派时调用 delegate_tasks，将必要背景、明确目标、文件范围和验收条件写入 instructions。每批任务须相互独立；有依赖的下一批必须等待上一批结果。资料检索用 read，修改文件或执行命令用 execute。每轮最多 ${config.maxTasks} 个子任务，不可递归委派。只回传任务与证据，不复制内部思考或供应商私有消息。工具失败不得虚报成功。` },
+        runtimeOptions: { agentRole: 'parent', orchestration: { port, token: context.token }, systemPrompt: [systemPrompt, `多代理已开启。你负责理解用户需求、规划、验收和最终答复。可用执行子代理：${JSON.stringify(config.workers.map(worker => ({ id: worker.id, model: worker.selection.model })))}。简单问题可直接回答；适合委派时调用 delegate_tasks，将必要背景、明确目标、文件范围和验收条件写入 instructions。每批任务须相互独立；有依赖的下一批必须等待上一批结果。资料检索用 read，修改文件或执行命令用 execute。每轮最多 ${config.maxTasks} 个子任务，不可递归委派。只回传任务与证据，不复制内部思考或供应商私有消息。工具失败不得虚报成功。`].filter(Boolean).join('\n\n') },
       })
     } catch (error) {
       if (previous) this.roots.set(sessionId, previous)

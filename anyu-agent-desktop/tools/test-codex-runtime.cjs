@@ -40,7 +40,7 @@ function sendResponse(res, api, model, tool, args, final = 'DONE', usage = { inp
   res.end()
 }
 
-async function fixture(t, { api = 'openai-responses', tool = 'read', mode = 'full', allow = true, readOnly = false, handler, setup, contextPolicy, model = {} } = {}) {
+async function fixture(t, { api = 'openai-responses', tool = 'read', mode = 'full', allow = true, readOnly = false, conversationOnly = false, handler, setup, contextPolicy, model = {} } = {}) {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'anyu-codex-runtime-'))
   await fs.writeFile(path.join(directory, 'input.txt'), 'FILE_CONTENT')
   const extra = await setup?.(directory) || {}
@@ -97,9 +97,20 @@ async function fixture(t, { api = 'openai-responses', tool = 'read', mode = 'ful
   })
   const options = { cwd: directory, home: path.join(directory, 'codex'), agentDir: path.join(directory, 'pi'), sessionPath: path.join(directory, 'session.codex.jsonl'), credential: 'test', readOnly, model: { id: 'test', api, provider: 'anyu-test', baseUrl, contextWindow: 128000, input: ['text', 'image'], reasoning: false, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, ...model }, contextPolicy: { contextWindow: 128000, triggerTokens: 110000, native: { enabled: true } } }
   if (contextPolicy) options.contextPolicy = contextPolicy
+  if (conversationOnly) { options.conversationOnly = true; options.systemPrompt = 'You are Mint, a thoughtful desktop companion.' }
   launch(); await command('initialize_runtime', { options })
   return { directory, requests, events, command, event, options, restart: async () => { await stop(); launch(); await command('initialize_runtime', { options }) } }
 }
+
+test('conversation-only pet threads send no tools and preserve character instructions', async t => {
+  const f = await fixture(t, { tool: null, conversationOnly: true })
+  await f.command('prompt', { message: 'Say hello to Snow.' })
+  assert.equal((await f.event(e => e.type === 'agent_settled')).error, '')
+  assert.equal(f.requests.length, 1)
+  assert.equal(f.requests[0].body.tools?.length || 0, 0)
+  assert.match(JSON.stringify(f.requests[0].body), /thoughtful desktop companion/)
+  assert.ok(!f.events.some(e => e.type === 'tool_execution_start'))
+})
 
 test('official engine uses native Responses for a preferred GPT Chat catalog entry', async t => {
   const f = await fixture(t, { api: 'openai-completions', model: { id: 'gpt-5.6-sol', preferNativeResponses: true }, handler: (_req, res, body, n) => sendResponse(res, 'openai-responses', body.model, n === 1 ? 'read' : null, { path: 'input.txt' }) })

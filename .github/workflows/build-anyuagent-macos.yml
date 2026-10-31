@@ -92,6 +92,7 @@ jobs:
           node tools/test-agent-session.cjs
           node tools/test-subagent-pi-live.cjs
           node tools/test-shutdown.cjs
+          node --test tools/test-pets.cjs tools/test-pet-links.cjs tools/test-pet-memory.cjs tools/test-pet-voice-player.cjs tools/test-pet-drag.cjs tools/test-agent-event-log.cjs
 
       - name: Build unsigned macOS package
         working-directory: anyu-agent-desktop
@@ -176,17 +177,17 @@ jobs:
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: anyuagent-v1.0.78
+          tag_name: anyuagent-v1.0.79
           target_commitish: ${{ github.sha }}
-          name: AnyuAgent 1.0.78
+          name: AnyuAgent 1.0.79
           draft: true
           make_latest: false
           body: |
-            AnyuAgent 1.0.78 remembers full access across restarts, keeps background tasks in the tray when the window closes, restores the existing window when reopened, and uses Anyu application icons. This release includes the current desktop renderer with unified GPT Image, Nano Banana, Gemini Image and Grok Imagine planning, dimensions and preserved catalog selections. Website and backend are released together through blue/green deployment. The existing Windows silent update flow is retained.
+            AnyuAgent 1.0.79 adds five desktop companions with animations, selected natural voices, model bindings, linked conversations and persistent character memory. Voice failures no longer switch to system speech. This release improves drag capture recovery, long conversation rendering and event storage. The existing Windows silent update flow is retained.
 
             macOS downloads include separate Apple Silicon and Intel DMG/ZIP packages. Each package includes a matching native runtime. These packages are unsigned and are not notarized.
 
-            Windows download: https://x.ailzd.com/downloads/AnyuAgent-Setup-1.0.78.exe
+            Windows download: https://x.ailzd.com/downloads/AnyuAgent-Setup-1.0.79.exe
           files: |
             release-assets/*.dmg
             release-assets/*.zip

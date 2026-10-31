@@ -96,9 +96,10 @@ function toProviderContext(body, model) {
 }
 
 class CodexProviderBridge {
-  constructor({ model, credential, getThinking = () => 'auto', onModelRequest = () => {}, onProviderActivity = () => {} }) {
+  constructor({ model, credential, conversationOnly = false, getThinking = () => 'auto', onModelRequest = () => {}, onProviderActivity = () => {} }) {
     this.model = model
     this.credential = credential
+    this.conversationOnly = conversationOnly
     this.getThinking = getThinking
     this.onModelRequest = onModelRequest
     this.onProviderActivity = onProviderActivity
@@ -140,6 +141,11 @@ class CodexProviderBridge {
       }
       const body = JSON.parse(Buffer.concat(chunks))
       if (body.model !== this.model.id) throw Object.assign(new Error('Model does not match the selected group'), { status: 400 })
+      if (this.conversationOnly) {
+        body.tools = []
+        body.tool_choice = 'none'
+        if (Array.isArray(body.input)) body.input = body.input.filter(item => item.type !== 'additional_tools')
+      }
       this.onModelRequest()
       if (this.model.api === 'openai-responses') await this.proxy(body, req, res, controller.signal)
       else {

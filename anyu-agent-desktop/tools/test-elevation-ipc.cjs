@@ -45,6 +45,7 @@ class FakeBroker {
 const electron = {
   app: Object.assign(new EventEmitter(), { setAppUserModelId() {}, commandLine: { appendSwitch() {} }, setPath() {}, getPath: () => workDir, requestSingleInstanceLock: () => childMode !== '--duplicate', isReady: () => true, whenReady: () => ({ then: fn => { boot = fn } }), quit: () => { quitCount++ }, getVersion: () => 'test', isPackaged: true }),
   BrowserWindow: FakeWindow, Tray: FakeTray,
+  screen: new EventEmitter(),
   ipcMain: { handle: (name, fn) => handlers.set(name, fn), on() {} },
   safeStorage: { isEncryptionAvailable: () => false }, shell: { openExternal: async () => {}, openPath: async file => { openedFiles.push(file); return '' } },
   protocol: { handle() {}, registerSchemesAsPrivileged() {} },

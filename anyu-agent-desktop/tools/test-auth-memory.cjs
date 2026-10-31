@@ -17,7 +17,7 @@ function harness(t, requestApi = async () => { throw new Error('Unexpected netwo
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }))
   function launch(gateway = 'https://x.ailzd.com', filesystem = fs) {
     const context = {
-      fs: filesystem, path, Buffer, process, Date, auth: null, authGeneration: 0, authRefreshPromise: null,
+      fs: filesystem, path, Buffer, process, Date, auth: null, authGeneration: 0, authRefreshPromise: null, desktopPets: null,
       GATEWAY_BASE: gateway, app: { getPath: () => directory }, requestApi,
       safeStorage: { isEncryptionAvailable: () => true, encryptString: value => Buffer.from(value.split('').reverse().join('')), decryptString: value => value.toString().split('').reverse().join('') },
     }

@@ -10,9 +10,9 @@
 const fs = require('node:fs')
 const path = require('node:path')
 const crypto = require('node:crypto')
+const { AgentEventLog } = require('./agent-event-log.cjs')
 
 const EVENT_VERSION = 1
-const MAX_LOG_BYTES = 0
 const APPROVAL_TIMEOUT_MS = 10 * 60 * 1000
 const ABORT_GRACE_MS = 5000
 const MAX_RECENT_EVENTS = 600
@@ -102,6 +102,7 @@ class AgentSessionService {
     this.listeners = new Set()
     this.seq = Date.now()
     this.loadIndex()
+    this.eventLog = new AgentEventLog({ onError: error => this.log('append log failed:', error?.message || error) })
   }
 
   // ---------------------------------------------------------------- persistence
@@ -155,18 +156,18 @@ class AgentSessionService {
   }
 
   appendLog(sessionId, record) {
-    try {
-      fs.mkdirSync(this.logsDir, { recursive: true })
-      const file = this.logFile(sessionId)
-      try {
-        if (MAX_LOG_BYTES > 0 && fs.statSync(file).size > MAX_LOG_BYTES) fs.renameSync(file, `${file}.1`)
-      } catch {
-        // No existing log yet.
-      }
-      fs.appendFileSync(file, `${JSON.stringify(record)}\n`, { mode: 0o600 })
-    } catch (error) {
-      this.log('append log failed:', error?.message || error)
-    }
+    this.eventLog.append(this.logFile(sessionId), record,
+      ['run.finished', 'approval.requested', 'approval.resolved', 'context.compacted'].includes(record.event?.type))
+  }
+
+  flushLogs() { return this.eventLog.flush() }
+
+  pendingLogRecords(sessionId, records, beforeSeq = 0) {
+    const pending = this.eventLog.pending(this.logFile(sessionId))
+    if (!pending.length) return records
+    const merged = new Map(records.map(record => [Number(record.seq), record]))
+    for (const record of pending) if (!beforeSeq || Number(record.seq) < beforeSeq) merged.set(Number(record.seq), record)
+    return [...merged.values()].sort((a, b) => Number(a.seq) - Number(b.seq))
   }
 
   // ---------------------------------------------------------------- event bus
@@ -713,7 +714,9 @@ class AgentSessionService {
     } catch {
       // No log yet.
     }
-    return { events: events.slice(-2000), nextSeq: events.length ? events[events.length - 1].seq : afterSeq }
+    const merged = this.pendingLogRecords(sessionId, events.map(event => ({ seq: event.seq, event })))
+      .filter(record => Number(record.seq) > afterSeq).map(record => record.event)
+    return { events: merged.slice(-2000), nextSeq: merged.length ? merged[merged.length - 1].seq : afterSeq }
   }
 
   readLogRecords(sessionId, { tailBytes = 0, beforeSeq = 0 } = {}) {
@@ -912,6 +915,8 @@ class AgentSessionService {
         bytes = Math.min(data.size, Math.max(bytes * 2, SNAPSHOT_TAIL_START_BYTES))
       }
     }
+    records = this.pendingLogRecords(sessionId, records, beforeSeq)
+    maxSeq = Math.max(maxSeq, ...records.slice(-1).map(record => Number(record.seq)))
     const built = this.buildSnapshotMessages(records, sessionId)
     let start = Math.max(0, built.length - limit * 2)
     while (start < built.length && built[start].role !== 'user') start += 1
@@ -929,6 +934,7 @@ class AgentSessionService {
   stopAll() {
     for (const sessionId of [...this.approvals.keys()]) this.settleApproval(sessionId, 'failed', new Error('会话已停止'))
     for (const run of this.runs.values()) run.aborting = true
+    return this.flushLogs()
   }
 }
 

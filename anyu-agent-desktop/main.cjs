@@ -17,7 +17,7 @@ const net = require('node:net')
 const http = require('node:http')
 const { Agent: UndiciAgent } = require('undici')
 const QRCode = require('qrcode')
-const { normalizeBrowserBounds, calculateBrowserFitZoom } = require('./browser-layout.cjs')
+const { normalizeBrowserBounds, calculateBrowserFitZoom, limitBrowserZoom } = require('./browser-layout.cjs')
 const { RENDERER_ORIGIN, RENDERER_SCHEME, createRendererHandler } = require('./renderer-protocol.cjs')
 const { allowedBrowserUrl, workspaceFile, localFilePath, ArtifactPreviews } = require('./browser-policy.cjs')
 const { LocalFeedback, feedbackUrl } = require('./local-feedback.cjs')
@@ -51,6 +51,7 @@ const { AgentSessionService } = require('./agent-session.cjs')
 const { AgentContextSettings } = require('./agent-context.cjs')
 const { AgentWorkbench } = require('./agent-workbench.cjs')
 const { AgentOrchestrator } = require('./agent-orchestrator.cjs')
+const { createPets } = require('./pet-integration.cjs')
 const { ExecutionBroker } = require('./execution-broker.cjs')
 const { resolvePermissionMode: resolveExecutionPermission } = require('./agent-permissions.cjs')
 const {
@@ -374,6 +375,7 @@ let reportedBrowserBounds = null
 let browserFitTimer = null
 let browserFitEpoch = 0
 let browserFitNeedsReset = false
+let browserFitInFlight = false
 const artifactPreviews = new ArtifactPreviews()
 let browserBridge = null
 let browserBridgeToken = ''
@@ -381,6 +383,7 @@ const browserBridgeCwds = new Set()
 let previewProtocolRegistered = false
 let browserHistoryTransition = false
 let auth = null
+let desktopPets = null
 let authRefreshPromise = null
 let authGeneration = 0
 // 本次启动读到的提权意图。只要它还在，Pi 启动就必须保证权限模式落地；
@@ -389,7 +392,7 @@ let pendingElevationIntent = null
 const keyCache = new Map()
 // 多会话并行：每个会话一个 Pi 子进程。渲染层切换会话只是切换“前台”，
 // 后台会话的进程与任务继续运行；pi:event / pi:exit 会带 sessionKey 供渲染层路由。
-const PI_MAX_RUNTIMES = 4
+const PI_IDLE_RUNTIME_CACHE_SIZE = 4
 const piRuntimes = new Map()
 let piActiveKey = ''
 let piStartLock = Promise.resolve()
@@ -596,7 +599,7 @@ function setBrowserBounds(reportedBounds = reportedBrowserBounds) {
 
 function setBrowserZoomFactor(value = 1) {
   const parsed = Number(value)
-  const zoomFactor = Number.isFinite(parsed) ? Math.min(2, Math.max(0.01, parsed)) : 1
+  const zoomFactor = limitBrowserZoom(browserBounds(), Number.isFinite(parsed) ? parsed : 1)
   clearTimeout(browserFitTimer)
   browserFitTimer = null
   browserFitEpoch++
@@ -608,6 +611,8 @@ function setBrowserZoomFactor(value = 1) {
 }
 
 function applyNativeBrowserZoom(view, factor, bounds = browserBounds()) {
+  const limited = limitBrowserZoom(bounds, factor)
+  if (limited !== factor) { factor = limited; browserState = { ...browserState, zoomFactor: factor }; sendBrowserState() }
   if (factor < 0.25 && bounds) {
     // Chromium clamps normal page zoom at 25%; device emulation also fits tall pages below it.
     view.webContents.setZoomFactor(1)
@@ -639,24 +644,27 @@ function scheduleBrowserFit(reset = false, delay = 100) {
 }
 
 async function fitBrowserContent() {
+  if (browserFitInFlight) return
   const view = browserView
   const bounds = browserBounds()
   const epoch = browserFitEpoch
   const mode = browserState.zoomMode
   if (!view || view.webContents.isDestroyed() || !bounds || mode === 'manual') return
+  browserFitInFlight = true
+  let timeout
   try {
     const reset = browserFitNeedsReset
     if (reset) { browserFitNeedsReset = false; applyNativeBrowserZoom(view, 1) }
     // Only dimensions cross from the sandboxed page; page scripts cannot call host APIs.
-    const content = await view.webContents.executeJavaScriptInIsolatedWorld(1001, [{ code: `(() => {
+    const content = await Promise.race([view.webContents.executeJavaScriptInIsolatedWorld(1001, [{ code: `(() => {
       const measure = () => {
         const root = document.documentElement, body = document.body;
         return { width: Math.max(root?.scrollWidth || 0, body?.scrollWidth || 0),
           height: Math.max(root?.scrollHeight || 0, body?.scrollHeight || 0),
           viewportWidth: root?.clientWidth || innerWidth, viewportHeight: innerHeight };
       };
-      return ${reset} ? new Promise(resolve => requestAnimationFrame(() => resolve(measure()))) : measure();
-    })()` }])
+      return measure();
+    })()` }]), new Promise((_, reject) => { timeout = setTimeout(() => reject(new Error('Browser layout timed out')), 2000) })])
     if (epoch !== browserFitEpoch || view !== browserView || view.webContents.isDestroyed() || !browserBounds()) return
     const currentZoom = reset ? 1 : browserState.zoomFactor
     const factor = calculateBrowserFitZoom(bounds, content, mode, currentZoom)
@@ -667,7 +675,10 @@ async function fitBrowserContent() {
     }
   } catch { /* Navigation may replace the document while dimensions are being read. */ }
   finally {
-    if (epoch === browserFitEpoch) scheduleBrowserFit(false, 1000)
+    clearTimeout(timeout)
+    browserFitInFlight = false
+    if (epoch === browserFitEpoch) scheduleBrowserFit(false, 5000)
+    else if (!browserFitTimer) scheduleBrowserFit()
   }
 }
 
@@ -732,7 +743,7 @@ function ensureBrowserView() {
   browserSession.setPermissionRequestHandler((_contents, _permission, callback) => callback(false))
   browserSession.setPermissionCheckHandler(() => false)
   if (!previewProtocolRegistered) { browserSession.protocol.handle('leta-preview', previewResponse); previewProtocolRegistered = true }
-  browserView = new WebContentsView({ webPreferences: { contextIsolation: true, sandbox: true, nodeIntegration: false, session: browserSession } })
+  browserView = new WebContentsView({ webPreferences: { preload: path.join(__dirname, 'browser-preload.cjs'), contextIsolation: true, sandbox: true, nodeIntegration: false, session: browserSession } })
   browserView.webContents.setZoomFactor(Number(browserState.zoomFactor) || 1)
   browserView.webContents.setWindowOpenHandler(({ url }) => {
     if (!browserState.url.startsWith('artifact://') && isAllowedBrowserUrl(url)) void openBrowserUrl(url).catch(() => {})
@@ -760,6 +771,18 @@ function ensureBrowserView() {
     sendBrowserState()
   })
   browserView.webContents.on('did-fail-load', (_, code, description) => { if (code !== -3) browserState = { ...browserState, loading: false, error: description || '浏览器页面加载失败' }; sendBrowserState() })
+  browserView.webContents.on('unresponsive', () => {
+    browserState = { ...browserState, loading: false, error: '页面暂时无响应，可以等待或刷新页面' }
+    sendBrowserState()
+  })
+  browserView.webContents.on('responsive', () => {
+    if (browserState.error === '页面暂时无响应，可以等待或刷新页面') { browserState = { ...browserState, error: '' }; sendBrowserState() }
+  })
+  browserView.webContents.on('render-process-gone', () => {
+    browserFitEpoch++; clearTimeout(browserFitTimer); browserFitTimer = null
+    browserState = { ...browserState, loading: false, error: '页面进程已退出，请刷新恢复预览' }
+    sendBrowserState()
+  })
   mainWindow.contentView.addChildView(browserView)
   setBrowserBounds()
   return browserView
@@ -962,8 +985,10 @@ function loadAuth() {
   } catch { auth = null }
 }
 function saveAuth(data) {
+  const previousOwner = auth?.user?.id
   if (data.accessToken !== auth?.accessToken || data.refreshToken !== auth?.refreshToken) authGeneration++
   auth = data
+  if (previousOwner !== data.user?.id) desktopPets?.sync()
   const out = { apiBase: GATEWAY_BASE, accessToken: protect(data.accessToken), refreshToken: protect(data.refreshToken), aiHubAccessToken: protect(data.aiHubAccessToken), user: data.user || null }
   fs.mkdirSync(path.dirname(authFile()), { recursive: true })
   const temporary = `${authFile()}.${process.pid}.tmp`
@@ -976,6 +1001,7 @@ function saveAuth(data) {
 function clearAuth() {
 	authGeneration++
 	auth = null
+	desktopPets?.sync()
 	try { fs.rmSync(authFile(), { force: true }) } catch {}
 }
 
@@ -1694,7 +1720,7 @@ async function stopPiRuntime(runtime) {
 async function stopPi() {
   piSkillLaunch = null
   await agentOrchestrator?.close()
-  try { agentSessionService?.stopAll() } catch {}
+  try { await agentSessionService?.stopAll() } catch (error) { console.warn('Session log flush failed:', error.message) }
   localFeedback?.cancel()
   for (const controller of analysisControllers) controller.abort()
   const runtimes = [...piRuntimes.values()]
@@ -1706,6 +1732,7 @@ async function stopPi() {
     gatewayBridge.stop()
   ])
   await executionBroker.close()
+  await agentSessionService?.flushLogs()
 }
 
 async function stopBrowserBridge() {
@@ -1809,22 +1836,21 @@ function sendPi(command, runtimeArg = null) {
   })
 }
 
-// 只清理空闲的后台运行时，给新会话腾位置；正在跑任务的绝不能杀。
+// Only bound reusable idle processes; active conversations have no fixed cap.
 function evictIdlePiRuntimes(keepKey, allowActiveIdle = false) {
-  if (piRuntimes.size < PI_MAX_RUNTIMES) return
-  // 只淘汰空闲的后台进程，按最久未使用优先；正在生成任务的绝不能杀。
   const candidates = [...piRuntimes.entries()]
-    .filter(([key, runtime]) => key !== keepKey && (allowActiveIdle || key !== piActiveKey) && !runtime.inFlightPrompt && !runtime.compacting)
+    .filter(([key, runtime]) => key !== keepKey && (allowActiveIdle || key !== piActiveKey)
+      && !runtime.inFlightPrompt && !runtime.compacting && !runtime.pending?.size
+      && !agentSessionService?.runs?.has(runtime.startOptions?.agentSessionId))
     .sort((left, right) => Number(left[1].lastUsedAt || 0) - Number(right[1].lastUsedAt || 0))
-  for (const [key, runtime] of candidates) {
-    if (piRuntimes.size < PI_MAX_RUNTIMES) return
+  const excess = Math.max(0, candidates.length - PI_IDLE_RUNTIME_CACHE_SIZE)
+  for (const [key, runtime] of candidates.slice(0, excess)) {
     piRuntimes.delete(key)
     // 主动淘汰不会走子进程的 exit 分支，这里显式通知渲染层：该会话已无进程，
     // 否则左侧列表会一直卡在“运行中”。
     if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('pi:exit', { code: null, sessionKey: key, evicted: true })
     void stopPiRuntime(runtime)
   }
-  if (piRuntimes.size >= PI_MAX_RUNTIMES) throw new Error(`最多同时保持 ${PI_MAX_RUNTIMES} 个会话进程，请等部分任务完成后再开新会话`)
 }
 
 async function startPiUnsafe(options = {}) {
@@ -1853,10 +1879,6 @@ async function startPiUnsafe(options = {}) {
   }
   const isChild = options.agentRole === 'child'
   const resolvedPermissionMode = resolvePermissionMode(options.permissionMode)
-  const activeParents = [...piRuntimes.values()].filter(runtime => runtime.inFlightPrompt && runtime.startOptions?.agentRole !== 'child' && runtime !== existing).length
-  if (!isChild && activeParents >= 2 && (options.orchestration || [...piRuntimes.values()].some(runtime => runtime.inFlightPrompt && runtime.startOptions?.orchestration))) {
-    throw new Error('正在执行其他会话，需保留子代理运行位置，请等待其中一轮完成')
-  }
   const executionHost = runtimeExecutionHost(resolvedPermissionMode)
   const permissionChanged = existing && (existing.permissionMode !== resolvedPermissionMode || existing.executionHost !== executionHost)
   if (permissionChanged && existing.inFlightPrompt) throw new Error('当前任务仍在运行，请停止或完成任务后应用新的权限。')
@@ -2023,7 +2045,7 @@ async function startPiUnsafe(options = {}) {
       home, cwd, agentDir: piAgentDir(), skillPaths: pluginPaths,
       model: { ...configured, provider, preferNativeResponses: managed && selectedModel.platform === 'openai' && /^gpt-[56](?:[.-]|$)/i.test(selectedModelId), maxTokens: Number(selectedModel.maxTokens || selectedModel.max_tokens || selectedModel.max_output_tokens) || undefined },
       credential, contextPolicy, thinkingLevel: options.thinkingLevel || 'auto',
-      systemPrompt: [options.systemPrompt, permissionPrompt].filter(Boolean).join('\n\n'), readOnly: Boolean(options.readOnly),
+      systemPrompt: [options.systemPrompt, !options.conversationOnly && permissionPrompt].filter(Boolean).join('\n\n'), readOnly: Boolean(options.readOnly), conversationOnly: Boolean(options.conversationOnly),
     } }, runtime)
   } else stateResponse = await sendPi({ type: 'get_state' }, runtime)
   const skillLaunch = { executable, cwd, env: { ...process.env, PI_CODING_AGENT_DIR: agentDir, ANYU_API_KEY: credential, PI_SKIP_VERSION_CHECK: '1', PI_OFFLINE: '1', ANYU_PERMISSION_MODE: '', ANYU_PERMISSION_PROFILE: '', LETA_BROWSER_BRIDGE_TOKEN: '', LETA_BROWSER_BRIDGE_PORT: '' } }
@@ -3059,6 +3081,7 @@ app.whenReady().then(async () => {
     stopRuntime: (runtime) => stopPiRuntime(runtime),
     resolveRuntime: (key) => resolvePiRuntime(key),
     broadcast: (channel, payload) => {
+      if (payload?.sessionId?.startsWith('pet:') && !desktopPets?.manager.ownsSession(payload.sessionId)) return
       if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send(channel, payload)
     },
     log: (...args) => console.log('[agent-session]', ...args)
@@ -3075,6 +3098,27 @@ app.whenReady().then(async () => {
     },
   })
   agentSessionService.subscribe(event => agentWorkbench.event(event))
+  desktopPets = createPets({
+    app, BrowserWindow, screen, ipcMain, mainWindow: () => mainWindow,
+    sessions: agentSessionService,
+    getCatalog: () => requestApi('/integrations/anyu-agent/catalog'),
+    getOwner: () => auth?.user?.id || '',
+    getCwd: () => defaultWorkspacePath(),
+    getPermission: () => resolvePermissionMode(),
+    getSkills: () => skillManager?.list() || [],
+    openMemoryDirectory: async directory => { const error = await shell.openPath(directory); if (error) throw new Error(error) },
+    chooseReferences: async (window, kind) => {
+      const result = await dialog.showOpenDialog(window, { properties: [kind === 'folder' ? 'openDirectory' : 'openFile', 'multiSelections'] })
+      return result.canceled ? [] : result.filePaths
+    },
+    openExternal: url => shell.openExternal(url),
+    openMain: payload => {
+      showMainWindow()
+      const send = () => mainWindow?.webContents.send('pet:open-main', payload)
+      if (mainWindow?.webContents.isLoadingMainFrame()) mainWindow.webContents.once('did-finish-load', send)
+      else send()
+    },
+  })
   pluginManager = new PluginManager(app.getPath('userData'))
   skillManager = new SkillManager(app.getPath('userData'))
   // Existing local skills remain intact; new skills come from the server store on demand.
@@ -3347,7 +3391,15 @@ app.whenReady().then(async () => {
   ipcMain.handle('payment:qr-data-url', (_, value) => createPaymentQrDataUrl(value))
   ipcMain.handle('payment:open-browser', (_, payload = {}) => openPaymentBrowser(payload || {}))
   ipcMain.handle('pi:key-models', (_, keyId) => listKeyModels(keyId))
-  ipcMain.handle('agent:start', (_, payload) => agentOrchestrator.start(payload || {}))
+  const petSessionGuard = payload => {
+    desktopPets.manager.assertSession(payload?.sessionId || payload?.conversationId)
+    return payload || {}
+  }
+  ipcMain.handle('agent:start', (_, payload = {}) => {
+    petSessionGuard(payload)
+    const options = desktopPets.manager.sessionOptions(payload.sessionId || payload.conversationId)
+    return agentOrchestrator.start(payload, options)
+  })
   ipcMain.handle('agent:context', (event, action, payload = {}) => {
     if (event.sender !== mainWindow?.webContents) throw new Error('Invalid sender')
     const settings = new AgentContextSettings(app.getPath('userData'))
@@ -3373,12 +3425,16 @@ app.whenReady().then(async () => {
     if (action === 'child.merge') return agentOrchestrator.mergeTask(payload.sessionId, payload.id)
     return agentWorkbench.dispatch(action, payload || {})
   })
-  ipcMain.handle('agent:prompt', (_, payload) => agentOrchestrator.prompt(payload || {}))
-  ipcMain.handle('agent:abort', (_, payload) => agentOrchestrator.abort(payload || {}))
-  ipcMain.handle('agent:approve', (_, payload) => agentSessionService.approve(payload || {}))
-  ipcMain.handle('agent:events', (_, payload) => agentSessionService.history(payload || {}))
-  ipcMain.handle('agent:snapshot', (_, payload) => agentOrchestrator.snapshot(payload || {}))
-  ipcMain.handle('agent:sessions', () => agentSessionService.list())
+  ipcMain.handle('agent:prompt', (_, payload) => {
+    petSessionGuard(payload)
+    desktopPets.manager.rememberAttachments(payload || {})
+    return agentOrchestrator.prompt(payload || {})
+  })
+  ipcMain.handle('agent:abort', (_, payload) => agentOrchestrator.abort(petSessionGuard(payload)))
+  ipcMain.handle('agent:approve', (_, payload) => agentSessionService.approve(petSessionGuard(payload)))
+  ipcMain.handle('agent:events', (_, payload) => agentSessionService.history(petSessionGuard(payload)))
+  ipcMain.handle('agent:snapshot', (_, payload) => agentOrchestrator.snapshot(petSessionGuard(payload)))
+  ipcMain.handle('agent:sessions', () => agentSessionService.list().filter(session => desktopPets.manager.ownsSession(session.sessionId)))
   ipcMain.handle('pi:save-attachments', (_, payload) => savePiAttachments(payload || {}))
   ipcMain.handle('pi:attachments', (_, sessionPath) => loadPiAttachments(sessionPath))
   ipcMain.handle('pi:materialize-session', (_, payload) => materializePiSession(payload || {}))
@@ -3657,6 +3713,10 @@ app.whenReady().then(async () => {
   ipcMain.handle('agent-browser:open-url', (_, url) => openBrowserUrl(url))
   ipcMain.handle('agent-browser:open-artifact', (event, payload = {}) => { trustedFileRequest(event); return openBrowserArtifact(payload) })
   ipcMain.on('agent-browser:set-bounds', (_, bounds) => setBrowserBounds(bounds))
+  ipcMain.on('agent-browser:layout-changed', event => {
+    if (event.sender !== browserView?.webContents || event.senderFrame !== browserView.webContents.mainFrame) return
+    scheduleBrowserFit()
+  })
   ipcMain.handle('agent-browser:close', () => closeBrowserView())
   ipcMain.handle('agent-browser:reload', async () => {
     if (!browserView || browserView.webContents.isDestroyed()) return { ...browserState, open: false }
@@ -3690,11 +3750,12 @@ app.whenReady().then(async () => {
     return { ok: true, width: nextWidth, clamped: nextWidth !== width }
   })
   createWindow()
+  desktopPets.sync()
   app.on('activate', () => showMainWindow())
 })
 app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit() })
 installGracefulQuit(app, {
-  beforeStop: () => { isQuitting = true },
+  beforeStop: () => { isQuitting = true; desktopPets?.close() },
   stop: async () => { await stopPi(); await agentWorkbench?.close() },
   onError: error => console.error('[shutdown]', error)
 })

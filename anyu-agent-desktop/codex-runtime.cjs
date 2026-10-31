@@ -45,7 +45,7 @@ class CodexRuntime {
   async initialize() {
     const options = this.options
     this.tools = await new CodexTools({ ...options, ask: (request, signal) => this.ask(request, signal), emit: event => this.emit(event) }).initialize()
-    this.bridge = await new CodexProviderBridge({ model: options.model, credential: options.credential, getThinking: () => this.thinking, onModelRequest: () => {
+    this.bridge = await new CodexProviderBridge({ model: options.model, credential: options.credential, conversationOnly: options.conversationOnly, getThinking: () => this.thinking, onModelRequest: () => {
       if (!this.compaction) this.emit({ type: 'turn_start' })
     }, onProviderActivity: type => {
       if (!this.compaction) this.emit({ type: 'message_update', assistantMessageEvent: { type } })
@@ -77,6 +77,7 @@ class CodexRuntime {
       'The internal read-only sandbox applies to disabled native tools. The available host tools can perform authorized work, including edits and commands, subject to their actual approval results. Do not infer that all host tools are read-only.',
       options.systemPrompt || '', this.tools.skillPrompt || '',
     ].filter(Boolean).join('\n\n') }
+    if (options.conversationOnly) base.developerInstructions = `You are in a conversation-only desktop companion session. Reply naturally in text; no tools are available.\n\n${options.systemPrompt || ''}`
     let saved
     try { saved = JSON.parse(fs.readFileSync(options.sessionPath, 'utf8').trim()) } catch (error) { if (error.code !== 'ENOENT') throw error }
     let result

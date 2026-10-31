@@ -4,7 +4,7 @@ const assert = require('node:assert/strict')
 const http = require('node:http')
 const { CodexProviderBridge, HISTORY_PREFIX } = require('../codex-provider.cjs')
 
-async function fixture(t, handler, model = {}) {
+async function fixture(t, handler, model = {}, options = {}) {
   const requests = []
   const server = http.createServer(async (req, res) => {
     const chunks = []
@@ -17,6 +17,7 @@ async function fixture(t, handler, model = {}) {
   const bridge = await new CodexProviderBridge({
     model: { id: 'gpt-5.6-sol', api: 'openai-completions', provider: 'anyu-test', preferNativeResponses: true, baseUrl: `http://127.0.0.1:${server.address().port}/v1`, input: ['text'], reasoning: false, ...model },
     credential: 'test-credential',
+    ...options,
   }).start()
   t.after(async () => { await bridge.close(); server.closeAllConnections(); await new Promise(resolve => server.close(resolve)) })
   const request = body => fetch(`${bridge.origin}/responses`, {
@@ -26,6 +27,19 @@ async function fixture(t, handler, model = {}) {
   })
   return { bridge, requests, request }
 }
+
+for (const api of ['openai-responses', 'openai-completions', 'anthropic-messages', 'google-generative-ai']) test(`conversation-only ${api} omits native and incremental tools`, async t => {
+  const f = await fixture(t, (_, res) => {
+    res.writeHead(400, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({ error: { message: 'fixture completed', type: 'invalid_request_error' } }))
+  }, { id: 'test', api, preferNativeResponses: false }, { conversationOnly: true })
+  const tool = { type: 'function', name: 'write_file', parameters: { type: 'object', properties: {} } }
+  const response = await f.request({ tools: [tool], tool_choice: 'required', input: [{ type: 'additional_tools', tools: [tool] }, { role: 'user', content: 'Say hello' }] })
+  await response.text()
+  assert.equal(f.requests.length, 1)
+  assert.equal(f.requests[0].body.tools?.length || 0, 0)
+  assert.ok(!JSON.stringify(f.requests[0].body).includes('write_file'))
+})
 
 test('native preference preserves Responses and streams before upstream completion', async t => {
   let finish

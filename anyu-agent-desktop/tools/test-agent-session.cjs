@@ -9,7 +9,7 @@ const { AgentSessionService } = require('../agent-session.cjs')
 
 async function createSession(t) {
   const userDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'anyu-session-retry-'))
-  t.after(() => fs.rmSync(userDataDir, { recursive: true, force: true }))
+  t.after(async () => { await service.flushLogs(); fs.rmSync(userDataDir, { recursive: true, force: true }) })
   const events = []
   const service = new AgentSessionService({
     userDataDir,
@@ -30,7 +30,7 @@ async function createSession(t) {
 
 test('auto permissions do not restart a runtime that resolves to confirm', async t => {
   const userDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'anyu-session-permission-'))
-  t.after(() => fs.rmSync(userDataDir, { recursive: true, force: true }))
+  t.after(async () => { await service.flushLogs(); fs.rmSync(userDataDir, { recursive: true, force: true }) })
   const starts = []
   const service = new AgentSessionService({ userDataDir, startRuntime: async options => {
     starts.push(options)

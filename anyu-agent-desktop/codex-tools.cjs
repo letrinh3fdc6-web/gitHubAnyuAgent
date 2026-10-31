@@ -6,13 +6,14 @@ const READ_TOOLS = new Set(['read', 'grep', 'find', 'ls', 'runtime_probe'])
 const libraryFile = relative => pathToFileURL(path.join(__dirname, 'node_modules/@earendil-works/pi-coding-agent/dist', relative)).href
 
 class CodexTools {
-  constructor({ cwd, readOnly = false, ask, emit, model, agentDir, skillPaths = [] }) {
-    Object.assign(this, { cwd, readOnly, ask, emit, model, agentDir, skillPaths })
+  constructor({ cwd, readOnly = false, conversationOnly = false, ask, emit, model, agentDir, skillPaths = [] }) {
+    Object.assign(this, { cwd, readOnly, conversationOnly, ask, emit, model, agentDir, skillPaths })
     this.tools = new Map()
     this.hooks = new Map()
     this.tail = Promise.resolve()
   }
   async initialize() {
+    if (this.conversationOnly) { this.skillPrompt = ''; return this }
     const [{ createAllTools }, { validateToolArguments }, skills] = await Promise.all([
       import(libraryFile('core/tools/index.js')),
       import('@earendil-works/pi-ai'),

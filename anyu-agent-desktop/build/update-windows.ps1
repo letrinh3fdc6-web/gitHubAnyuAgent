@@ -88,7 +88,17 @@ try {
     Show-Phase '准备安装…'
     if (-not (Test-Path -LiteralPath $config.installerPath -PathType Leaf)) { throw '更新安装包不存在。' }
     if ((Get-Item -LiteralPath $config.installerPath).Length -ne $config.bytes) { throw '更新包大小校验失败。' }
-    if ((Get-FileHash -LiteralPath $config.installerPath -Algorithm SHA256).Hash -ne $config.sha256) { throw '更新包 SHA-256 校验失败。' }
+    # Use the runtime directly; inherited PowerShell module paths can hide Get-FileHash.
+    $packageHasher = [Security.Cryptography.SHA256]::Create()
+    $packageStream = $null
+    try {
+        $packageStream = [IO.File]::OpenRead($config.installerPath)
+        $packageHash = [BitConverter]::ToString($packageHasher.ComputeHash($packageStream)).Replace('-', '')
+    } finally {
+        if ($packageStream) { $packageStream.Dispose() }
+        $packageHasher.Dispose()
+    }
+    if ($packageHash -ne $config.sha256) { throw '更新包 SHA-256 校验失败。' }
     if (-not (Test-Path -LiteralPath $config.executablePath -PathType Leaf)) { throw '当前客户端安装位置不存在。' }
     if ((Read-UpdateStatus) -eq 'cancelled') { Write-UpdateLog 'Preparation was cancelled before readiness'; exit 0 }
     Set-UpdateStatus 'prepared'
