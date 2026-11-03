@@ -34,6 +34,12 @@ test('phase instrumentation preserves default NSIS lifecycle and rejects templat
   for (const phase of ['removing-old', 'unpacking', 'extracting', 'copying', 'registering']) assert.ok(marked.includes(`AnyuInstallPhase "${phase}"`))
   assert.ok(marked.includes('!insertmacro uninstallOldVersion SHELL_CONTEXT'))
   assert.ok(marked.includes('UNINSTALLER_OUT_FILE'))
+  for (const detail of ['failed-old-uninstall:$R0', 'failed-file-busy:$R0', 'removing-old-user']) assert.ok(marked.includes(detail))
+  assert.ok(marked.includes('"$(uninstallFailed): $R0" /SD IDOK'), 'A failed silent update must not wait on an invisible modal')
+  assert.ok(marked.includes('Call AnyuRecoverLegacyUninstall'))
+  assert.ok(marked.includes('$AnyuSourcePath != $AnyuTargetPath'), 'Recovery is restricted to the same installation directory')
+  assert.ok(marked.includes('$rootKey_uninstallResult != "SHELL_CONTEXT"'), 'Recovery must not remove a different installation scope')
+  assert.ok(marked.includes('/S /KEEP_APP_DATA $0 --anyu-progress='))
   assert.throws(() => instrumentInstaller('changed upstream template'), /template changed/)
 })
 

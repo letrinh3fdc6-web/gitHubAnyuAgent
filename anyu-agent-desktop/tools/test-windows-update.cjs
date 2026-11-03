@@ -17,7 +17,7 @@ $tokens = $null
 $source = [IO.File]::ReadAllText($env:ANYU_UPDATE_SOURCE, [Text.Encoding]::UTF8)
 $ast = [Management.Automation.Language.Parser]::ParseInput($source, [ref]$tokens, [ref]$parseErrors)
 if ($parseErrors.Count) { throw ($parseErrors | Out-String) }
-foreach ($name in @('Get-InstallScope', 'Get-InstallerFailure')) {
+foreach ($name in @('Get-InstallScope', 'Get-InstallerFailure', 'Get-InstallerStartOptions')) {
     $definition = $ast.Find({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name }, $true)
     if (-not $definition) { throw "Missing update function $name" }
     . ([scriptblock]::Create($definition.Extent.Text))
@@ -37,7 +37,10 @@ $results = foreach ($case in $cases) {
     foreach ($property in $case.registry.PSObject.Properties) { $script:registry[$property.Name] = $property.Value }
     @{ name = $case.name; scope = (Get-InstallScope) }
 }
-@{ cases = @($results); cancelled = (Get-InstallerFailure 1223); other = (Get-InstallerFailure 2) } | ConvertTo-Json -Depth 5 -Compress
+function Write-UpdateLog { param([string]$Message) }
+$config = @{ installerPath = 'C:\Downloads\AnyuAgent-Setup.exe' }
+$principal = [Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent())
+@{ cases = @($results); cancelled = (Get-InstallerFailure 1223); other = (Get-InstallerFailure 2); user = (Get-InstallerStartOptions '/S /currentuser' '/currentuser'); machine = (Get-InstallerStartOptions '/S /allusers' '/allusers'); elevated = $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator) } | ConvertTo-Json -Depth 5 -Compress
 `
   const root = String.raw`C:\Users\Test\AppData\Local\Temp\Anyu Agent`
   const machineUninstall = String.raw`HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*`
@@ -66,6 +69,47 @@ $results = foreach ($case in $cases) {
   assert.match(report.cancelled, /Windows.*授权/)
   assert.match(report.cancelled, /重试/)
   assert.match(report.other, /错误 2/)
+  assert.equal(report.user.Verb, undefined)
+  assert.equal(report.machine.Verb, report.elevated ? undefined : 'RunAs')
+  assert.equal(report.user.WorkingDirectory, 'C:\\Downloads')
+})
+
+test('installer failures distinguish occupied processes, inspection, legacy uninstall and file replacement', { skip: process.platform !== 'win32' }, t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'anyu-install-failure-'))
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }))
+  const cases = [
+    { code: 31, stages: [], expected: /进程在使用/ },
+    { code: 32, stages: [], expected: /检查超时/ },
+    { code: 33, stages: [], expected: /未能完成.*检查/ },
+    { code: 2, stages: ['removing-old', 'failed-old-uninstall:2'], expected: /旧版本卸载未完成/ },
+    { code: 2, stages: ['removing-old', 'checking-processes'], expected: /旧版本卸载未完成/ },
+    { code: 2, stages: ['failed-file-busy:C:\\Program Files\\AnyuAgent\\resources\\app.asar', 'failed-old-uninstall:2'], expected: /app\.asar.*占用|占用.*app\.asar/ },
+    { code: 2, stages: ['checking-processes', 'failed-processes:20'], expected: /未能完成.*检查/ },
+    { code: 1223, stages: [], expected: /Windows.*授权/ },
+    { code: 99, stages: [], expected: /错误 99/ },
+  ]
+  const script = String.raw`
+$ErrorActionPreference = 'Stop'
+[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
+$tokens = $null; $parseErrors = $null
+$ast = [Management.Automation.Language.Parser]::ParseInput([IO.File]::ReadAllText($env:ANYU_UPDATE_SOURCE, [Text.Encoding]::UTF8), [ref]$tokens, [ref]$parseErrors)
+if ($parseErrors.Count) { throw ($parseErrors | Out-String) }
+$definition = $ast.Find({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Get-InstallerFailure' }, $true)
+. ([scriptblock]::Create($definition.Extent.Text))
+$cases = ConvertFrom-Json -InputObject $env:ANYU_FAILURE_FIXTURES
+$results = foreach ($case in $cases) {
+  [IO.File]::WriteAllLines($env:ANYU_STAGE_FILE, [string[]]$case.stages, [Text.Encoding]::Unicode)
+  Get-InstallerFailure $case.code $env:ANYU_STAGE_FILE
+}
+ConvertTo-Json -InputObject @($results) -Compress
+`
+  const result = spawnSync('powershell.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')], {
+    encoding: 'utf8', windowsHide: true, timeout: 15000,
+    env: { ...process.env, ANYU_UPDATE_SOURCE: path.resolve(__dirname, '../build/update-windows.ps1'), ANYU_FAILURE_FIXTURES: JSON.stringify(cases), ANYU_STAGE_FILE: path.join(directory, 'stages.log') },
+  })
+  assert.equal(result.status, 0, result.stderr)
+  const messages = JSON.parse(result.stdout)
+  for (let i = 0; i < cases.length; i++) assert.match(messages[i], cases[i].expected)
 })
 
 test('Windows helper really starts, accepts a leftover unlocked lock, and honors cancellation before install', { skip: process.platform !== 'win32' }, async t => {
