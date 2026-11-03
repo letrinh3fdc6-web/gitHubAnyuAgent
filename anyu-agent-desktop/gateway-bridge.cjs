@@ -11,9 +11,10 @@ const FORWARDED_REQUEST_HEADERS = new Set([
 ])
 
 function createUpstreamAgent(protocol) {
+  // Active streams must not queue behind unrelated sessions. Bound idle reuse only.
   return protocol === 'https:'
-    ? new https.Agent({ keepAlive: true, maxSockets: 8, maxFreeSockets: 2 })
-    : new http.Agent({ keepAlive: true, maxSockets: 8, maxFreeSockets: 2 })
+    ? new https.Agent({ keepAlive: true, maxSockets: Infinity, maxFreeSockets: 2 })
+    : new http.Agent({ keepAlive: true, maxSockets: Infinity, maxFreeSockets: 2 })
 }
 
 function managedProviderName(api, groupId) {

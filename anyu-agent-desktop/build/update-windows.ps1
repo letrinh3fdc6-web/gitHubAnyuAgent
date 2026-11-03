@@ -4,6 +4,9 @@ $config = Get-Content -LiteralPath $ConfigPath -Raw -Encoding UTF8 | ConvertFrom
 $lockStream = $null
 $window = $null
 $script:allowClose = $false
+$script:phaseText = ''
+$script:phaseStarted = [DateTime]::UtcNow
+$script:lastStage = ''
 
 function Write-UpdateLog([string]$Message) {
     Add-Content -LiteralPath $config.logPath -Value "[$(Get-Date -Format o)] $Message" -Encoding UTF8
@@ -14,6 +17,7 @@ function Set-UpdateStatus([string]$Status, [string]$Message = '') {
     if ($marker.session -ne $config.session) { throw 'Another update has replaced this update session' }
     $marker | Add-Member -NotePropertyName status -NotePropertyValue $Status -Force
     $marker | Add-Member -NotePropertyName error -NotePropertyValue $Message -Force
+    $marker | Add-Member -NotePropertyName workerPid -NotePropertyValue $PID -Force
     $marker | Add-Member -NotePropertyName updatedAt -NotePropertyValue ([DateTime]::UtcNow.ToString('o')) -Force
     $temporaryMarker = "$($config.markerPath).$PID.tmp"
     [IO.File]::WriteAllText($temporaryMarker, ($marker | ConvertTo-Json -Depth 8), [Text.UTF8Encoding]::new($false))
@@ -26,7 +30,34 @@ function Pump-Window {
 
 function Show-Phase([string]$Text) {
     Write-UpdateLog $Text
+    $script:phaseText = $Text
+    $script:phaseStarted = [DateTime]::UtcNow
     if ($window) { $window.FindName('Phase').Text = $Text; Pump-Window }
+}
+
+function Update-InstallProgress([string]$StageFile) {
+    $names = @{
+        'checking-processes' = '正在检查安装目录占用…'
+        'removing-old' = '正在处理旧版本文件…'
+        'unpacking' = '正在读取安装包…'
+        'extracting' = '正在解压应用文件…'
+        'copying' = '正在写入应用文件…'
+        'registering' = '正在更新安装信息…'
+        'installed' = '安装已完成，正在收尾…'
+    }
+    try {
+        if (Test-Path -LiteralPath $StageFile) {
+            $stage = (Get-Content -LiteralPath $StageFile -Encoding Unicode -Tail 1 -ErrorAction Stop).Trim()
+            if ($names.ContainsKey($stage) -and $stage -ne $script:lastStage) {
+                $script:lastStage = $stage
+                Show-Phase $names[$stage]
+            }
+        }
+    } catch {}
+    if ($window) {
+        $elapsed = [int]([DateTime]::UtcNow - $script:phaseStarted).TotalSeconds
+        $window.FindName('Phase').Text = "$($script:phaseText) 已等待 $elapsed 秒"
+    }
 }
 
 function Read-UpdateStatus {
@@ -137,11 +168,19 @@ try {
         Show-Phase '正在安装新版…'
     }
     # NSIS /D must be last and its value must NOT be surrounded by quotes.
-    $arguments = '/S --updated ' + $installScope + ' /D=' + $config.installDirectory
+    $stageFile = Join-Path (Split-Path -Parent $ConfigPath) 'installer-stages.log'
+    $env:ANYU_UPDATE_STAGE_FILE = $stageFile
+    $arguments = '/S --updated ' + $installScope + ' --anyu-progress="' + $stageFile + '" /D=' + $config.installDirectory
     $installer = Start-Process -FilePath $config.installerPath -ArgumentList $arguments -WindowStyle Hidden -PassThru
-    $deadline = [DateTime]::UtcNow.AddMinutes(8)
-    while (-not $installer.HasExited -and [DateTime]::UtcNow -lt $deadline) { Pump-Window; Start-Sleep -Milliseconds 150; $installer.Refresh() }
-    if (-not $installer.HasExited) { throw '安装仍在进行，未启动客户端。请查看安装日志后重试。' }
+    $slowNoticeAt = [DateTime]::UtcNow.AddMinutes(8)
+    while (-not $installer.HasExited) {
+        Update-InstallProgress $stageFile
+        if ([DateTime]::UtcNow -ge $slowNoticeAt) {
+            Write-UpdateLog 'Installation is taking longer than expected; waiting for the existing installer, not starting another one'
+            $slowNoticeAt = [DateTime]::UtcNow.AddMinutes(5)
+        }
+        Pump-Window; Start-Sleep -Milliseconds 500; $installer.Refresh()
+    }
     $installer.WaitForExit()
     Write-UpdateLog "Installer exit code: $($installer.ExitCode)"
     if ($installer.ExitCode -ne 0) { throw (Get-InstallerFailure $installer.ExitCode) }
@@ -163,7 +202,7 @@ try {
     }
     if ((Read-UpdateStatus) -ne 'completed') { throw '新版客户端未能在一分钟内完成启动，请手动打开。' }
     Show-Phase '更新完成。'
-    Remove-Item -LiteralPath $config.installerPath -Force -ErrorAction SilentlyContinue
+    # Retain the verified installer as the next differential-download base.
     Write-UpdateLog "Update completed: $($config.expectedVersion)"
 } catch {
     $failure = $_.Exception.Message

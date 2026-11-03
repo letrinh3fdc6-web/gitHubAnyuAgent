@@ -13,6 +13,7 @@ class TaskStorage {
     this.file = path.join(directory, 'state.json')
     this.state = { version: 1, tasks: {}, projects: {}, connectors: {}, workflows: {} }
     this.queue = Promise.resolve()
+    this.pendingSave = null
   }
 
   async load() {
@@ -28,13 +29,22 @@ class TaskStorage {
   }
 
   save() {
-    const content = JSON.stringify(this.state)
+    if (this.pendingSave) return this.pendingSave
     const operation = this.queue.then(async () => {
+      // All callers waiting for this batch are covered by one durable snapshot.
+      // Mutations during IO enqueue the next batch instead of being lost.
+      this.pendingSave = null
+      const content = JSON.stringify(this.state)
       const temp = `${this.file}.${crypto.randomUUID()}.tmp`
-      const handle = await fs.open(temp, 'wx', 0o600)
-      try { await handle.writeFile(content); await handle.sync() } finally { await handle.close() }
-      await fs.rename(temp, this.file)
+      try {
+        const handle = await fs.open(temp, 'wx', 0o600)
+        try { await handle.writeFile(content); await handle.sync() } finally { await handle.close() }
+        await fs.rename(temp, this.file)
+      } finally {
+        await fs.unlink(temp).catch(() => {})
+      }
     })
+    this.pendingSave = operation
     this.queue = operation.catch(() => {})
     return operation
   }

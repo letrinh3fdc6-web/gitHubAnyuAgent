@@ -3,7 +3,8 @@ const path = require('node:path')
 const crypto = require('node:crypto')
 const { setTimeout: delay } = require('node:timers/promises')
 const { artifactFromManifest, compareVersions } = require('./updater.cjs')
-const { prepareWindowsUpdate, readMarker, writeMarker } = require('./windows-update.cjs')
+const { prepareWindowsUpdate, readMarker, writeMarker, isUpdateWorkerRunning } = require('./windows-update.cjs')
+const { sameOriginFetch, fetchBlockMap, differentialDownload, cacheFiles } = require('./update-download.cjs')
 
 class DesktopUpdater {
   constructor({ app, manifestUrl, localOnly = false, emit = () => {}, isBusy = () => false, quit = () => app.quit(), fetch: fetcher = fetch, prepare = prepareWindowsUpdate, platform = process.platform, pollMs = 500 }) {
@@ -11,6 +12,21 @@ class DesktopUpdater {
     this.markerPath = path.join(app.getPath('userData'), 'pending-update.json')
     this.state = { status: 'idle', phase: 'idle', message: '' }
     this.operation = null
+    this.lastProgressAt = 0
+  }
+
+  log(message) {
+    try {
+      const file = path.join(this.app.getPath('userData'), 'update-download.log')
+      if (fs.existsSync(file) && fs.statSync(file).size > 1024 * 1024) fs.renameSync(file, `${file}.previous`)
+      fs.appendFileSync(file, `[${new Date().toISOString()}] ${message}\n`)
+    } catch {}
+  }
+
+  downloadProgress(extra) {
+    if (extra.percent !== 100 && Date.now() - this.lastProgressAt < 150) return
+    this.lastProgressAt = Date.now()
+    this.setState('downloading', extra)
   }
 
   setState(phase, extra = {}) {
@@ -37,6 +53,8 @@ class DesktopUpdater {
     if (!pending || pending.status === 'completed') return
     if (pending.expectedVersion && compareVersions(this.app.getVersion(), pending.expectedVersion) >= 0) {
       this.setState('updated', { version: this.app.getVersion(), message: `已更新至 v${this.app.getVersion()}` })
+    } else if (isUpdateWorkerRunning(pending)) {
+      this.setState('installing', { version: pending.expectedVersion, message: '更新仍在安装中，请等待完成。', logPath: pending.logPath || '' })
     } else if (pending.status === 'failed' || ['starting', 'installing', 'restarting'].includes(pending.status)) {
       this.setState('error', { message: pending.error || '上次更新未完成，可以重试。', logPath: pending.logPath || '' })
     } else if (pending.installerPath && fs.existsSync(pending.installerPath)) {
@@ -47,6 +65,15 @@ class DesktopUpdater {
   acknowledgeLaunch() {
     const pending = readMarker(this.markerPath)
     if (pending?.status === 'restarting' && compareVersions(this.app.getVersion(), pending.expectedVersion) >= 0) {
+      if (pending.artifact) {
+        const root = path.join(this.app.getPath('userData'), 'updates')
+        const previous = readMarker(path.join(root, 'base.json'))
+        writeMarker(path.join(root, 'base.json'), { ...pending.artifact, previousSha256: previous?.sha256 })
+        if (/^[a-f0-9]{64}$/.test(previous?.previousSha256 || '') && ![pending.artifact.sha256, previous.sha256].includes(previous.previousSha256)) {
+          const expired = cacheFiles(root, previous.previousSha256)
+          for (const file of [expired.installer, expired.map]) void fs.promises.rm(file, { force: true }).catch(() => {})
+        }
+      }
       writeMarker(this.markerPath, { ...pending, status: 'completed', actualVersion: this.app.getVersion(), launchedAt: new Date().toISOString() })
     }
   }
@@ -59,6 +86,12 @@ class DesktopUpdater {
 
   install() {
     if (this.operation) return this.operation
+    const pending = readMarker(this.markerPath)
+    if (isUpdateWorkerRunning(pending)) {
+      this.setState('installing', { version: pending.expectedVersion, message: '更新仍在安装中，请等待完成。', logPath: pending.logPath || '' })
+      return Promise.resolve({ status: 'installing' })
+    }
+    if (this.state.phase === 'installing' && pending?.workerPid) this.recover()
     if (this.state.phase === 'installing') return Promise.resolve({ status: 'installing' })
     this.operation = this.performInstall().finally(() => { this.operation = null })
     return this.operation
@@ -77,6 +110,7 @@ class DesktopUpdater {
       if (this.platform !== 'win32') throw new Error('当前自动安装仅支持 Windows，请从下载页面获取适合此系统的安装包。')
       if (!this.app.isPackaged) throw new Error('开发模式不覆盖安装，请使用已安装的 AnyuAgent 测试自动更新。')
       const { artifact } = info
+      this.log(`Update started: ${info.currentVersion} -> ${artifact.version}`)
       const cacheRoot = path.join(this.app.getPath('userData'), 'updates')
       const cache = path.join(cacheRoot, artifact.sha256)
       fs.mkdirSync(cache, { recursive: true })
@@ -91,10 +125,24 @@ class DesktopUpdater {
         }
       }
       signal.throwIfAborted()
+      let newMap
+      if (artifact.blockMap) {
+        try { newMap = await fetchBlockMap(this.fetcher, artifact, AbortSignal.any([signal, AbortSignal.timeout(30000)])) }
+        catch (error) { signal.throwIfAborted(); this.log(`Block map unavailable; using full download: ${error.message}`) }
+      }
+      if (!verified && newMap) {
+        try {
+          const base = readMarker(path.join(cacheRoot, 'base.json'))
+          const baseFiles = cacheFiles(cacheRoot, base?.sha256)
+          this.setState('downloading', { percent: 0, message: '正在下载更新差异…' })
+          await differentialDownload({ artifact, base, baseFile: baseFiles.installer, baseMapFile: baseFiles.map, target: installerPath, newMap, fetcher: this.fetcher, signal: AbortSignal.any([signal, AbortSignal.timeout(15 * 60 * 1000)]), progress: value => this.downloadProgress(value), log: message => this.log(message) })
+          verified = true
+        } catch (error) { signal.throwIfAborted(); this.log(`Differential fallback: ${error.message}`) }
+      }
       if (!verified) {
         const combined = AbortSignal.any([signal, AbortSignal.timeout(15 * 60 * 1000)])
         this.setState('downloading', { percent: 0, message: '正在下载更新…' })
-        const response = await this.fetcher(artifact.url, { signal: combined })
+        const response = await sameOriginFetch(this.fetcher, artifact.url, { signal: combined })
         if (!response.ok || !response.body) throw new Error(`更新包下载失败 (HTTP ${response.status})`)
         if (response.url && new URL(response.url).origin !== new URL(artifact.url).origin) throw new Error('更新下载重定向到了其他更新源')
         const file = await fs.promises.open(installerPath, 'w', 0o700)
@@ -106,7 +154,7 @@ class DesktopUpdater {
             loaded += buffer.length
             if (loaded > artifact.bytes) throw new Error('更新包大小超过更新目录记录')
             await file.writeFile(buffer)
-            this.setState('downloading', { loaded, total: artifact.bytes, percent: Math.floor(loaded / artifact.bytes * 100) })
+            this.downloadProgress({ loaded, total: artifact.bytes, differential: false, percent: Math.floor(loaded / artifact.bytes * 100) })
           }
           await file.sync()
         } finally { await file.close() }
@@ -114,7 +162,9 @@ class DesktopUpdater {
         verified = await this.verify(installerPath, artifact)
         if (!verified) throw new Error('更新包大小或 SHA-256 校验失败，请重试。')
       }
-      const pending = { status: 'ready', installerPath, expectedVersion: artifact.version, bytes: artifact.bytes, sha256: artifact.sha256 }
+      if (newMap) await fs.promises.writeFile(path.join(cache, 'package.blockmap'), newMap)
+      this.log(`Package verified: ${artifact.bytes} bytes`)
+      const pending = { status: 'ready', installerPath, expectedVersion: artifact.version, bytes: artifact.bytes, sha256: artifact.sha256, artifact }
       writeMarker(this.markerPath, pending)
       while (this.isBusy()) {
         this.setState('waiting', { percent: 100, message: '下载完成，等待当前任务结束后自动安装。' })
@@ -122,7 +172,7 @@ class DesktopUpdater {
       }
       signal.throwIfAborted()
       this.setState('preparing', { percent: 100, message: '正在准备安装…' })
-      const prepared = await this.prepare({ markerPath: this.markerPath, installerPath, executablePath: this.app.getPath('exe'), version: artifact.version, bytes: artifact.bytes, sha256: artifact.sha256, userDataPath: this.app.getPath('userData') })
+      const prepared = await this.prepare({ markerPath: this.markerPath, installerPath, executablePath: this.app.getPath('exe'), version: artifact.version, bytes: artifact.bytes, sha256: artifact.sha256, artifact, userDataPath: this.app.getPath('userData') })
       if (signal.aborted) { writeMarker(this.markerPath, { ...readMarker(this.markerPath), status: 'cancelled' }); signal.throwIfAborted() }
       writeMarker(this.markerPath, { ...readMarker(this.markerPath), status: 'installing' })
       this.setState('installing', { percent: 100, logPath: prepared.logPath, message: '正在安装更新，完成后将自动重新启动。' })

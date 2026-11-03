@@ -32,6 +32,7 @@ function host() {
     mainWindow: { isDestroyed: () => false, webContents: { send: (channel, event) => events.push({ channel, event }) } },
     stopPiRuntime: async value => { stopped.push(value.key) },
     path, piSessionDir: () => path.resolve('test-sessions'), piExecutable: () => 'fake-pi',
+    getDesktopRuntimes: () => ({ ensure: async (_name, fallback) => fallback }),
     fs: { existsSync: value => value === 'fake-pi' }, isInside: () => true,
     app: { getPath: () => path.resolve('test-user-data') },
     AgentContextSettings: class {

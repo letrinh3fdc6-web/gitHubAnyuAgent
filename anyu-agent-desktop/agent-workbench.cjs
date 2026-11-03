@@ -80,9 +80,11 @@ class AgentWorkbench {
     }
     this.store.state.tasks[task.id] = task
     task.lazyCheckpoint = payload.lazyCheckpoint === true && task.settings.checks.length === 0
-    await this.store.save()
     try {
-      if (!task.lazyCheckpoint) await this.prepareSnapshot(task)
+      if (!task.lazyCheckpoint) {
+        await this.store.save()
+        await this.prepareSnapshot(task)
+      }
       task.status = 'running'
       await this.store.save()
       this.changed(task, 'started')

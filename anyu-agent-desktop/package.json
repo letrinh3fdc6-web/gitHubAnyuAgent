@@ -1,6 +1,6 @@
 {
   "name": "anyu-agent-desktop",
-  "version": "1.0.79",
+  "version": "1.0.80",
   "description": "AnyuAgent standalone desktop workspace",
   "main": "main.cjs",
   "author": "Anyu AI",
@@ -12,6 +12,7 @@
     "@openai/codex": "0.164.0",
     "archiver": "7.0.1",
     "dompurify": "3.3.1",
+    "electron-updater": "6.8.11",
     "lucide": "0.468.0",
     "marked": "17.0.1",
     "node-edge-tts": "1.2.12",
@@ -64,7 +65,7 @@
     "test:streaming": "node tools/test-streaming-reveal.cjs",
     "test:turn-ui": "node tools/test-turn-artifacts.cjs",
     "preview:streaming": "electron tools/preview-streaming-reveal.cjs",
-    "test:updater": "node tools/test-updater.cjs && node --test tools/test-desktop-updates.cjs tools/test-windows-update.cjs tools/test-shutdown.cjs",
+    "test:updater": "node tools/test-updater.cjs && node --test tools/test-desktop-updates.cjs tools/test-windows-update.cjs tools/test-shutdown.cjs tools/test-runtime-cache.cjs tools/test-update-download.cjs tools/test-update-packaging.cjs",
     "test:update-manual-install": "node tools/test-update-manual-install.cjs",
     "test:attachment-menu": "node tools/test-attachment-menu.cjs",
     "test:queue-release": "node tools/test-queue-release.cjs",
@@ -97,10 +98,12 @@
     "productName": "AnyuAgent",
     "artifactName": "AnyuAgent-Setup-${version}.exe",
     "asar": true,
+    "afterPack": "tools/pack-runtimes.cjs",
+    "afterAllArtifactBuild": "tools/update-artifacts.cjs",
     "asarUnpack": [
       "package.json",
-      "codex-*.cjs",
-      "node_modules/**/*",
+      "codex-worker.cjs",
+      "node_modules/@openai/codex-*/**/*",
       "pi-workbench-extension.mjs",
       "pi-subagent-extension.mjs",
       "pi-browser-extension.mjs",
@@ -161,13 +164,18 @@
       "preload.cjs",
       "updater.cjs",
       "desktop-updates.cjs",
+      "update-download.cjs",
+      "runtime-cache.cjs",
       "windows-update.cjs",
       "build/update-windows.ps1",
       "build/installer-processes.ps1",
       "shutdown.cjs",
       "renderer/**/*",
       "renderer-vue/**/*",
-      "branding/**/*"
+      "branding/**/*",
+      "!node_modules/**/*.map",
+      "!node_modules/**/*.d.mts",
+      "!node_modules/**/*.d.cts"
     ],
     "extraResources": [
       {
@@ -187,6 +195,17 @@
       "icon": "branding/anyu.ico"
     },
     "mac": {
+      "asarUnpack": [
+        "package.json",
+        "codex-*.cjs",
+        "node_modules/**/*",
+        "pi-workbench-extension.mjs",
+        "pi-subagent-extension.mjs",
+        "pi-browser-extension.mjs",
+        "pi-approval-gate.mjs",
+        "runtime-probe-extension.mjs",
+        "tools/auto_edit_worker.py"
+      ],
       "target": [
         {
           "target": "dmg",
@@ -209,6 +228,7 @@
     },
     "nsis": {
       "include": "build/installer.nsh",
+      "preCompressedFileExtensions": [".anyu-runtime"],
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,

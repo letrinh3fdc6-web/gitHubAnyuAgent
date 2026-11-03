@@ -7,6 +7,7 @@ const crypto = require('node:crypto')
 const { setTimeout: delay } = require('node:timers/promises')
 const { DesktopUpdater } = require('../desktop-updates.cjs')
 const { writeMarker, readMarker } = require('../windows-update.cjs')
+const { gzipSync } = require('node:zlib')
 
 function fixture(t, options = {}) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'anyu-update-test-'))
@@ -137,4 +138,57 @@ test('completed updates are not announced again on every launch', t => {
   writeMarker(item.updater.markerPath, { status: 'completed', expectedVersion: '1.0.0' })
   item.updater.recover()
   assert.equal(item.updater.state.phase, 'idle')
+})
+
+test('reopening the old app while its worker is alive never starts a competing update', async t => {
+  const item = fixture(t)
+  writeMarker(item.updater.markerPath, { status: 'installing', expectedVersion: '2.0.0', workerPid: process.pid, logPath: 'active.log' })
+  item.updater.recover()
+  assert.equal(item.updater.state.phase, 'installing')
+  assert.equal((await item.updater.install()).status, 'installing')
+  assert.equal(item.requests.length, 0)
+  assert.equal(item.prepared.length, 0)
+  writeMarker(item.updater.markerPath, { status: 'failed', expectedVersion: '2.0.0', workerPid: process.pid })
+  assert.equal((await item.updater.install()).status, 'installing')
+  assert.equal(item.prepared.length, 1)
+  await delay(175)
+})
+
+test('range failure falls back to a verified full download before preparing installation', async t => {
+  const item = fixture(t)
+  const hash = data => crypto.createHash('sha256').update(data).digest('hex')
+  const parts = [Buffer.from('unchanged-part'), Buffer.from('-old')]
+  const next = [parts[0], Buffer.from('-new')]
+  const blockMap = values => gzipSync(Buffer.from(JSON.stringify({ version: '2', files: [{ name: 'file', offset: 0, sizes: values.map(value => value.length), checksums: values.map(hash) }] })))
+  const old = Buffer.concat(parts), data = Buffer.concat(next), oldMap = blockMap(parts), newMap = blockMap(next)
+  const metadata = { ...item.artifact, bytes: old.length, sha256: hash(old), blockMap: { bytes: oldMap.length, sha256: hash(oldMap) } }
+  const cache = path.join(item.directory, 'updates', metadata.sha256)
+  fs.mkdirSync(cache, { recursive: true })
+  fs.writeFileSync(path.join(cache, 'AnyuAgent-Setup.exe'), old)
+  fs.writeFileSync(path.join(cache, 'package.blockmap'), oldMap)
+  writeMarker(path.join(item.directory, 'updates/base.json'), metadata)
+  Object.assign(item.artifact, { bytes: data.length, sha256: hash(data), blockMap: { url: '/downloads/update.blockmap', bytes: newMap.length, sha256: hash(newMap) } })
+  const ranges = []
+  item.updater.fetcher = async (url, options) => {
+    if (url.includes('manifest.json')) return Response.json({ anyuAgent: item.artifact })
+    if (url.endsWith('.blockmap')) return new Response(newMap)
+    ranges.push(options?.headers?.Range || 'full')
+    return new Response(data)
+  }
+  assert.equal((await item.updater.install()).status, 'installing')
+  assert.deepEqual(ranges, ['bytes=14-17', 'full'])
+  assert.deepEqual(fs.readFileSync(item.prepared[0].installerPath), data)
+  assert.equal(item.prepared.length, 1)
+  await delay(175)
+})
+
+test('only a confirmed new launch records a differential base and preserves the previous generation', async t => {
+  const item = fixture(t)
+  const root = path.join(item.directory, 'updates')
+  writeMarker(path.join(root, 'base.json'), { sha256: 'a'.repeat(64) })
+  writeMarker(item.updater.markerPath, { status: 'restarting', expectedVersion: '1.0.0', artifact: item.artifact })
+  item.updater.acknowledgeLaunch()
+  const base = readMarker(path.join(root, 'base.json'))
+  assert.equal(base.sha256, item.artifact.sha256)
+  assert.equal(base.previousSha256, 'a'.repeat(64))
 })

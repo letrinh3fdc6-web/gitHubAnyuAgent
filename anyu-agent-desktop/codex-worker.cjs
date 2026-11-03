@@ -1,6 +1,9 @@
 'use strict'
 const readline = require('node:readline')
-const { CodexRuntime } = require('./codex-runtime.cjs')
+const path = require('node:path')
+// Electron's Node mode can load ASAR dependencies; Pi extensions remain physical files.
+const runtimeRoot = __dirname.replace(/app\.asar\.unpacked$/, 'app.asar')
+const { CodexRuntime } = require(path.join(runtimeRoot, 'codex-runtime.cjs'))
 
 async function runCodexWorker() {
   let runtime, initializing

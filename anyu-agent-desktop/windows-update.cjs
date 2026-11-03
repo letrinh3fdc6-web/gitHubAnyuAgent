@@ -27,14 +27,20 @@ function readMarker(file) {
   try { return JSON.parse(fs.readFileSync(file, 'utf8').replace(/^\uFEFF/, '')) } catch { return null }
 }
 
-async function prepareWindowsUpdate({ markerPath, installerPath, executablePath, version, bytes, sha256, userDataPath, showUI = true, timeoutMs = 45000 }) {
+function isUpdateWorkerRunning(marker) {
+  if (!['starting', 'prepared', 'installing', 'restarting'].includes(marker?.status) || !Number.isSafeInteger(marker.workerPid) || marker.workerPid <= 0) return false
+  try { process.kill(marker.workerPid, 0); return true } catch (error) { return error.code === 'EPERM' }
+}
+
+async function prepareWindowsUpdate({ markerPath, installerPath, executablePath, version, bytes, sha256, artifact, userDataPath, showUI = true, timeoutMs = 45000 }) {
+  if (isUpdateWorkerRunning(readMarker(markerPath))) throw new Error('已有更新正在安装，请等待其完成。')
   const session = crypto.randomUUID()
   const directory = path.join(path.dirname(markerPath), 'update-worker', session)
   fs.mkdirSync(directory, { recursive: true })
   const scriptPath = path.join(directory, 'install.ps1')
   const logPath = path.join(directory, 'install.log')
   const configPath = path.join(directory, 'install.json')
-  const marker = { session, status: 'starting', installerPath, executablePath, installDirectory: path.dirname(executablePath), expectedVersion: version, bytes, sha256, logPath, createdAt: new Date().toISOString() }
+  const marker = { session, status: 'starting', installerPath, executablePath, installDirectory: path.dirname(executablePath), expectedVersion: version, bytes, sha256, artifact, logPath, createdAt: new Date().toISOString() }
   writeMarker(markerPath, marker)
   writeMarker(configPath, { ...marker, markerPath, parentPid: process.pid, userDataPath, showUI })
   const source = fs.readFileSync(path.join(__dirname, 'build', 'update-windows.ps1'), 'utf8').replace(/^\uFEFF/, '')
@@ -63,4 +69,4 @@ async function prepareWindowsUpdate({ markerPath, installerPath, executablePath,
   throw new Error(`更新器准备超时，当前客户端未退出。日志：${logPath}`)
 }
 
-module.exports = { writeMarker, readMarker, prepareWindowsUpdate }
+module.exports = { writeMarker, readMarker, prepareWindowsUpdate, isUpdateWorkerRunning }

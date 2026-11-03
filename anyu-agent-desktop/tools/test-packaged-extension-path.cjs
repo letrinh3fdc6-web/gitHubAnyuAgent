@@ -10,7 +10,9 @@ const main = fs.readFileSync(path.join(root, 'main.cjs'), 'utf8')
 
 const unpack = Array.isArray(pkg.build?.asarUnpack) ? pkg.build.asarUnpack : []
 assert.ok(unpack.includes('package.json'), 'The external Codex worker reads the desktop version from its package.json')
-assert.ok(unpack.includes('codex-*.cjs') && unpack.includes('node_modules/**/*'), 'Codex worker modules and native/runtime dependencies must be outside app.asar')
+assert.ok(unpack.includes('codex-worker.cjs'), 'The external worker entry must be a physical file')
+assert.ok(!unpack.includes('node_modules/**/*'), 'Ordinary dependencies must remain in ASAR')
+assert.ok(unpack.includes('node_modules/@openai/codex-*/**/*'), 'Native runtimes must be available to the runtime bundler')
 assert.ok(pkg.build.files.includes('codex-*.cjs'), 'Codex worker modules must be packaged')
 assert.ok(unpack.includes('pi-browser-extension.mjs'), 'package.json 必须把 pi-browser-extension.mjs 放进 asarUnpack')
 assert.ok(fs.existsSync(path.join(root, 'pi-browser-extension.mjs')), '扩展源文件必须存在')

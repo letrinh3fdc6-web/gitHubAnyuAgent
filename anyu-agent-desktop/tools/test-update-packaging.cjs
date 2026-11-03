@@ -1,0 +1,46 @@
+'use strict'
+const { test } = require('node:test')
+const assert = require('node:assert/strict')
+const fs = require('node:fs')
+const os = require('node:os')
+const path = require('node:path')
+const generate = require('./update-artifacts.cjs')
+const { hashFile } = require('../runtime-cache.cjs')
+const { artifactFromManifest } = require('../updater.cjs')
+const { isUpdateWorkerRunning } = require('../windows-update.cjs')
+
+test('builder BuildResult produces an installable descriptor with verified differential metadata', async t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'anyu-update-artifacts-'))
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }))
+  const exe = path.join(directory, 'AnyuAgent-Setup-2.0.0.exe')
+  fs.writeFileSync(exe, 'package')
+  fs.writeFileSync(`${exe}.blockmap`, 'blockmap')
+  await generate({ artifactPaths: [exe], configuration: { extraMetadata: { version: '2.0.0' } } })
+  const descriptor = JSON.parse(fs.readFileSync(`${exe}.update.json`, 'utf8'))
+  const artifact = artifactFromManifest(descriptor, '1.0.0', 'https://updates.test/downloads/downloads-manifest.json')
+  assert.equal(artifact.version, '2.0.0')
+  assert.equal(artifact.sha256, await hashFile(exe))
+  assert.equal(artifact.blockMap.sha256, await hashFile(`${exe}.blockmap`))
+  assert.equal(artifact.blockMap.url, 'https://updates.test/downloads/AnyuAgent-Setup-2.0.0.exe.blockmap')
+  descriptor.anyuAgent.blockMap.url = 'http://['
+  assert.equal(artifactFromManifest(descriptor, '1.0.0').blockMap, undefined)
+})
+
+test('phase instrumentation preserves default NSIS lifecycle and rejects template drift', () => {
+  const root = path.join(path.dirname(require.resolve('app-builder-lib/package.json')), 'templates/nsis')
+  const script = fs.readFileSync(path.join(root, 'installer.nsi'), 'utf8')
+  const { instrumentInstaller } = require('./installer-template.cjs')
+  const marked = instrumentInstaller(script)
+  for (const phase of ['removing-old', 'unpacking', 'extracting', 'copying', 'registering']) assert.ok(marked.includes(`AnyuInstallPhase "${phase}"`))
+  assert.ok(marked.includes('!insertmacro uninstallOldVersion SHELL_CONTEXT'))
+  assert.ok(marked.includes('UNINSTALLER_OUT_FILE'))
+  assert.throws(() => instrumentInstaller('changed upstream template'), /template changed/)
+})
+
+test('active update worker is recognized without terminating it, stale and completed markers are retryable', () => {
+  assert.equal(isUpdateWorkerRunning({ status: 'installing', workerPid: process.pid }), true)
+  assert.equal(isUpdateWorkerRunning({ status: 'completed', workerPid: process.pid }), false)
+  assert.equal(isUpdateWorkerRunning({ status: 'failed', workerPid: process.pid }), false)
+  assert.equal(isUpdateWorkerRunning({ status: 'installing' }), false)
+  assert.equal(isUpdateWorkerRunning({ status: 'installing', workerPid: -1 }), false)
+})

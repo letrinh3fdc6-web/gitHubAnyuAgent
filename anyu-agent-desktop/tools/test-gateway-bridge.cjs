@@ -13,6 +13,56 @@ function close(server) {
   return new Promise((resolve) => server.close(resolve))
 }
 
+async function testConcurrentStreams() {
+  const streams = new Map()
+  let cancelled
+  const upstreamCancelled = new Promise(resolve => { cancelled = resolve })
+  const upstream = http.createServer((req, res) => {
+    req.resume()
+    req.once('end', () => {
+      const model = req.headers['x-anyu-model']
+      streams.set(model, res)
+      res.once('close', () => { if (model === 'parallel-0') cancelled() })
+      res.writeHead(200, { 'Content-Type': 'text/event-stream' })
+      res.write(`data: ${model}\n\n`)
+    })
+  })
+  const port = await listen(upstream)
+  const bridge = new LocalGatewayBridge({ gatewayBase: `http://127.0.0.1:${port}`, getAccessToken: () => 'test-jwt' })
+  const controllers = Array.from({ length: 12 }, () => new AbortController())
+  const timeout = setTimeout(() => controllers.forEach(controller => controller.abort()), 5000)
+  try {
+    const local = await bridge.start()
+    const responses = await Promise.all(controllers.map((controller, index) => fetch(`${managedBaseUrl(local.origin, 'openai-responses', 17)}/responses`, {
+      method: 'POST', signal: controller.signal,
+      headers: { Authorization: `Bearer ${local.token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: `parallel-${index}`, input: 'hello', stream: true }),
+    })))
+    assert.equal(streams.size, 12, 'every session must reach upstream before any previous stream completes')
+    const abortedRead = assert.rejects(responses[0].text())
+    controllers[0].abort()
+    await abortedRead
+    await Promise.race([upstreamCancelled, new Promise((_, reject) => {
+      const timer = setTimeout(() => reject(new Error('cancel did not reach upstream')), 1000)
+      upstreamCancelled.then(() => clearTimeout(timer))
+    })])
+    for (let index = 1; index < responses.length; index++) streams.get(`parallel-${index}`).end('data: done\n\n')
+    for (let index = 1; index < responses.length; index++) {
+      assert.equal(await responses[index].text(), `data: parallel-${index}\n\ndata: done\n\n`)
+    }
+    const secure = new LocalGatewayBridge({ gatewayBase: 'https://example.invalid', getAccessToken: () => '' })
+    assert.equal(secure.upstreamAgent.maxSockets, Infinity)
+    assert.equal(secure.upstreamAgent.maxFreeSockets, 2)
+    await secure.stop()
+  } finally {
+    clearTimeout(timeout)
+    controllers.forEach(controller => controller.abort())
+    await bridge.stop()
+    upstream.closeAllConnections()
+    await close(upstream)
+  }
+}
+
 async function main() {
   const requests = []
   let rejectFirst = true
@@ -193,6 +243,7 @@ async function main() {
   await bridge.stop()
   assert.equal(bridge.thinkingContexts.size, 0)
   await close(upstream)
+  await testConcurrentStreams()
   console.log('gateway bridge tests passed')
 }
 

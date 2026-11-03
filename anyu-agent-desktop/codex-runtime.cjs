@@ -65,7 +65,7 @@ class CodexRuntime {
       input_modalities: options.model.input || ['text'], experimental_supported_tools: [],
       tool_mode: 'default', use_responses_lite: false,
     }] }), { mode: 0o600 })
-    this.client = new CodexClient({ home: options.home, cwd: options.cwd, config: { ...runtimeConfig(options.model, this.bridge, options.contextPolicy), model_catalog_json: catalog }, env: { ANYU_CODEX_LOCAL_KEY: this.bridge.token } })
+    this.client = new CodexClient({ executable: options.codexExecutable, home: options.home, cwd: options.cwd, config: { ...runtimeConfig(options.model, this.bridge, options.contextPolicy), model_catalog_json: catalog }, env: { ANYU_CODEX_LOCAL_KEY: this.bridge.token } })
     this.client.on('notification', message => this.notification(message))
     this.client.on('request', message => { void this.serverRequest(message) })
     this.client.on('disconnect', error => {

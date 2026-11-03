@@ -41,6 +41,7 @@ protocol?.registerSchemesAsPrivileged?.([
   { scheme: RENDERER_SCHEME, privileges: { standard: true, secure: true, supportFetchAPI: true, corsEnabled: true, stream: true } }
 ])
 const { DesktopUpdater } = require('./desktop-updates.cjs')
+const { RuntimeCache } = require('./runtime-cache.cjs')
 const { installGracefulQuit } = require('./shutdown.cjs')
 const { PluginManager, MAX_PACKAGE_BYTES } = require('./plugin-manager.cjs')
 const { SkillManager } = require('./skill-manager.cjs')
@@ -1430,11 +1431,17 @@ function recoverLegacyFeedback(messages, cwd) {
     return { ...message, businessSkill: 'feedback', businessPending: false, businessPhase: '分析失败', businessStatus: 'FAILED', feedbackTaskId: task.taskId, feedbackUrl: task.url, feedbackPrompt: String(user.content || '').replace(/^(?:@评价分析\s*)+/g, ''), feedbackCollected: true, feedbackRetry: true, artifactCwd: String(cwd || app.getPath('home')), content: '原始采集已保留，可继续分析。' }
   })
 }
+let desktopRuntimes
+function getDesktopRuntimes() {
+  if (!desktopRuntimes) desktopRuntimes = new RuntimeCache({ resourcesPath: app.isPackaged ? process.resourcesPath : __dirname, cachePath: path.join(app.getPath('userData'), 'runtimes') })
+  return desktopRuntimes
+}
 function piExecutable() {
   const packaged = app.isPackaged
-  return packaged
+  const fallback = packaged
     ? path.join(process.resourcesPath, 'pi-runtime', process.platform === 'win32' ? 'pi.exe' : 'pi')
     : path.join(__dirname, 'pi-runtime', process.platform === 'win32' ? 'pi.exe' : 'pi')
+  return getDesktopRuntimes().executable('pi', fallback)
 }
 
 function defaultWorkspacePath() {
@@ -1855,7 +1862,7 @@ function evictIdlePiRuntimes(keepKey, allowActiveIdle = false) {
 
 async function startPiUnsafe(options = {}) {
   const managed = options.accessMode !== 'key'
-  const executable = piExecutable()
+  const executable = await getDesktopRuntimes().ensure('pi', piExecutable())
   if (!fs.existsSync(executable)) throw new Error(`Pi 运行时不存在：${executable}`)
   const requestedSession = options.sessionPath && isInside(piSessionDir(), options.sessionPath) ? path.resolve(options.sessionPath) : ''
   let savedEngine = null
@@ -1863,6 +1870,7 @@ async function startPiUnsafe(options = {}) {
     try { savedEngine = JSON.parse(fs.readFileSync(requestedSession, 'utf8').split(/\r?\n/)[0]) } catch {}
   }
   const useCodex = savedEngine?.engine === 'codex' || Boolean(options.agentSessionId && !requestedSession)
+  const codexExecutable = useCodex ? await getDesktopRuntimes().ensure('codex', undefined) : undefined
   const key = requestedSession || `anon:${crypto.randomUUID()}`
   const existing = piRuntimes.get(key)
   if (existing?.compacting) throw new Error('当前会话正在压缩，请等待完成')
@@ -2042,7 +2050,7 @@ async function startPiUnsafe(options = {}) {
     const home = savedEngine?.home && isInside(piAgentDir(), savedEngine.home) ? savedEngine.home : path.join(agentDir, 'codex')
     stateResponse = await sendPi({ type: 'initialize_runtime', options: {
       sessionPath: requestedSession || path.join(sessionDir, `${new Date().toISOString().replace(/[:.]/g, '-')}_${crypto.randomUUID()}.codex.jsonl`),
-      home, cwd, agentDir: piAgentDir(), skillPaths: pluginPaths,
+      home, cwd, codexExecutable, agentDir: piAgentDir(), skillPaths: pluginPaths,
       model: { ...configured, provider, preferNativeResponses: managed && selectedModel.platform === 'openai' && /^gpt-[56](?:[.-]|$)/i.test(selectedModelId), maxTokens: Number(selectedModel.maxTokens || selectedModel.max_tokens || selectedModel.max_output_tokens) || undefined },
       credential, contextPolicy, thinkingLevel: options.thinkingLevel || 'auto',
       systemPrompt: [options.systemPrompt, !options.conversationOnly && permissionPrompt].filter(Boolean).join('\n\n'), readOnly: Boolean(options.readOnly), conversationOnly: Boolean(options.conversationOnly),

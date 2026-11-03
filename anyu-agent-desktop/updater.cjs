@@ -41,7 +41,15 @@ function artifactFromManifest(manifest, currentVersion, manifestUrl = DEFAULT_MA
   const relativeUrl = String(candidate.url || `${basePath}/${candidate.name}`).replace(/^\//, '')
   const source = new URL(String(manifestUrl || DEFAULT_MANIFEST_URL))
   const url = /^https?:\/\//i.test(relativeUrl) ? relativeUrl : `${source.origin}/${relativeUrl}`
-  return { version, name: String(candidate.name), bytes, sha256, url, currentVersion: String(currentVersion || '') }
+  let blockMap
+  const block = candidate.blockMap
+  if (block && Number.isSafeInteger(block.bytes) && block.bytes > 0 && block.bytes <= 8 * 1024 * 1024 && /^[a-f0-9]{64}$/i.test(block.sha256 || '') && typeof block.url === 'string') {
+    try {
+      const address = new URL(block.url, source)
+      if (address.origin === source.origin && /^https?:$/.test(address.protocol)) blockMap = { url: address.href, bytes: block.bytes, sha256: block.sha256.toLowerCase() }
+    } catch { /* Optional differential metadata must not prevent a verified full update. */ }
+  }
+  return { version, name: String(candidate.name), bytes, sha256, url, blockMap, currentVersion: String(currentVersion || '') }
 }
 
 function verifyBuffer(buffer, expectedBytes, expectedSha256) {

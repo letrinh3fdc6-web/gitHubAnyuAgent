@@ -1,6 +1,23 @@
 Var AnyuProcessResult
 Var AnyuProcessOutput
 Var AnyuInstallerPid
+Var AnyuPhaseFile
+Var AnyuPhaseHandle
+
+!macro AnyuInstallPhase PHASE
+  ReadEnvStr $AnyuPhaseFile ANYU_UPDATE_STAGE_FILE
+  ${StdUtils.GetParameter} $AnyuPhaseFile "anyu-progress" "$AnyuPhaseFile"
+  ${If} $AnyuPhaseFile != ""
+    FileOpen $AnyuPhaseHandle "$AnyuPhaseFile" a
+    ${IfNot} ${Errors}
+      FileSeek $AnyuPhaseHandle 0 END
+      FileWriteUTF16LE $AnyuPhaseHandle "${PHASE}$\r$\n"
+      FileClose $AnyuPhaseHandle
+    ${EndIf}
+  ${EndIf}
+  DetailPrint "AnyuAgent: ${PHASE}"
+  ClearErrors
+!macroend
 
 !macro customHeader
   ShowInstDetails show
@@ -14,6 +31,7 @@ Var AnyuInstallerPid
 !macroend
 
 !macro customCheckAppRunning
+  !insertmacro AnyuInstallPhase "checking-processes"
   InitPluginsDir
   File /oname=$PLUGINSDIR\anyu-installer-processes.ps1 "${BUILD_RESOURCES_DIR}\installer-processes.ps1"
   ${If} ${FileExists} "$WINDIR\Sysnative\WindowsPowerShell\v1.0\powershell.exe"
@@ -45,5 +63,6 @@ Var AnyuInstallerPid
 !macroend
 
 !macro customInstall
+  !insertmacro AnyuInstallPhase "installed"
   DetailPrint "AnyuAgent installation completed."
 !macroend
