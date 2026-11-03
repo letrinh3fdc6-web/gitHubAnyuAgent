@@ -3,11 +3,34 @@ Var AnyuProcessOutput
 Var AnyuInstallerPid
 Var AnyuPhaseFile
 Var AnyuPhaseHandle
+Var AnyuSourcePath
+Var AnyuTargetPath
+!ifdef BUILD_UNINSTALLER
+Var AnyuPathPrefix
+!endif
+
+!macro AnyuLongPath OUTPUT INPUT
+  StrCpy ${OUTPUT} "${INPUT}"
+  StrCpy $AnyuPathPrefix ${OUTPUT} 4
+  ${If} $AnyuPathPrefix != "\\?\"
+    StrCpy $AnyuPathPrefix ${OUTPUT} 2
+    ${If} $AnyuPathPrefix == "\\"
+      StrCpy ${OUTPUT} ${OUTPUT} "" 2
+      StrCpy ${OUTPUT} "\\?\UNC\${OUTPUT}"
+    ${Else}
+      StrCpy ${OUTPUT} "\\?\${OUTPUT}"
+    ${EndIf}
+  ${EndIf}
+!macroend
 
 !macro AnyuInstallPhase PHASE
   ReadEnvStr $AnyuPhaseFile ANYU_UPDATE_STAGE_FILE
   ${StdUtils.GetParameter} $AnyuPhaseFile "anyu-progress" "$AnyuPhaseFile"
+  ${If} $AnyuPhaseFile == ""
+    StrCpy $AnyuPhaseFile "$TEMP\AnyuAgent-installer-stages.log"
+  ${EndIf}
   ${If} $AnyuPhaseFile != ""
+    ClearErrors
     FileOpen $AnyuPhaseHandle "$AnyuPhaseFile" a
     ${IfNot} ${Errors}
       FileSeek $AnyuPhaseHandle 0 END
@@ -53,10 +76,17 @@ Var AnyuPhaseHandle
   ${EndIf}
   ${If} $AnyuProcessResult != "0"
     DetailPrint "Process check stopped: $AnyuProcessResult $AnyuProcessOutput"
+    !insertmacro AnyuInstallPhase "failed-processes:$AnyuProcessResult"
     ${IfNot} ${Silent}
       MessageBox MB_OK|MB_ICONEXCLAMATION "Cannot safely continue installation. Close AnyuAgent and retry.$\r$\nDetails: $TEMP\AnyuAgent-install.log$\r$\nResult: $AnyuProcessResult"
     ${EndIf}
-    SetErrorLevel 2
+    ${If} $AnyuProcessResult == "10"
+      SetErrorLevel 31
+    ${ElseIf} $AnyuProcessResult == "timeout"
+      SetErrorLevel 32
+    ${Else}
+      SetErrorLevel 33
+    ${EndIf}
     Quit
   ${EndIf}
   DetailPrint "Process check complete. Preparing application files..."

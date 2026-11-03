@@ -31,6 +31,11 @@ async function main() {
     const unrelated = launch(sibling, 'pi')
     await new Promise(resolve => setTimeout(resolve, 150))
     assert.equal(check('Inspect').status, 10)
+    const alias = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', '(New-Object -ComObject Scripting.FileSystemObject).GetFolder($env:ANYU_TEST_DIRECTORY).ShortPath'], {
+      encoding: 'utf8', windowsHide: true, timeout: 10000, env: { ...process.env, ANYU_TEST_DIRECTORY: install },
+    })
+    assert.equal(alias.status, 0, alias.stderr)
+    assert.equal(check('Inspect', alias.stdout.trim()).status, 10, 'An 8.3 path must still detect the running installation')
     const stopped = check('Stop')
     assert.equal(stopped.status, 0, stopped.stdout + stopped.stderr)
     assert.equal(check('Inspect').status, 0)

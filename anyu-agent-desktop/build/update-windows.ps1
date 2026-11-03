@@ -39,6 +39,8 @@ function Update-InstallProgress([string]$StageFile) {
     $names = @{
         'checking-processes' = '正在检查安装目录占用…'
         'removing-old' = '正在处理旧版本文件…'
+        'removing-old-user' = '正在处理旧用户版本文件…'
+        'recovering-old' = '正在兼容处理旧版本长路径文件…'
         'unpacking' = '正在读取安装包…'
         'extracting' = '正在解压应用文件…'
         'copying' = '正在写入应用文件…'
@@ -89,9 +91,76 @@ function Get-InstallScope {
     return '/currentuser'
 }
 
-function Get-InstallerFailure([int]$ExitCode) {
+function Get-InstallerFailure([int]$ExitCode, [string]$StageFile = '') {
     if ($ExitCode -eq 1223) { return 'Windows 安装授权未完成或已取消。请重新打开 AnyuAgent 重试，并在系统授权窗口选择“是”。' }
+    $stages = @()
+    if ($StageFile -and (Test-Path -LiteralPath $StageFile)) {
+        try { $stages = @(Get-Content -LiteralPath $StageFile -Encoding Unicode -Tail 40 -ErrorAction Stop) } catch {}
+    }
+    if ($ExitCode -eq 31 -or $stages -contains 'failed-processes:10') { return '安装目录仍有 AnyuAgent 或运行时进程在使用。请保存任务并完全退出后重试；本次未强行结束任务。' }
+    if ($ExitCode -eq 32 -or $stages -contains 'failed-processes:timeout') { return 'Windows 进程检查超时，尚未覆盖应用文件。请稍后重试，并查看安装日志。' }
+    if ($ExitCode -eq 33 -or @($stages | Where-Object { $_ -like 'failed-processes:*' }).Count) { return 'Windows 未能完成安装进程检查，尚未覆盖应用文件。请查看安装日志中的具体检查错误。' }
+    $busyFile = @($stages | Where-Object { $_ -like 'failed-file-busy:*' } | Select-Object -Last 1)
+    if ($busyFile.Count) { return ('旧版本文件正在被占用或无法替换：' + $busyFile[0].Substring('failed-file-busy:'.Length) + '。请关闭占用后重试。') }
+    if (@($stages | Where-Object { $_ -like 'failed-old-uninstall:*' }).Count -or ($ExitCode -eq 2 -and @($stages | Where-Object { $_ -in @('removing-old', 'removing-old-user') }).Count)) {
+        return '旧版本卸载未完成，可能存在文件占用或目录权限问题。请重新打开旧版并导出安装日志；不要重复启动多个安装器。'
+    }
     return "安装器返回错误 $ExitCode。请查看 $env:TEMP\AnyuAgent-install.log"
+}
+
+function Get-InstallerStartOptions([string]$Arguments, [string]$Scope) {
+    $options = @{ FilePath = $config.installerPath; ArgumentList = $Arguments; WindowStyle = 'Hidden'; PassThru = $true; WorkingDirectory = (Split-Path -Parent $config.installerPath) }
+    $principal = [Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent())
+    $isElevated = $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    Write-UpdateLog "Update worker elevated: $isElevated"
+    if ($Scope -eq '/allusers' -and -not $isElevated) { $options.Verb = 'RunAs' }
+    return $options
+}
+
+function Write-InstallFileDiagnostics {
+    try {
+        $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+        $principal = [Security.Principal.WindowsPrincipal]::new($identity)
+        Write-UpdateLog ("File diagnostics token elevated: " + $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator))
+        Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class AnyuInstallerFileAccess {
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern IntPtr CreateFile(string name, uint access, uint share, IntPtr security, uint creation, uint flags, IntPtr template);
+    [DllImport("kernel32.dll")]
+    private static extern bool CloseHandle(IntPtr handle);
+    public static int CheckRenameAccess(string path) {
+        // Request DELETE permission without deleting, renaming or writing the file.
+        IntPtr handle = CreateFile(path, 0x10000, 7, IntPtr.Zero, 3, 0, IntPtr.Zero);
+        if (handle == new IntPtr(-1)) return Marshal.GetLastWin32Error();
+        CloseHandle(handle);
+        return 0;
+    }
+}
+'@
+        $count = 0
+        $failures = 0
+        $deadline = [DateTime]::UtcNow.AddSeconds(10)
+        $directories = [Collections.Generic.Stack[string]]::new()
+        $directories.Push($config.installDirectory)
+        while ($directories.Count -and [DateTime]::UtcNow -lt $deadline) {
+            $directory = $directories.Pop()
+            foreach ($file in [IO.Directory]::EnumerateFiles($directory)) {
+                if ([DateTime]::UtcNow -ge $deadline) { break }
+                $count++
+                $code = [AnyuInstallerFileAccess]::CheckRenameAccess($file)
+                if ($code -ne 0 -and $code -ne 2 -and $code -ne 3) {
+                    $failures++
+                    if ($failures -le 20) { Write-UpdateLog "File replacement access failed: Win32 $code, $file" }
+                }
+            }
+            foreach ($child in [IO.Directory]::EnumerateDirectories($directory)) {
+                if (-not ([IO.File]::GetAttributes($child) -band [IO.FileAttributes]::ReparsePoint)) { $directories.Push($child) }
+            }
+        }
+        Write-UpdateLog "File diagnostics: checked $count, inaccessible $failures, pending directories $($directories.Count) (10 second budget, diagnostic token only; files unchanged)"
+    } catch { Write-UpdateLog "File diagnostics unavailable: $($_.Exception.Message)" }
 }
 
 try {
@@ -170,8 +239,17 @@ try {
     # NSIS /D must be last and its value must NOT be surrounded by quotes.
     $stageFile = Join-Path (Split-Path -Parent $ConfigPath) 'installer-stages.log'
     $env:ANYU_UPDATE_STAGE_FILE = $stageFile
+    Write-UpdateLog "Installer stages: $stageFile"
     $arguments = '/S --updated ' + $installScope + ' --anyu-progress="' + $stageFile + '" /D=' + $config.installDirectory
-    $installer = Start-Process -FilePath $config.installerPath -ArgumentList $arguments -WindowStyle Hidden -PassThru
+    $startOptions = Get-InstallerStartOptions $arguments $installScope
+    try { $installer = Start-Process @startOptions } catch {
+        $startError = $_.Exception
+        while ($startError) {
+            if ($startError -is [ComponentModel.Win32Exception] -and $startError.NativeErrorCode -eq 1223) { throw (Get-InstallerFailure 1223) }
+            $startError = $startError.InnerException
+        }
+        throw
+    }
     $slowNoticeAt = [DateTime]::UtcNow.AddMinutes(8)
     while (-not $installer.HasExited) {
         Update-InstallProgress $stageFile
@@ -183,7 +261,10 @@ try {
     }
     $installer.WaitForExit()
     Write-UpdateLog "Installer exit code: $($installer.ExitCode)"
-    if ($installer.ExitCode -ne 0) { throw (Get-InstallerFailure $installer.ExitCode) }
+    if ($installer.ExitCode -ne 0) {
+        Write-InstallFileDiagnostics
+        throw (Get-InstallerFailure $installer.ExitCode $stageFile)
+    }
     $installedVersion = [Diagnostics.FileVersionInfo]::GetVersionInfo($config.executablePath).ProductVersion
     $normalized = [regex]::Match($installedVersion, '^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?').Value
     if ($normalized -ne $config.expectedVersion.TrimStart('v')) { throw "安装版本核对失败：期望 $($config.expectedVersion)，实际 $installedVersion" }

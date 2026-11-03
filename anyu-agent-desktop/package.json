@@ -1,6 +1,6 @@
 {
   "name": "anyu-agent-desktop",
-  "version": "1.0.80",
+  "version": "1.0.82",
   "description": "AnyuAgent standalone desktop workspace",
   "main": "main.cjs",
   "author": "Anyu AI",
@@ -65,7 +65,7 @@
     "test:streaming": "node tools/test-streaming-reveal.cjs",
     "test:turn-ui": "node tools/test-turn-artifacts.cjs",
     "preview:streaming": "electron tools/preview-streaming-reveal.cjs",
-    "test:updater": "node tools/test-updater.cjs && node --test tools/test-desktop-updates.cjs tools/test-windows-update.cjs tools/test-shutdown.cjs tools/test-runtime-cache.cjs tools/test-update-download.cjs tools/test-update-packaging.cjs",
+    "test:updater": "node tools/test-updater.cjs && node --test tools/test-desktop-updates.cjs tools/test-windows-update.cjs tools/test-shutdown.cjs tools/test-runtime-cache.cjs tools/test-update-download.cjs tools/test-update-packaging.cjs tools/test-installer-process-state.cjs tools/test-installer-processes.cjs",
     "test:update-manual-install": "node tools/test-update-manual-install.cjs",
     "test:attachment-menu": "node tools/test-attachment-menu.cjs",
     "test:queue-release": "node tools/test-queue-release.cjs",

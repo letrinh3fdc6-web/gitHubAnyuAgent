@@ -13,7 +13,7 @@ const commands = [
   ['tools/test-elevation-ipc.cjs'],
   ['--test', 'tools/test-agent-permissions.cjs', 'tools/test-permission-no-restart.cjs', 'tools/test-execution-broker.cjs', 'tools/test-local-file-access.cjs'],
   ['tools/test-updater.cjs'],
-  ['--test', 'tools/test-desktop-updates.cjs', 'tools/test-windows-update.cjs', 'tools/test-shutdown.cjs', 'tools/test-runtime-cache.cjs', 'tools/test-update-download.cjs', 'tools/test-update-packaging.cjs'],
+  ['--test', 'tools/test-desktop-updates.cjs', 'tools/test-windows-update.cjs', 'tools/test-shutdown.cjs', 'tools/test-runtime-cache.cjs', 'tools/test-update-download.cjs', 'tools/test-update-packaging.cjs', 'tools/test-installer-process-state.cjs', 'tools/test-installer-processes.cjs'],
   ['--test', ...tests.map(file => path.join('tools', file))],
   ['tools/test-packaged-extension-path.cjs'],
   ['tools/test-gateway-bridge.cjs'],
