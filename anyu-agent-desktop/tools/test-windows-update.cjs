@@ -81,6 +81,8 @@ test('installer failures distinguish occupied processes, inspection, legacy unin
     { code: 31, stages: [], expected: /进程在使用/ },
     { code: 32, stages: [], expected: /检查超时/ },
     { code: 33, stages: [], expected: /未能完成.*检查/ },
+    { code: 34, stages: [], expected: /交接未完成/ },
+    { code: 35, stages: [], expected: /交接未完成/ },
     { code: 2, stages: ['removing-old', 'failed-old-uninstall:2'], expected: /旧版本卸载未完成/ },
     { code: 2, stages: ['removing-old', 'checking-processes'], expected: /旧版本卸载未完成/ },
     { code: 2, stages: ['failed-file-busy:C:\\Program Files\\AnyuAgent\\resources\\app.asar', 'failed-old-uninstall:2'], expected: /app\.asar.*占用|占用.*app\.asar/ },
@@ -137,4 +139,45 @@ test('Windows helper rejects a changed package before reporting readiness', { sk
   const installerPath = path.join(root, 'not-an-installer.exe')
   fs.writeFileSync(installerPath, 'changed')
   await assert.rejects(prepareWindowsUpdate({ markerPath: path.join(root, 'pending-update.json'), installerPath, executablePath: process.execPath, version: '8.0.0', bytes: 7, sha256: '0'.repeat(64), userDataPath: root, showUI: false, timeoutMs: 20000 }), /SHA-256/)
+})
+
+test('authorization handshake checks the actual installer and session; cancelled RunAs is explicit', { skip: process.platform !== 'win32' }, t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'anyu-auth-handshake-'))
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }))
+  const script = String.raw`
+$ErrorActionPreference = 'Stop'
+[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
+$tokens=$null; $errors=$null
+$ast=[Management.Automation.Language.Parser]::ParseInput([IO.File]::ReadAllText($env:ANYU_UPDATE_SOURCE,[Text.Encoding]::UTF8),[ref]$tokens,[ref]$errors)
+if ($errors.Count) { throw ($errors | Out-String) }
+foreach ($name in @('Wait-InstallerAuthorization','Start-UpdateInstaller','Get-InstallerFailure')) {
+  $node=$ast.Find({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name },$true)
+  . ([scriptblock]::Create($node.Extent.Text))
+}
+function Write-UpdateLog { param([string]$Message) }
+function Pump-Window {}
+function Read-UpdateStatus { return $script:status }
+function Get-InstallerStartOptions { return @{} }
+function Start-Process { throw [ComponentModel.Win32Exception]::new(1223) }
+$config=@{session='session-one'}
+$script:status='authorizing'
+$script:authorizationRejected=$false
+$file=Join-Path $env:ANYU_AUTH_ROOT 'ready'
+$process=Get-Process -Id $PID
+[IO.File]::WriteAllText($file,$config.session)
+Wait-InstallerAuthorization $process $file
+$ok=$true
+[IO.File]::WriteAllText($file,'another-session')
+try { Wait-InstallerAuthorization $process $file; throw 'Wrong session accepted' } catch { if ($_.Exception.Message -notmatch '会话不匹配') { throw } }
+$script:status='cancelled'
+try { Wait-InstallerAuthorization $process $file; throw 'Cancellation ignored' } catch { if ($_.Exception.Message -notmatch '已取消') { throw } }
+try { Start-UpdateInstaller '/S /allusers' '/allusers'; throw 'Denied RunAs accepted' } catch { if ($_.Exception.Message -notmatch 'Windows.*授权') { throw } }
+@{ready=$ok; rejected=$script:authorizationRejected} | ConvertTo-Json -Compress
+`
+  const result = spawnSync('powershell.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')], {
+    encoding: 'utf8', windowsHide: true, timeout: 15000,
+    env: { ...process.env, ANYU_UPDATE_SOURCE: path.resolve(__dirname, '../build/update-windows.ps1'), ANYU_AUTH_ROOT: directory },
+  })
+  assert.equal(result.status, 0, result.stderr)
+  assert.deepEqual(JSON.parse(result.stdout), { ready: true, rejected: true })
 })

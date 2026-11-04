@@ -18,6 +18,11 @@ const artifact = artifactFromManifest(manifest, '1.0.8')
 assert.strictEqual(artifact.version, '1.0.9')
 assert.strictEqual(artifact.url, 'https://x.ailzd.com/downloads/LetaAgent-Setup-1.0.9.exe')
 assert.strictEqual(artifact.currentVersion, '1.0.8')
+assert.strictEqual(artifact.installerProtocol, undefined)
+manifest.letaAgent.installerProtocol = 2
+assert.strictEqual(artifactFromManifest(manifest, '1.0.8').installerProtocol, 2)
+manifest.letaAgent.installerProtocol = 99
+assert.strictEqual(artifactFromManifest(manifest, '1.0.8').installerProtocol, undefined)
 const customArtifact = artifactFromManifest(manifest, '1.0.8', 'https://updates.example.test/releases/manifest.json')
 assert.strictEqual(customArtifact.url, 'https://updates.example.test/downloads/LetaAgent-Setup-1.0.9.exe')
 assert.strictEqual(verifyBuffer(buffer, buffer.length, artifact.sha256).length, 64)

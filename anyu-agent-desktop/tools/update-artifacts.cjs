@@ -9,7 +9,7 @@ module.exports = async context => {
   for (const file of context.artifactPaths || []) {
     if (!/\.exe$/i.test(file) || !fs.existsSync(`${file}.blockmap`)) continue
     const name = path.basename(file)
-    const artifact = { name, version, url: `/downloads/${name}`, bytes: fs.statSync(file).size, sha256: await hashFile(file), blockMap: { url: `/downloads/${name}.blockmap`, bytes: fs.statSync(`${file}.blockmap`).size, sha256: await hashFile(`${file}.blockmap`) } }
+    const artifact = { name, version, installerProtocol: 2, url: `/downloads/${name}`, bytes: fs.statSync(file).size, sha256: await hashFile(file), blockMap: { url: `/downloads/${name}.blockmap`, bytes: fs.statSync(`${file}.blockmap`).size, sha256: await hashFile(`${file}.blockmap`) } }
     await fs.promises.writeFile(`${file}.update.json`, JSON.stringify({ anyuAgent: artifact }, null, 2))
   }
   return []

@@ -49,7 +49,8 @@ function artifactFromManifest(manifest, currentVersion, manifestUrl = DEFAULT_MA
       if (address.origin === source.origin && /^https?:$/.test(address.protocol)) blockMap = { url: address.href, bytes: block.bytes, sha256: block.sha256.toLowerCase() }
     } catch { /* Optional differential metadata must not prevent a verified full update. */ }
   }
-  return { version, name: String(candidate.name), bytes, sha256, url, blockMap, currentVersion: String(currentVersion || '') }
+  const installerProtocol = candidate.installerProtocol === 2 ? 2 : undefined
+  return { version, name: String(candidate.name), bytes, sha256, url, blockMap, installerProtocol, currentVersion: String(currentVersion || '') }
 }
 
 function verifyBuffer(buffer, expectedBytes, expectedSha256) {

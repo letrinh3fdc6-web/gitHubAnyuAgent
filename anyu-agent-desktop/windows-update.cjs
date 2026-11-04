@@ -28,11 +28,12 @@ function readMarker(file) {
 }
 
 function isUpdateWorkerRunning(marker) {
-  if (!['starting', 'prepared', 'installing', 'restarting'].includes(marker?.status) || !Number.isSafeInteger(marker.workerPid) || marker.workerPid <= 0) return false
+  if (!['starting', 'authorizing', 'prepared', 'installing', 'restarting', 'cancelled'].includes(marker?.status) || !Number.isSafeInteger(marker.workerPid) || marker.workerPid <= 0) return false
   try { process.kill(marker.workerPid, 0); return true } catch (error) { return error.code === 'EPERM' }
 }
 
-async function prepareWindowsUpdate({ markerPath, installerPath, executablePath, version, bytes, sha256, artifact, userDataPath, showUI = true, timeoutMs = 45000 }) {
+async function prepareWindowsUpdate({ markerPath, installerPath, executablePath, version, bytes, sha256, artifact, userDataPath, showUI = true, timeoutMs = 45000, authorizationTimeoutMs = 180000, signal, onProgress = () => {} }) {
+  signal?.throwIfAborted()
   if (isUpdateWorkerRunning(readMarker(markerPath))) throw new Error('已有更新正在安装，请等待其完成。')
   const session = crypto.randomUUID()
   const directory = path.join(path.dirname(markerPath), 'update-worker', session)
@@ -55,18 +56,29 @@ async function prepareWindowsUpdate({ markerPath, installerPath, executablePath,
   let spawnError
   child.once('error', error => { spawnError = error })
   child.unref()
-  const deadline = Date.now() + timeoutMs
-  while (Date.now() < deadline) {
-    if (spawnError) throw new Error(`更新器启动失败：${spawnError.message}`)
+  let deadline = Date.now() + timeoutMs
+  let authorizationStarted = false
+  try {
+    while (Date.now() < deadline) {
+      signal?.throwIfAborted()
+      if (spawnError) throw new Error(`更新器启动失败：${spawnError.message}`)
+      const current = readMarker(markerPath)
+      if (current?.session === session && current.status === 'authorizing' && !authorizationStarted) {
+        authorizationStarted = true
+        deadline = Math.max(deadline, Date.now() + authorizationTimeoutMs)
+        onProgress({ message: '请完成 Windows 安装授权，当前客户端会保持开启。', logPath })
+      }
+      if (current?.session === session && current.status === 'prepared') return { ...current, scriptPath }
+      if (current?.session === session && current.status === 'failed') throw new Error(current.error || '更新器未能准备完成')
+      if (child.exitCode !== null && child.exitCode !== 0) throw new Error(`更新启动器退出 (${child.exitCode})，日志：${logPath}`)
+      await delay(100, undefined, { signal })
+    }
+    throw new Error(`${authorizationStarted ? 'Windows 安装授权等待超时' : '更新器准备超时'}，当前客户端未退出。日志：${logPath}`)
+  } catch (error) {
     const current = readMarker(markerPath)
-    if (current?.session === session && current.status === 'prepared') return { ...current, scriptPath }
-    if (current?.session === session && current.status === 'failed') throw new Error(current.error || '更新器未能准备完成')
-    if (child.exitCode !== null && child.exitCode !== 0) throw new Error(`更新启动器退出 (${child.exitCode})，日志：${logPath}`)
-    await delay(100)
+    if (current?.session === session && current.status !== 'failed') writeMarker(markerPath, { ...current, status: 'cancelled' })
+    throw error
   }
-  const current = readMarker(markerPath)
-  if (current?.session === session) writeMarker(markerPath, { ...current, status: 'cancelled' })
-  throw new Error(`更新器准备超时，当前客户端未退出。日志：${logPath}`)
 }
 
 module.exports = { writeMarker, readMarker, prepareWindowsUpdate, isUpdateWorkerRunning }

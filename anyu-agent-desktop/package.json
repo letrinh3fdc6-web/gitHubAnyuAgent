@@ -1,6 +1,6 @@
 {
   "name": "anyu-agent-desktop",
-  "version": "1.0.82",
+  "version": "1.0.83",
   "description": "AnyuAgent standalone desktop workspace",
   "main": "main.cjs",
   "author": "Anyu AI",
@@ -228,7 +228,9 @@
     },
     "nsis": {
       "include": "build/installer.nsh",
-      "preCompressedFileExtensions": [".anyu-runtime"],
+      "preCompressedFileExtensions": [
+        ".anyu-runtime"
+      ],
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
