@@ -43,7 +43,7 @@ function readSkillMarkdown(root, folder) {
   try { store = JSON.parse(fs.readFileSync(path.join(root, folder, '.anyu-store.json'), 'utf8')) } catch {}
   return {
     id: folder,
-    name,
+    name: typeof store.name === 'string' && store.name.trim() ? store.name.trim().slice(0, 120) : name,
     description,
     path: path.join(root, folder),
     installedAt: fs.statSync(file).mtime.toISOString(),

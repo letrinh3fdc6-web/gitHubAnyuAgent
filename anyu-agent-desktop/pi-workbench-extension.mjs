@@ -24,6 +24,23 @@ export default function workbench(pi) {
   }
   const result = value => ({ content: [{ type: 'text', text: JSON.stringify(value) }], details: value })
   pi.registerTool({
+    name: 'creative_studio', label: '视觉创作',
+    description: 'Execute installed AnyuAgent ecommerce and comic-drama skills with the account image API. Read the installed skill first. catalog lists authorized image groups/models. create imports reference files and TXT/MD/DOCX/text-PDF scripts into an isolated local project. save validates a revisioned plan (inline plan or local planFile), preserves source dialogue and exports the review files. After the user requests/accepts the plan and image scope, generate starts up to 20 missing items asynchronously (anchors first); status never submits a second image. cancel stops local scheduling; already submitted remote work may continue. Retry failed items only with user intent and retryFailed=true. Ambiguous submissions must be reconciled to a matching remoteTaskId rather than blindly retried. export writes local HTML/CSV/Markdown/JSON. Return real paths and progress; never claim an image exists until status is completed. Reuse projectId and revision from results. Never access or request an upstream API key.',
+    parameters: { type: 'object', required: ['action'], properties: {
+      action: { type: 'string', enum: ['catalog', 'create', 'inspect', 'save', 'generate', 'status', 'cancel', 'export', 'reconcile'] },
+      projectId: { type: 'string' }, revision: { type: 'integer', minimum: 0 },
+      kind: { type: 'string', enum: ['ecommerce', 'comic'] }, name: { type: 'string', maxLength: 120 }, brief: { type: 'string', maxLength: 12000 },
+      script: { type: 'string', maxLength: 20000 }, scriptFile: { type: 'string' },
+      files: { type: 'array', items: { type: 'string' }, maxItems: 12 },
+      plan: { type: 'object', additionalProperties: true }, planFile: { type: 'string' },
+      groupId: { type: 'integer', minimum: 1 }, model: { type: 'string' },
+      itemIds: { type: 'array', items: { type: 'string' }, maxItems: 100 }, retryFailed: { type: 'boolean' },
+      redoCompleted: { type: 'boolean', description: 'Only when the user asks to redo completed images. Requires explicit itemIds; preserves previous versions and invalidates dependent results without automatically resubmitting them.' },
+      itemId: { type: 'string' }, remoteTaskId: { type: 'string' },
+    } },
+    async execute(_id, params, signal) { return result(await request('/creative', params, signal)) },
+  })
+  pi.registerTool({
     name: 'video_studio', label: '智能剪辑',
     description: 'Use the installed @anyu-video-studio skill to create a local media project, inspect assets, apply a semantic edit plan, render asynchronously, query/cancel a job, open the editor, or export a portable project. Read the skill first. Never invent a completed render. Use the returned projectId and jobId; results stay in this conversation.',
     parameters: {type: 'object', required: ['action'], properties: {

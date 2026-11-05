@@ -1,6 +1,6 @@
 {
   "name": "anyu-agent-desktop",
-  "version": "1.0.84",
+  "version": "1.0.85",
   "description": "AnyuAgent standalone desktop workspace",
   "main": "main.cjs",
   "author": "Anyu AI",
@@ -10,6 +10,7 @@
     "@earendil-works/pi-coding-agent": "0.84.3",
     "@modelcontextprotocol/sdk": "1.28.0",
     "@openai/codex": "0.164.0",
+    "@xmldom/xmldom": "0.9.12",
     "archiver": "7.0.1",
     "dompurify": "3.3.1",
     "electron-updater": "6.8.11",
@@ -20,6 +21,7 @@
     "qrcode": "1.5.4",
     "sanitize-html": "2.17.0",
     "undici": "7.29.0",
+    "unpdf": "1.9.1",
     "unzipper": "0.12.5"
   },
   "scripts": {
@@ -110,6 +112,7 @@
       "pi-browser-extension.mjs",
       "pi-approval-gate.mjs",
       "runtime-probe-extension.mjs",
+      "creative-document.cjs",
       "tools/auto_edit_worker.py"
     ],
     "files": [
@@ -150,6 +153,7 @@
       "skill-manager.cjs",
       "skill-store.cjs",
       "video-studio.cjs",
+      "creative-*.cjs",
       "agent-session.cjs",
       "agent-event-log.cjs",
       "agent-orchestrator.cjs",
@@ -206,6 +210,7 @@
         "pi-browser-extension.mjs",
         "pi-approval-gate.mjs",
         "runtime-probe-extension.mjs",
+        "creative-document.cjs",
         "tools/auto_edit_worker.py"
       ],
       "target": [

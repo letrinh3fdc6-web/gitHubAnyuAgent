@@ -249,6 +249,7 @@ class AgentWorkbench {
     const task = this.active(sessionId)
     if (!task) throw new Error('No active task context')
     const policy = task.settings.policy
+    const readOnly = READ.has(name) || name === 'creative_studio' && ['inspect', 'status', 'catalog'].includes(input.action)
     let decision = 'allow', reason = ''
     if (policy.blockedTools.includes(name)) { decision = 'deny'; reason = 'Tool disabled by project policy' }
     if (policy.workspaceOnly && ['read', 'write', 'edit', 'ls', 'grep', 'find'].includes(name)) {
@@ -258,17 +259,18 @@ class AgentWorkbench {
         try { await safePath(task.cwd, path.relative(task.cwd, target)) } catch (error) { decision = 'deny'; reason = error.message }
       }
     }
-    if (!policy.network && (name.startsWith('browser_') || name === 'mcp_call')) { decision = 'deny'; reason = 'Network tools disabled by project policy' }
+    if (!policy.network && (name.startsWith('browser_') || name === 'mcp_call' || name === 'creative_studio' && ['catalog', 'generate', 'reconcile'].includes(input.action))) { decision = 'deny'; reason = 'Network tools disabled by project policy' }
     if (name === 'bash' && decision !== 'deny') {
       if (policy.shell === 'deny') { decision = 'deny'; reason = 'Commands disabled by project policy' }
       // Shell is not an OS sandbox. A restricted project must explicitly review
       // arbitrary commands, which could access paths or networks indirectly.
       else if (policy.shell === 'confirm' || policy.workspaceOnly || !policy.network) decision = 'confirm'
     }
-    if (!READ.has(name) && !['write', 'edit', 'bash', 'task_checkpoint', 'delegate_tasks'].includes(name) && (policy.workspaceOnly || !policy.network) && decision === 'allow') decision = 'confirm'
+    if (!readOnly && !['write', 'edit', 'bash', 'task_checkpoint', 'delegate_tasks', 'creative_studio'].includes(name) && (policy.workspaceOnly || !policy.network) && decision === 'allow') decision = 'confirm'
     // Do not scan the project before ordinary chat. A potentially mutating
     // tool cannot run until its rollback baseline has been persisted.
-    if (decision !== 'deny' && task.lazyCheckpoint && !READ.has(name) && name !== 'task_checkpoint') await this.prepareSnapshot(task)
+    // Creative output has its own revisioned project; avoid scanning an unrelated workspace.
+    if (decision !== 'deny' && task.lazyCheckpoint && !readOnly && !['task_checkpoint', 'creative_studio'].includes(name)) await this.prepareSnapshot(task)
     task.events.push({ at: now(), type: 'policy.decision', toolName: name, decision, ok: decision !== 'deny' })
     await this.store.save()
     return { decision, reason }
@@ -453,6 +455,13 @@ class AgentWorkbench {
             }
           }
           result = await this.options.video(task, data)
+          break
+        }
+        case '/creative': {
+          if (!this.options.creative) throw new Error('Creative skills are unavailable in this client')
+          if (task.settings.policy.blockedTools.includes('creative_studio')) throw new Error('Creative tools disabled by project policy')
+          if (!task.settings.policy.network && ['catalog', 'generate', 'reconcile'].includes(data.action)) throw new Error('Network tools disabled by project policy')
+          result = await this.options.creative(task, data)
           break
         }
         default: throw new Error('Unknown task endpoint')

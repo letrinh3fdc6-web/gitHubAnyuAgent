@@ -52,6 +52,7 @@ const { LocalGatewayBridge, managedProviderName, managedBaseUrl } = require('./g
 const { AgentSessionService } = require('./agent-session.cjs')
 const { AgentContextSettings } = require('./agent-context.cjs')
 const { AgentWorkbench } = require('./agent-workbench.cjs')
+const { CreativeStudio, CREATIVE_SKILL_IDS } = require('./creative-studio.cjs')
 const { AgentOrchestrator } = require('./agent-orchestrator.cjs')
 const { createPets } = require('./pet-integration.cjs')
 const { ExecutionBroker } = require('./execution-broker.cjs')
@@ -427,6 +428,7 @@ let agentSessionService = null
 let agentOrchestrator = null
 let agentWorkbench = null
 let videoStudio = null
+let creativeStudio = null
 const videoEditorWindows = new Map()
 const dependencyJobs = new Map()
 function preparePluginDependencies(record) {
@@ -733,9 +735,10 @@ async function previewResponse(request) {
     const mime = PREVIEW_MIME[path.extname(real).toLowerCase()]
     if (!stat.isFile() || !mime || stat.size > BROWSER_ARTIFACT_MAX_BYTES) throw new Error('文件类型或大小不支持预览')
     const data = await fs.promises.readFile(real)
-    const display = ['application/json', 'text/csv', 'text/markdown', 'text/plain'].includes(mime)
+    const download = new URL(request.url).searchParams.get('download') === '1'
+    const display = !download && ['application/json', 'text/csv', 'text/markdown', 'text/plain'].includes(mime)
     const body = display ? `<!doctype html><meta charset="utf-8"><style>body{font:13px ui-monospace,Consolas,monospace;padding:24px;white-space:pre-wrap;word-break:break-word;color:#202124;background:#fff}</style><pre>${escapeArtifactText(data.toString('utf8'))}</pre>` : data
-    return new Response(body, { headers: { 'Content-Type': display ? 'text/html; charset=utf-8' : `${mime}${mime.startsWith('text/') ? '; charset=utf-8' : ''}`, 'Content-Security-Policy': PREVIEW_CSP, 'X-Content-Type-Options': 'nosniff' } })
+    return new Response(body, { headers: { 'Content-Type': display ? 'text/html; charset=utf-8' : `${mime}${mime.startsWith('text/') ? '; charset=utf-8' : ''}`, 'Content-Security-Policy': PREVIEW_CSP, 'X-Content-Type-Options': 'nosniff', ...(download ? { 'Content-Disposition': `attachment; filename*=UTF-8''${encodeURIComponent(path.basename(real)).replace(/['()*]/g, char => '%' + char.charCodeAt(0).toString(16).toUpperCase())}` } : {}) } })
   } catch { return new Response('预览文件不存在、无权读取或预览已失效', { status: 404 }) }
 }
 
@@ -959,7 +962,7 @@ function getDesktopUpdater() {
     manifestUrl: UPDATE_MANIFEST_URL,
     localOnly: LOCAL_ONLY_API && !process.env.ANYU_UPDATE_MANIFEST_URL,
     emit: sendUpdateProgress,
-    isBusy: () => updateRendererBusy || Boolean(agentSessionService?.runs.size) || analysisControllers.size > 0,
+    isBusy: () => updateRendererBusy || Boolean(agentSessionService?.runs.size) || analysisControllers.size > 0 || Boolean(creativeStudio?.jobs.size),
     quit: () => { isQuitting = true; app.quit() }
   })
   return desktopUpdater
@@ -3056,6 +3059,7 @@ app.whenReady().then(async () => {
   loadAuth()
   agentWorkbench = new AgentWorkbench({
     video: (task, input) => videoStudio.dispatch(task, input),
+    creative: (task, input) => creativeStudio.dispatch(task, input),
     directory: app.getPath('userData'), encrypt: protect, decrypt: unprotect,
     getOwner: () => String(auth?.user?.id || 'local'),
     billing: async ids => {
@@ -3133,6 +3137,16 @@ app.whenReady().then(async () => {
   })
   pluginManager = new PluginManager(app.getPath('userData'))
   skillManager = new SkillManager(app.getPath('userData'))
+  creativeStudio = new CreativeStudio({
+    userData: app.getPath('userData'), getOwner: () => String(auth?.user?.id || 'local'),
+    installed: () => skillManager.list().some(skill => CREATIVE_SKILL_IDS.includes(skill.id)),
+    catalog: () => requestApi('/groups/available'),
+    create: (fields, files) => requestMultipart('/anyu-ai/tasks', fields, files),
+    status: id => requestApi(`/anyu-ai/tasks/${encodeURIComponent(id)}`),
+    download: id => requestBinary(`/anyu-ai/tasks/${encodeURIComponent(id)}/images/0`),
+    changed: payload => { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('skills:creative-progress', payload) },
+    log: message => console.error('[creative-studio]', message),
+  })
   videoStudio = new VideoStudio({
     userData: app.getPath('userData'), skills: skillManager, version: app.getVersion(),
     apiBase: () => buildApiUrl('/'),
@@ -3552,8 +3566,36 @@ app.whenReady().then(async () => {
     return result.canceled ? [] : result.filePaths
   })
   ipcMain.handle('skills:list', () => skillManager?.list() || [])
+  ipcMain.handle('skills:capabilities', () => ['creative_studio'])
+  ipcMain.handle('skills:creative', async (_, action, payload = {}) => {
+    if (!['list', 'status', 'cancel', 'export'].includes(action) || typeof payload.sessionId !== 'string') throw new Error('无效的创作操作')
+    const owner = String(auth?.user?.id || 'local')
+    const task = Object.values(agentWorkbench?.store?.state?.tasks || {})
+      .filter(task => task.owner === owner && task.sessionId === payload.sessionId)
+      .sort((a, b) => b.startedAt.localeCompare(a.startedAt))[0]
+    if (!task) {
+      if (action === 'list') return { projects: [], unavailable: [] }
+      throw new Error('当前账号下未找到创作会话')
+    }
+    return creativeStudio.dispatch(task, { action, projectId: payload.projectId })
+  })
   ipcMain.handle('skills:runtime-status', (_, id) => id === 'anyu-video-studio' ? videoStudio.status() : null)
   ipcMain.handle('skills:runtime-prepare', (_, id, component) => { if (id !== 'anyu-video-studio' || component && component !== 'whisper-tiny') throw new Error('Unsupported skill runtime'); return component ? videoStudio.prepareModel() : videoStudio.prepare() })
+  async function downloadStoreSkill(id) {
+    if (!skillStore.idPattern.test(id)) throw new Error('技能标识无效')
+    const catalog = await requestApi('/anyu-agent/skill-store')
+    const skill = catalog?.skills?.find(item => item.id === id)
+    if (!skill) throw new Error('技能已下架或不可用，请刷新商店')
+    const route = `/anyu-agent/skill-store/skills/${encodeURIComponent(id)}/download?sha256=${encodeURIComponent(skill.sha256)}`
+    const download = () => fetchWithTimeout(buildApiUrl(route), { redirect: 'error', headers: { Authorization: `Bearer ${auth?.accessToken || ''}` }, signal: AbortSignal.timeout(60000) }, 60000)
+    let response = await download()
+    if (response.status === 401 && auth?.refreshToken) { await response.body?.cancel(); if (await refreshAuthAccessToken()) response = await download() }
+    return { skill, bytes: await skillStore.readDownload(response) }
+  }
+  ipcMain.handle('skills:store-detail', async (_, id) => {
+    const { skill, bytes } = await downloadStoreSkill(id)
+    return skillStore.packageDetail(skill, bytes)
+  })
   const skillInstalls = new Set()
   ipcMain.handle('skills:store-install', async (_, id) => {
     if (!skillStore.idPattern.test(id) || skillInstalls.has(id)) throw new Error('技能标识无效或正在安装')
@@ -3565,14 +3607,7 @@ app.whenReady().then(async () => {
         const answer = await dialog.showMessageBox(mainWindow, { type: 'question', title: '更新技能', message: '是否更新此技能？', detail: '本机原版本（含训练修改）会完整备份到 skill-backups，自定义训练规则继续保留。', buttons: ['取消', '更新'], defaultId: 1, cancelId: 0 })
         if (answer.response !== 1) return null
       }
-      const catalog = await requestApi('/anyu-agent/skill-store')
-      const skill = catalog?.skills?.find(item => item.id === id)
-      if (!skill) throw new Error('技能已下架或不可用，请刷新商店')
-      const route = `/anyu-agent/skill-store/skills/${encodeURIComponent(id)}/download?sha256=${encodeURIComponent(skill.sha256)}`
-      const download = () => fetchWithTimeout(buildApiUrl(route), { redirect: 'error', headers: { Authorization: `Bearer ${auth?.accessToken || ''}` }, signal: AbortSignal.timeout(60000) }, 60000)
-      let response = await download()
-      if (response.status === 401 && auth?.refreshToken) { await response.body?.cancel(); if (await refreshAuthAccessToken()) response = await download() }
-      const bytes = await skillStore.readDownload(response)
+      const { skill, bytes } = await downloadStoreSkill(id)
       const installed = await skillStore.installPackage(skillManager, skill, bytes, revision)
       if (id === 'anyu-video-studio') await videoStudio.prepare()
       return installed
@@ -3793,7 +3828,7 @@ app.whenReady().then(async () => {
 app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit() })
 installGracefulQuit(app, {
   beforeStop: () => { isQuitting = true; desktopPets?.close() },
-  stop: async () => { await stopPi(); await videoStudio?.close(); await agentWorkbench?.close() },
+  stop: async () => { await stopPi(); await creativeStudio?.close(); await videoStudio?.close(); await agentWorkbench?.close() },
   onError: error => console.error('[shutdown]', error)
 })
 }

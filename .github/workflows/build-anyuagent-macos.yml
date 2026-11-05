@@ -122,6 +122,7 @@ jobs:
           export ANYU_SMOKE_EXECUTABLE="$(find "$GITHUB_WORKSPACE/anyu-agent-desktop/dist" -type f -path '*/AnyuAgent.app/Contents/MacOS/AnyuAgent' -print -quit)"
           test -n "$ANYU_SMOKE_EXECUTABLE"
           node anyu-agent-desktop/tools/test-packaged-app.cjs
+          node anyu-agent-desktop/tools/test-creative-packaged-app.cjs
 
       - name: Upload verification evidence
         if: always()
@@ -177,17 +178,17 @@ jobs:
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: anyuagent-v1.0.84
+          tag_name: anyuagent-v1.0.85
           target_commitish: ${{ github.sha }}
-          name: AnyuAgent 1.0.84
+          name: AnyuAgent 1.0.85
           draft: true
           make_latest: false
           body: |
-            AnyuAgent 1.0.84 includes the current web renderer, desktop skill host and the Windows installer authorization handshake. Public video-studio runtime packages are not included.
+            AnyuAgent 1.0.85 adds six online-downloadable ecommerce visual and comic storyboard skills, revisioned creative projects, document import, persistent image generation, recovery and local result exports. Public video-studio runtime packages are not included.
 
             macOS downloads include separate Apple Silicon and Intel DMG/ZIP packages. Each package includes a matching native runtime. These packages are unsigned and are not notarized.
 
-            Windows download: https://x.ailzd.com/downloads/AnyuAgent-Setup-1.0.84.exe
+            Windows download: https://x.ailzd.com/downloads/AnyuAgent-Setup-1.0.85.exe
           files: |
             release-assets/*.dmg
             release-assets/*.zip

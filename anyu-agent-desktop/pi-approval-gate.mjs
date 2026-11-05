@@ -36,6 +36,7 @@ export default function anyuApprovalGate(pi) {
     if (String(process.env.ANYU_PERMISSION_MODE || '').toLowerCase() === 'full') return
     const toolName = String(event?.toolName || '')
     if (READ_ONLY_TOOLS.test(toolName)) return
+    if (toolName === 'creative_studio' && ['catalog', 'inspect', 'status', 'cancel'].includes(event?.input?.action)) return
     if (typeof ctx?.ui?.confirm !== 'function' || ctx.hasUI === false) return { block: true, reason: '当前没有可用的操作确认界面' }
     const allowed = await ctx.ui.confirm(
       `允许执行 ${toolName}？`,
