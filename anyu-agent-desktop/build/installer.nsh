@@ -7,6 +7,13 @@ Var AnyuSourcePath
 Var AnyuTargetPath
 !ifdef BUILD_UNINSTALLER
 Var AnyuPathPrefix
+!else
+Var AnyuReadyFile
+Var AnyuCommitFile
+Var AnyuCancelFile
+Var AnyuUpdateSession
+Var AnyuHandoffCount
+Var AnyuHandoffValue
 !endif
 
 !macro AnyuLongPath OUTPUT INPUT
@@ -53,7 +60,64 @@ Var AnyuPathPrefix
   Pop $AnyuProcessOutput
 !macroend
 
+!macro AnyuUpdateHandoff
+  ${StdUtils.GetParameter} $AnyuReadyFile "anyu-ready" ""
+  ${If} $AnyuReadyFile != ""
+    ${StdUtils.GetParameter} $AnyuCommitFile "anyu-commit" ""
+    ${StdUtils.GetParameter} $AnyuCancelFile "anyu-cancel" ""
+    ${StdUtils.GetParameter} $AnyuUpdateSession "anyu-session" ""
+    ${If} $AnyuCommitFile == ""
+    ${OrIf} $AnyuCancelFile == ""
+    ${OrIf} $AnyuUpdateSession == ""
+      SetErrorLevel 34
+      Quit
+    ${EndIf}
+    ClearErrors
+    FileOpen $AnyuPhaseHandle "$AnyuReadyFile.tmp" w
+    ${If} ${Errors}
+      SetErrorLevel 34
+      Quit
+    ${EndIf}
+    FileWrite $AnyuPhaseHandle "$AnyuUpdateSession"
+    FileClose $AnyuPhaseHandle
+    Rename "$AnyuReadyFile.tmp" "$AnyuReadyFile"
+    ${If} ${Errors}
+      SetErrorLevel 34
+      Quit
+    ${EndIf}
+    !insertmacro AnyuInstallPhase "authorized"
+    StrCpy $AnyuHandoffCount 0
+    ${Do}
+      ${If} ${FileExists} "$AnyuCancelFile"
+        SetErrorLevel 1223
+        Quit
+      ${EndIf}
+      ${If} ${FileExists} "$AnyuCommitFile"
+        ClearErrors
+        FileOpen $AnyuPhaseHandle "$AnyuCommitFile" r
+        FileRead $AnyuPhaseHandle $AnyuHandoffValue
+        FileClose $AnyuPhaseHandle
+        ${IfNot} ${Errors}
+        ${AndIf} $AnyuHandoffValue == $AnyuUpdateSession
+          ${ExitDo}
+        ${EndIf}
+        SetErrorLevel 34
+        Quit
+      ${EndIf}
+      IntOp $AnyuHandoffCount $AnyuHandoffCount + 1
+      ${If} $AnyuHandoffCount >= 1800
+        SetErrorLevel 35
+        Quit
+      ${EndIf}
+      Sleep 100
+    ${Loop}
+  ${EndIf}
+!macroend
+
 !macro customCheckAppRunning
+  !ifndef BUILD_UNINSTALLER
+    !insertmacro AnyuUpdateHandoff
+  !endif
   !insertmacro AnyuInstallPhase "checking-processes"
   InitPluginsDir
   File /oname=$PLUGINSDIR\anyu-installer-processes.ps1 "${BUILD_RESOURCES_DIR}\installer-processes.ps1"

@@ -1,6 +1,6 @@
 {
   "name": "anyu-agent-desktop",
-  "version": "1.0.82",
+  "version": "1.0.84",
   "description": "AnyuAgent standalone desktop workspace",
   "main": "main.cjs",
   "author": "Anyu AI",
@@ -34,6 +34,7 @@
     "test:detail-thumbnails": "electron tools/test-detail-thumbnail-live.cjs",
     "test:detail-ipc": "electron tools/test-detail-workflow-ipc-live.cjs",
     "test:planner": "node tools/test-video-planner.cjs",
+    "test:video-studio": "node --test tools/test-video-studio.cjs tools/test-video-integration.cjs",
     "test:gateway-bridge": "node tools/test-gateway-bridge.cjs",
     "test:route-mode": "node tools/test-route-mode.cjs",
     "test:media-skill": "node tools/test-media-skill-trigger.cjs",
@@ -148,6 +149,7 @@
       "skill-analysis.cjs",
       "skill-manager.cjs",
       "skill-store.cjs",
+      "video-studio.cjs",
       "agent-session.cjs",
       "agent-event-log.cjs",
       "agent-orchestrator.cjs",
@@ -228,7 +230,9 @@
     },
     "nsis": {
       "include": "build/installer.nsh",
-      "preCompressedFileExtensions": [".anyu-runtime"],
+      "preCompressedFileExtensions": [
+        ".anyu-runtime"
+      ],
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,

@@ -12,6 +12,7 @@ const path = require('path')
 const os = require('os')
 const crypto = require('crypto')
 const skillStore = require('./skill-store.cjs')
+const { VideoStudio } = require('./video-studio.cjs')
 const dns = require('node:dns')
 const net = require('node:net')
 const http = require('node:http')
@@ -425,6 +426,8 @@ let skillManager = null
 let agentSessionService = null
 let agentOrchestrator = null
 let agentWorkbench = null
+let videoStudio = null
+const videoEditorWindows = new Map()
 const dependencyJobs = new Map()
 function preparePluginDependencies(record) {
   if (!record?.id || !record.dependencies || !Object.keys(record.dependencies).length) return
@@ -3052,6 +3055,7 @@ app.whenReady().then(async () => {
   getDesktopUpdater().recover()
   loadAuth()
   agentWorkbench = new AgentWorkbench({
+    video: (task, input) => videoStudio.dispatch(task, input),
     directory: app.getPath('userData'), encrypt: protect, decrypt: unprotect,
     getOwner: () => String(auth?.user?.id || 'local'),
     billing: async ids => {
@@ -3129,6 +3133,27 @@ app.whenReady().then(async () => {
   })
   pluginManager = new PluginManager(app.getPath('userData'))
   skillManager = new SkillManager(app.getPath('userData'))
+  videoStudio = new VideoStudio({
+    userData: app.getPath('userData'), skills: skillManager, version: app.getVersion(),
+    apiBase: () => buildApiUrl('/'),
+    devRoot: !app.isPackaged ? process.env.ANYU_VIDEO_STUDIO_DEV : undefined,
+    devModelRoot: !app.isPackaged ? process.env.ANYU_VIDEO_WHISPER_DEV : undefined,
+    environment: () => dependencyEnvironment(shellEnvironment(process.env)),
+    progress: state => { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('skills:runtime-progress', state) },
+    openEditor: async (url, projectId, onClose) => {
+      const existing = videoEditorWindows.get(projectId)
+      if (existing && !existing.isDestroyed()) { existing.show(); existing.focus(); return }
+      const target = new URL(url)
+      if (target.hostname !== '127.0.0.1' || target.protocol !== 'http:') throw new Error('Invalid local editor address')
+      const editor = new BrowserWindow({ width: 1440, height: 920, minWidth: 900, minHeight: 640, title: 'AnYu 智能剪辑', autoHideMenuBar: true, webPreferences: { nodeIntegration: false, contextIsolation: true, sandbox: true, partition: `anyu-video-${projectId}` } })
+      videoEditorWindows.set(projectId, editor)
+      editor.once('closed', () => { videoEditorWindows.delete(projectId); void onClose?.() })
+      editor.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
+      editor.webContents.on('will-navigate', (event, next) => { if (new URL(next).origin !== target.origin) event.preventDefault() })
+      await editor.loadURL(url)
+    },
+    log: message => console.error('[video-studio]', message),
+  })
   // Existing local skills remain intact; new skills come from the server store on demand.
   // Bash 是 Pi 编程工具的基础环境。后台准备，不阻塞窗口首屏；已有 Git Bash 直接复用。
   setTimeout(() => { void startWindowsShellBootstrap() }, 1200)
@@ -3527,6 +3552,8 @@ app.whenReady().then(async () => {
     return result.canceled ? [] : result.filePaths
   })
   ipcMain.handle('skills:list', () => skillManager?.list() || [])
+  ipcMain.handle('skills:runtime-status', (_, id) => id === 'anyu-video-studio' ? videoStudio.status() : null)
+  ipcMain.handle('skills:runtime-prepare', (_, id, component) => { if (id !== 'anyu-video-studio' || component && component !== 'whisper-tiny') throw new Error('Unsupported skill runtime'); return component ? videoStudio.prepareModel() : videoStudio.prepare() })
   const skillInstalls = new Set()
   ipcMain.handle('skills:store-install', async (_, id) => {
     if (!skillStore.idPattern.test(id) || skillInstalls.has(id)) throw new Error('技能标识无效或正在安装')
@@ -3546,7 +3573,9 @@ app.whenReady().then(async () => {
       let response = await download()
       if (response.status === 401 && auth?.refreshToken) { await response.body?.cancel(); if (await refreshAuthAccessToken()) response = await download() }
       const bytes = await skillStore.readDownload(response)
-      return await skillStore.installPackage(skillManager, skill, bytes, revision)
+      const installed = await skillStore.installPackage(skillManager, skill, bytes, revision)
+      if (id === 'anyu-video-studio') await videoStudio.prepare()
+      return installed
     } finally { skillInstalls.delete(id) }
   })
   ipcMain.handle('skills:read', (_, id) => skillManager.read(id))
@@ -3764,7 +3793,7 @@ app.whenReady().then(async () => {
 app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit() })
 installGracefulQuit(app, {
   beforeStop: () => { isQuitting = true; desktopPets?.close() },
-  stop: async () => { await stopPi(); await agentWorkbench?.close() },
+  stop: async () => { await stopPi(); await videoStudio?.close(); await agentWorkbench?.close() },
   onError: error => console.error('[shutdown]', error)
 })
 }

@@ -7,6 +7,11 @@ $script:allowClose = $false
 $script:phaseText = ''
 $script:phaseStarted = [DateTime]::UtcNow
 $script:lastStage = ''
+$installer = $null
+$script:authorizationRejected = $false
+$installerCommitted = $false
+$cancelFile = ''
+$initialVersion = ''
 
 function Write-UpdateLog([string]$Message) {
     Add-Content -LiteralPath $config.logPath -Value "[$(Get-Date -Format o)] $Message" -Encoding UTF8
@@ -100,6 +105,7 @@ function Get-InstallerFailure([int]$ExitCode, [string]$StageFile = '') {
     if ($ExitCode -eq 31 -or $stages -contains 'failed-processes:10') { return '安装目录仍有 AnyuAgent 或运行时进程在使用。请保存任务并完全退出后重试；本次未强行结束任务。' }
     if ($ExitCode -eq 32 -or $stages -contains 'failed-processes:timeout') { return 'Windows 进程检查超时，尚未覆盖应用文件。请稍后重试，并查看安装日志。' }
     if ($ExitCode -eq 33 -or @($stages | Where-Object { $_ -like 'failed-processes:*' }).Count) { return 'Windows 未能完成安装进程检查，尚未覆盖应用文件。请查看安装日志中的具体检查错误。' }
+    if ($ExitCode -eq 34 -or $ExitCode -eq 35) { return '安装授权交接未完成，尚未覆盖应用文件。请重新尝试更新。' }
     $busyFile = @($stages | Where-Object { $_ -like 'failed-file-busy:*' } | Select-Object -Last 1)
     if ($busyFile.Count) { return ('旧版本文件正在被占用或无法替换：' + $busyFile[0].Substring('failed-file-busy:'.Length) + '。请关闭占用后重试。') }
     if (@($stages | Where-Object { $_ -like 'failed-old-uninstall:*' }).Count -or ($ExitCode -eq 2 -and @($stages | Where-Object { $_ -in @('removing-old', 'removing-old-user') }).Count)) {
@@ -115,6 +121,43 @@ function Get-InstallerStartOptions([string]$Arguments, [string]$Scope) {
     Write-UpdateLog "Update worker elevated: $isElevated"
     if ($Scope -eq '/allusers' -and -not $isElevated) { $options.Verb = 'RunAs' }
     return $options
+}
+
+function Start-UpdateInstaller([string]$Arguments, [string]$Scope) {
+    $startOptions = Get-InstallerStartOptions $Arguments $Scope
+    try { return Start-Process @startOptions } catch {
+        $startError = $_.Exception
+        while ($startError) {
+            if ($startError -is [ComponentModel.Win32Exception] -and $startError.NativeErrorCode -eq 1223) {
+                $script:authorizationRejected = $true
+                throw (Get-InstallerFailure 1223)
+            }
+            $startError = $startError.InnerException
+        }
+        throw
+    }
+}
+
+function Wait-InstallerAuthorization($Process, [string]$ReadyFile) {
+    $deadline = [DateTime]::UtcNow.AddSeconds(180)
+    while ([DateTime]::UtcNow -lt $deadline) {
+        if ((Read-UpdateStatus) -eq 'cancelled') { throw '更新已取消，当前客户端未退出。' }
+        $Process.Refresh()
+        if ($Process.HasExited) {
+            $Process.WaitForExit()
+            Write-UpdateLog "Installer exited before authorization handshake: $($Process.ExitCode)"
+            if ($Process.ExitCode -eq 1223) { $script:authorizationRejected = $true }
+            throw (Get-InstallerFailure $Process.ExitCode)
+        }
+        if (Test-Path -LiteralPath $ReadyFile) {
+            $ready = [IO.File]::ReadAllText($ReadyFile)
+            if ($ready -eq $config.session) { Write-UpdateLog 'Installer authorized; current client is still running'; return }
+            throw '安装器授权会话不匹配，当前客户端未退出。'
+        }
+        Pump-Window
+        Start-Sleep -Milliseconds 100
+    }
+    throw '等待 Windows 安装授权超时，当前客户端未退出。'
 }
 
 function Write-InstallFileDiagnostics {
@@ -200,7 +243,30 @@ try {
     }
     if ($packageHash -ne $config.sha256) { throw '更新包 SHA-256 校验失败。' }
     if (-not (Test-Path -LiteralPath $config.executablePath -PathType Leaf)) { throw '当前客户端安装位置不存在。' }
+    $initialVersion = [Diagnostics.FileVersionInfo]::GetVersionInfo($config.executablePath).ProductVersion
     if ((Read-UpdateStatus) -eq 'cancelled') { Write-UpdateLog 'Preparation was cancelled before readiness'; exit 0 }
+    $installScope = Get-InstallScope
+    Write-UpdateLog "Install scope: $installScope"
+    $stageFile = Join-Path (Split-Path -Parent $ConfigPath) 'installer-stages.log'
+    $env:ANYU_UPDATE_STAGE_FILE = $stageFile
+    Write-UpdateLog "Installer stages: $stageFile"
+    $arguments = '/S --updated ' + $installScope + ' --anyu-progress="' + $stageFile + '"'
+    if ($config.artifact -and $config.artifact.installerProtocol -eq 2) {
+        $directory = Split-Path -Parent $ConfigPath
+        $readyFile = Join-Path $directory 'installer-ready'
+        $commitFile = Join-Path $directory 'installer-commit'
+        $cancelFile = Join-Path $directory 'installer-cancel'
+        $arguments += ' --anyu-ready="' + $readyFile + '" --anyu-commit="' + $commitFile + '" --anyu-cancel="' + $cancelFile + '" --anyu-session=' + $config.session
+        $arguments += ' /D=' + $config.installDirectory
+        Set-UpdateStatus 'authorizing'
+        Show-Phase '正在等待 Windows 安装授权，当前客户端保持开启…'
+        $installer = Start-UpdateInstaller $arguments $installScope
+        Wait-InstallerAuthorization $installer $readyFile
+    } else {
+        $arguments += ' /D=' + $config.installDirectory
+        Write-UpdateLog 'Legacy installer protocol: authorization is requested after application shutdown'
+    }
+    if ((Read-UpdateStatus) -eq 'cancelled') { throw '更新已取消，当前客户端未退出。' }
     Set-UpdateStatus 'prepared'
 
     # The application commits only after this helper has loaded and verified the package.
@@ -229,26 +295,21 @@ try {
     if ($inspect.ExitCode -ne 0) { throw '旧版本仍有进程占用安装目录，尚未开始安装。' }
 
     Set-UpdateStatus 'installing'
-    $installScope = Get-InstallScope
-    Write-UpdateLog "Install scope: $installScope"
-    if ($installScope -eq '/allusers') {
-        Show-Phase '正在安装新版。如出现 Windows 系统授权，请选择“是”…'
-    } else {
+    if ($installer) {
+        $installer.Refresh()
+        if ($installer.HasExited) { throw '安装器在交接前退出，尚未覆盖应用文件。' }
+        [IO.File]::WriteAllText("$commitFile.tmp", $config.session, [Text.UTF8Encoding]::new($false))
+        Move-Item -LiteralPath "$commitFile.tmp" -Destination $commitFile -Force
+        $installerCommitted = $true
         Show-Phase '正在安装新版…'
-    }
-    # NSIS /D must be last and its value must NOT be surrounded by quotes.
-    $stageFile = Join-Path (Split-Path -Parent $ConfigPath) 'installer-stages.log'
-    $env:ANYU_UPDATE_STAGE_FILE = $stageFile
-    Write-UpdateLog "Installer stages: $stageFile"
-    $arguments = '/S --updated ' + $installScope + ' --anyu-progress="' + $stageFile + '" /D=' + $config.installDirectory
-    $startOptions = Get-InstallerStartOptions $arguments $installScope
-    try { $installer = Start-Process @startOptions } catch {
-        $startError = $_.Exception
-        while ($startError) {
-            if ($startError -is [ComponentModel.Win32Exception] -and $startError.NativeErrorCode -eq 1223) { throw (Get-InstallerFailure 1223) }
-            $startError = $startError.InnerException
+    } else {
+        if ($installScope -eq '/allusers') {
+            Show-Phase '正在安装新版。如出现 Windows 系统授权，请选择“是”…'
+        } else {
+            Show-Phase '正在安装新版…'
         }
-        throw
+        # NSIS /D must be last and its value must NOT be surrounded by quotes.
+        $installer = Start-UpdateInstaller $arguments $installScope
     }
     $slowNoticeAt = [DateTime]::UtcNow.AddMinutes(8)
     while (-not $installer.HasExited) {
@@ -262,6 +323,7 @@ try {
     $installer.WaitForExit()
     Write-UpdateLog "Installer exit code: $($installer.ExitCode)"
     if ($installer.ExitCode -ne 0) {
+        if ($installer.ExitCode -eq 1223) { $script:authorizationRejected = $true }
         Write-InstallFileDiagnostics
         throw (Get-InstallerFailure $installer.ExitCode $stageFile)
     }
@@ -287,8 +349,34 @@ try {
     Write-UpdateLog "Update completed: $($config.expectedVersion)"
 } catch {
     $failure = $_.Exception.Message
-    try { Write-UpdateLog "Update failed: $failure"; Set-UpdateStatus 'failed' $failure } catch {}
-    if ($window) {
+    try { Write-UpdateLog "Update failed: $failure" } catch {}
+    if ($cancelFile -and -not $installerCommitted) {
+        try {
+            [IO.File]::WriteAllText($cancelFile, $config.session)
+            Set-UpdateStatus 'cancelled' $failure
+            if ($installer) {
+                $installer.Refresh()
+                while (-not $installer.HasExited) { Pump-Window; Start-Sleep -Milliseconds 100; $installer.Refresh() }
+                $installer.WaitForExit()
+                Write-UpdateLog "Uncommitted installer closed: $($installer.ExitCode)"
+            }
+        } catch { Write-UpdateLog "Installer cancellation: $($_.Exception.Message)" }
+    }
+    try { Set-UpdateStatus 'failed' $failure } catch {}
+    if ($lockStream) { $lockStream.Dispose(); $lockStream = $null }
+    $parentRunning = Get-Process -Id $config.parentPid -ErrorAction SilentlyContinue
+    $restored = $false
+    if ($script:authorizationRejected -and -not $parentRunning -and $initialVersion) {
+        try {
+            if ([Diagnostics.FileVersionInfo]::GetVersionInfo($config.executablePath).ProductVersion -eq $initialVersion) {
+                if ($config.userDataPath) { $env:ANYU_USER_DATA_DIR = $config.userDataPath }
+                $previous = Start-Process -FilePath $config.executablePath -WorkingDirectory $config.installDirectory -ArgumentList '--update-recovery' -PassThru
+                Write-UpdateLog "Previous client restored after authorization cancellation: PID $($previous.Id)"
+                $restored = $true
+            }
+        } catch { Write-UpdateLog "Previous client restart failed: $($_.Exception.Message)" }
+    }
+    if ($window -and -not $parentRunning -and -not $restored) {
         $window.FindName('Progress').IsIndeterminate = $false
         $window.Height = 280
         Show-Phase ("更新未完成：$failure`n日志：$($config.logPath)`n可关闭此窗口后重新打开 AnyuAgent 重试。")
@@ -300,6 +388,7 @@ try {
     }
     exit 1
 } finally {
+    if ($cancelFile -and -not $installerCommitted) { try { [IO.File]::WriteAllText($cancelFile, $config.session) } catch {} }
     if ($lockStream) { $lockStream.Dispose() }
     $script:allowClose = $true
     if ($window) { $window.Close() }

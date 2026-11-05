@@ -440,6 +440,21 @@ class AgentWorkbench {
         case '/memory': result = await this.memory(task.cwd, 'search', data); break
         case '/connectors': result = this.connectors.list().map(item => ({ id: item.id, name: item.name, tools: item.tools.filter(tool => item.allowedTools.includes(tool.name)) })); break
         case '/mcp': if (!task.settings.policy.network) throw new Error('Network tools disabled'); result = await this.connectors.call(data.id, data.name, data.arguments); break
+        case '/video': {
+          if (!this.options.video) throw new Error('Video skill is unavailable in this client')
+          if (task.settings.policy.blockedTools.includes('video_studio')) throw new Error('Video tools disabled by project policy')
+          if (['create', 'import'].includes(data.action) && task.settings.policy.workspaceOnly) {
+            const files = data.action === 'import' ? [data.file] : data.files
+            if (!Array.isArray(files)) throw new Error('Media files are required')
+            for (const file of files) {
+              const target = path.resolve(file)
+              if (!inside(task.cwd, target)) throw new Error('Media outside project policy')
+              await safePath(task.cwd, path.relative(task.cwd, target))
+            }
+          }
+          result = await this.options.video(task, data)
+          break
+        }
         default: throw new Error('Unknown task endpoint')
       }
       send(200, result)

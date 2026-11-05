@@ -18,11 +18,24 @@ export default function workbench(pi) {
       signal?.addEventListener('abort', abort, { once: true })
       req.on('close', () => signal?.removeEventListener('abort', abort))
       req.on('error', reject)
-      req.setTimeout(70000, () => req.destroy(new Error('Task tool timed out')))
+      req.setTimeout(route === '/video' && ['create', 'import'].includes(payload.action) ? 200000 : 70000, () => req.destroy(new Error('Task tool timed out')))
       req.end(data)
     })
   }
   const result = value => ({ content: [{ type: 'text', text: JSON.stringify(value) }], details: value })
+  pi.registerTool({
+    name: 'video_studio', label: '智能剪辑',
+    description: 'Use the installed @anyu-video-studio skill to create a local media project, inspect assets, apply a semantic edit plan, render asynchronously, query/cancel a job, open the editor, or export a portable project. Read the skill first. Never invent a completed render. Use the returned projectId and jobId; results stay in this conversation.',
+    parameters: {type: 'object', required: ['action'], properties: {
+      action: {type: 'string', enum: ['health', 'catalog', 'create', 'import', 'inspect', 'plan', 'save', 'render', 'status', 'cancel', 'editor', 'export', 'narrate', 'auto', 'transcribe']},
+      projectId: {type: 'string'}, jobId: {type: 'string'}, requestId: {type: 'string'}, name: {type: 'string'},
+      files: {type: 'array', items: {type: 'string'}, maxItems: 100},
+      file: {type: 'string'}, query: {type: 'string'}, limit: {type: 'integer', minimum: 1, maximum: 60},
+      plan: {type: 'object', additionalProperties: true}, project: {type: 'object', additionalProperties: true},
+      request: {type: 'object', additionalProperties: true},
+    }},
+    async execute(_id, params, signal) { return result(await request('/video', params, signal)) },
+  })
   pi.on('tool_call', async (event, ctx) => {
     try {
       const policy = await request('/policy', { name: event.toolName, input: event.input || {} })

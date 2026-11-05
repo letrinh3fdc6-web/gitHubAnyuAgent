@@ -172,7 +172,8 @@ class DesktopUpdater {
       }
       signal.throwIfAborted()
       this.setState('preparing', { percent: 100, message: '正在准备安装…' })
-      const prepared = await this.prepare({ markerPath: this.markerPath, installerPath, executablePath: this.app.getPath('exe'), version: artifact.version, bytes: artifact.bytes, sha256: artifact.sha256, artifact, userDataPath: this.app.getPath('userData') })
+      const prepared = await this.prepare({ markerPath: this.markerPath, installerPath, executablePath: this.app.getPath('exe'), version: artifact.version, bytes: artifact.bytes, sha256: artifact.sha256, artifact, userDataPath: this.app.getPath('userData'), signal,
+        onProgress: progress => this.setState('preparing', { percent: 100, ...progress }) })
       if (signal.aborted) { writeMarker(this.markerPath, { ...readMarker(this.markerPath), status: 'cancelled' }); signal.throwIfAborted() }
       writeMarker(this.markerPath, { ...readMarker(this.markerPath), status: 'installing' })
       this.setState('installing', { percent: 100, logPath: prepared.logPath, message: '正在安装更新，完成后将自动重新启动。' })

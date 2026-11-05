@@ -87,6 +87,35 @@ test('helper bootstrap failure leaves the old application open; retry reuses ver
   assert.equal(item.quits.length, 0)
 })
 
+test('denied Windows authorization preserves the running client and verified retry cache', async t => {
+  const item = fixture(t, { prepare: async options => {
+    assert(options.signal instanceof AbortSignal)
+    options.onProgress({ message: 'Windows authorization pending' })
+    throw new Error('Windows 安装授权未完成或已取消')
+  } })
+  await assert.rejects(item.updater.install(), /Windows.*授权/)
+  assert.equal(item.quits.length, 0)
+  assert(item.events.some(event => event.phase === 'preparing' && /authorization pending/.test(event.message)))
+  assert.equal(item.updater.state.phase, 'error')
+  await assert.rejects(item.updater.install(), /Windows.*授权/)
+  assert.equal(item.requests.filter(url => url.endsWith('.exe')).length, 1)
+  assert.equal(item.quits.length, 0)
+})
+
+test('cancelling during authorization propagates to the helper without closing the client', { timeout: 10000 }, async t => {
+  const item = fixture(t, { prepare: async options => {
+    options.onProgress({ message: 'authorization pending' })
+    await delay(5000, undefined, { signal: options.signal })
+    throw new Error('Cancelled authorization must not reach commit')
+  } })
+  const operation = item.updater.install()
+  while (item.updater.state.message !== 'authorization pending') await delay(5, undefined, { signal: t.signal })
+  assert.equal(item.updater.cancel(), true)
+  assert.equal((await operation).status, 'cancelled')
+  assert.equal(item.quits.length, 0)
+  assert.equal(item.updater.state.phase, 'idle')
+})
+
 test('verified downloads from the old hash filename are reused under the branded installer name', async t => {
   const item = fixture(t)
   const cache = path.join(item.directory, 'updates')

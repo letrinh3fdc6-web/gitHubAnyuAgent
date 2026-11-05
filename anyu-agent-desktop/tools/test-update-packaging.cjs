@@ -19,6 +19,7 @@ test('builder BuildResult produces an installable descriptor with verified diffe
   const descriptor = JSON.parse(fs.readFileSync(`${exe}.update.json`, 'utf8'))
   const artifact = artifactFromManifest(descriptor, '1.0.0', 'https://updates.test/downloads/downloads-manifest.json')
   assert.equal(artifact.version, '2.0.0')
+  assert.equal(artifact.installerProtocol, 2)
   assert.equal(artifact.sha256, await hashFile(exe))
   assert.equal(artifact.blockMap.sha256, await hashFile(`${exe}.blockmap`))
   assert.equal(artifact.blockMap.url, 'https://updates.test/downloads/AnyuAgent-Setup-2.0.0.exe.blockmap')
@@ -45,6 +46,8 @@ test('phase instrumentation preserves default NSIS lifecycle and rejects templat
 
 test('active update worker is recognized without terminating it, stale and completed markers are retryable', () => {
   assert.equal(isUpdateWorkerRunning({ status: 'installing', workerPid: process.pid }), true)
+  assert.equal(isUpdateWorkerRunning({ status: 'authorizing', workerPid: process.pid }), true)
+  assert.equal(isUpdateWorkerRunning({ status: 'cancelled', workerPid: process.pid }), true)
   assert.equal(isUpdateWorkerRunning({ status: 'completed', workerPid: process.pid }), false)
   assert.equal(isUpdateWorkerRunning({ status: 'failed', workerPid: process.pid }), false)
   assert.equal(isUpdateWorkerRunning({ status: 'installing' }), false)
