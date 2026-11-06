@@ -1,6 +1,6 @@
 {
   "name": "anyu-agent-desktop",
-  "version": "1.0.85",
+  "version": "1.0.86",
   "description": "AnyuAgent standalone desktop workspace",
   "main": "main.cjs",
   "author": "Anyu AI",

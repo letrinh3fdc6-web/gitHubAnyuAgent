@@ -4,9 +4,9 @@ const path = require('node:path')
 const { _electron } = require(process.env.ANYU_PLAYWRIGHT_MODULE || 'C:/Users/Administrator/AppData/Local/Temp/tokenrouter-source-recovery-browser-20261018/node_modules/playwright')
 
 async function main() {
-  const root = process.env.ANYU_SMOKE_ROOT || 'E:/TokenRouter-builds/agent-1.0.85'
+  const root = process.env.ANYU_SMOKE_ROOT || 'E:/TokenRouter-builds/agent-creative-1.0.85'
   const output = process.env.ANYU_SMOKE_OUTPUT || root
-  const report = { version: '1.0.85', errors: [], graphicsWarnings: [], checks: [] }
+  const report = { version: process.env.ANYU_SMOKE_VERSION || require('../package.json').version, errors: [], graphicsWarnings: [], checks: [] }
   const env = { ...process.env, ANYU_USER_DATA_DIR: path.join(root, 'smoke-profile'), ANYU_DISABLE_GPU: '0' }
   delete env.ELECTRON_RUN_AS_NODE
   const launch = () => _electron.launch({ executablePath: process.env.ANYU_SMOKE_EXECUTABLE || path.join(root, 'artifacts/win-unpacked/AnyuAgent.exe'), args: process.platform === 'win32' ? ['--use-angle=swiftshader', '--enable-unsafe-swiftshader'] : [], env, timeout: 60000 })
@@ -19,9 +19,14 @@ async function main() {
     })
     await page.waitForURL(url => url.protocol === 'anyu-app:' && (url.pathname.includes('/login') || url.hash.includes('/login')), { timeout: 60000 })
     await page.locator('input[type="password"]').waitFor({ timeout: 60000 })
-    const info = await page.evaluate(async () => ({ build: await window.anyu.appBuildInfo(), api: await window.anyu.apiBase(), settings: await window.anyu.publicSettings(), health: await (await fetch('/api/v1/anyu-agent/health')).json(), manifest: await (await fetch('/api/v1/anyu-agent/manifest')).json(), update: await window.anyu.checkForUpdate() }))
+    await electron.evaluate(({ BrowserWindow }) => { const window = BrowserWindow.getAllWindows()[0]; window.setPosition(-10000, -10000); window.webContents.setBackgroundThrottling(false) })
+    const info = await page.evaluate(async () => ({ capabilities: await window.anyu.skillsCapabilities(), build: await window.anyu.appBuildInfo(), api: await window.anyu.apiBase(), settings: await window.anyu.publicSettings(), health: await (await fetch('/api/v1/anyu-agent/health')).json(), manifest: await (await fetch('/api/v1/anyu-agent/manifest')).json(), update: await window.anyu.checkForUpdate() }))
     assert.equal(await electron.evaluate(({ app }) => app.getVersion()), report.version)
     assert.equal(await electron.evaluate(({ app }) => app.isPackaged), true)
+    assert.ok(info.capabilities.includes('creative_studio'))
+    const packaged = await electron.evaluate(({ app }) => { const fs = require('node:fs'); const path = require('node:path'); return ['creative-studio.cjs', 'creative-project.cjs', 'creative-document.cjs'].every(name => fs.existsSync(path.join(app.getAppPath(), name))) && fs.existsSync(path.join(app.getAppPath() + '.unpacked', 'creative-document.cjs')) })
+    assert.equal(packaged, true, 'Creative host and physical document worker must be packaged')
+    report.checks.push('creative runtime capability and packaged host/worker')
     assert.equal(info.api, 'https://x.ailzd.com')
     assert.equal(info.health.product, 'AnyuAgent')
     assert.equal(info.manifest.code, 0)
@@ -67,4 +72,4 @@ async function main() {
     console.log(JSON.stringify(report))
   } finally { await electron.close().catch(() => {}) }
 }
-main().catch(error => { fs.writeFileSync(path.join(process.env.ANYU_SMOKE_OUTPUT || 'E:/TokenRouter-builds/agent-1.0.85', process.platform + '-' + process.arch + '-smoke-error.txt'), error.stack || String(error)); console.error(error); process.exitCode = 1 })
+main().catch(error => { fs.writeFileSync(path.join(process.env.ANYU_SMOKE_OUTPUT || 'E:/TokenRouter-builds/agent-creative-1.0.85', process.platform + '-' + process.arch + '-smoke-error.txt'), error.stack || String(error)); console.error(error); process.exitCode = 1 })
