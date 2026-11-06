@@ -24,7 +24,7 @@ async function main() {
     assert.equal(await electron.evaluate(({ app }) => app.getVersion()), report.version)
     assert.equal(await electron.evaluate(({ app }) => app.isPackaged), true)
     assert.ok(info.capabilities.includes('creative_studio'))
-    const packaged = await electron.evaluate(({ app }) => { const fs = require('node:fs'); const path = require('node:path'); return ['creative-studio.cjs', 'creative-project.cjs', 'creative-document.cjs'].every(name => fs.existsSync(path.join(app.getAppPath(), name))) && fs.existsSync(path.join(app.getAppPath() + '.unpacked', 'creative-document.cjs')) })
+    const packaged = await electron.evaluate(({ app }) => { const fs = process.getBuiltinModule('node:fs'); const path = process.getBuiltinModule('node:path'); return ['creative-studio.cjs', 'creative-project.cjs', 'creative-document.cjs'].every(name => fs.existsSync(path.join(app.getAppPath(), name))) && fs.existsSync(path.join(app.getAppPath() + '.unpacked', 'creative-document.cjs')) })
     assert.equal(packaged, true, 'Creative host and physical document worker must be packaged')
     report.checks.push('creative runtime capability and packaged host/worker')
     assert.equal(info.api, 'https://x.ailzd.com')
