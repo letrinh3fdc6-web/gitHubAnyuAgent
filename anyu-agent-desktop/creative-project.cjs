@@ -62,6 +62,21 @@ function checkedPlan(input, project) {
       return result
     }, '图片与分镜'),
   }
+  if (input.productLock !== undefined) {
+    if (project.kind !== 'ecommerce') throw new Error('productLock 仅用于电商商品计划')
+    plan.productLock = text(input.productLock, 2000, '商品保真约束 productLock', true)
+    const purposes = new Map(), prompts = new Map()
+    const comparable = value => value.normalize('NFKC').toLowerCase().replace(/[\s\p{P}]/gu, '')
+    for (const item of plan.items) {
+      if (!item.purpose || !item.camera) throw new Error(`图片 ${item.id} 请填写 purpose（购买问题与新增信息）和 camera（景别、场景与构图）`)
+      for (const [value, seen, label] of [[item.purpose, purposes, '用途'], [`${item.camera}\n${item.prompt}`, prompts, '构图与生图描述']]) {
+        const key = comparable(value)
+        if (!key) throw new Error(`图片 ${item.id} 的${label}不能为空`)
+        if (seen.has(key)) throw new Error(`图片 ${item.id} 与 ${seen.get(key)} 的${label}重复；请明确不同的信息任务，或合并为一张`)
+        seen.set(key, item.id)
+      }
+    }
+  }
   if (!plan.items.length) throw new Error('计划至少包含一张图片或一个分镜')
   const byID = new Map(plan.items.map(item => [item.id, item]))
   if (byID.size !== plan.items.length) throw new Error('分镜或图片标识重复')
@@ -76,6 +91,9 @@ function checkedPlan(input, project) {
     visiting.delete(id); visited.add(id)
   }
   for (const id of byID.keys()) visit(id)
+  if (plan.productLock) for (const item of plan.items) {
+    if ([...generationPrompt(plan, item)].length > 6000) throw new Error(`图片 ${item.id} 的完整提示词超过 6000 字，请精简描述、共享约束或证据；不要截断商品要求`)
+  }
   if (Buffer.byteLength(JSON.stringify(plan)) > 256000) throw new Error('计划过大，请按章节拆分')
   return plan
 }
@@ -87,13 +105,31 @@ function itemFingerprint(plan, item, cache = new Map()) {
     if (!dependency) throw new Error('图片依赖不存在')
     return itemFingerprint(plan, dependency, cache)
   })
-  const fingerprint = hash({ styleLock: plan.styleLock, constraints: plan.constraints, item, dependencies })
+  const context = plan.productLock ? { productLock: plan.productLock, objective: plan.objective, audience: plan.audience, platform: plan.platform, claims: plan.claims } : undefined
+  const fingerprint = hash({ styleLock: plan.styleLock, constraints: plan.constraints, item, dependencies, context })
   cache.set(item.id, fingerprint)
   return fingerprint
 }
 
 function generationPrompt(plan, item) {
+  // Keep legacy prompts byte-for-byte stable for resuming and reconciling submitted tasks.
+  const campaign = plan.productLock ? [
+    `套图目标：${plan.objective}`,
+    plan.audience && `目标受众：${plan.audience}`,
+    plan.platform && `使用平台：${plan.platform}`,
+    `商品保真约束：${plan.productLock}`,
+    `本图任务（只完成这一项）：${item.purpose}`,
+    `本图景别与构图：${item.camera}`,
+    '商品身份与品牌视觉保持一致；背景、机位、主体占比和布局按本图任务重新设计。不要机械复制原图或母版海报，只换背景或标题不能代替新增信息。主图、场景、细节、尺寸等用途应有相应的画面表达。',
+    ...[
+      ...[...new Set(item.referenceIds)].map(id => [id, '原始素材，按本图描述核对商品外观与真实结构']),
+      ...[...new Set(item.dependsOn)].map(id => [id, '已生成的参考图，只继承本图明确需要的商品细节或风格，不默认继承其背景、文案、摆位和构图']),
+    ].map(([id, role], index) => `参考图${index + 1}（${id}）：${role}。`),
+    ...plan.claims.filter(claim => claim.status === 'verified').map(claim => `已确认事实（仅在与本图任务相关时使用）：${claim.text}；依据：${claim.evidence}`),
+    '不得补造参数、功效、认证、内部结构或对比结果；资料没有证实的内容不进入画面。策略、参考编号与证据备注不作为图中文字。',
+  ] : []
   return [
+    ...campaign,
     item.prompt,
     `统一视觉约束：${plan.styleLock}`,
     plan.constraints && `全局禁止项：${plan.constraints}`,
@@ -122,6 +158,7 @@ function projectExports(project) {
   const csvText = '\ufeff' + [headers, ...rows].map(row => row.map(csv).join(',')).join('\r\n') + '\r\n'
   const md = [
     `# ${project.name}`, '', plan.objective, '', `目标平台：${plan.platform || '未指定'}`, '',
+    ...(plan.productLock ? ['## 商品保真约束', '', plan.productLock, ''] : []),
     '## 统一视觉约束', '', plan.styleLock, '', '## 分镜与图片计划', '',
     '| 序号 | 标识 | 名称 | 景别与运镜 | 原文与台词 | 时长 | 状态 |', '| --- | --- | --- | --- | --- | --- | --- |',
     ...plan.items.map((item, index) => `| ${index + 1} | ${item.id} | ${markdown(item.title)} | ${markdown(item.camera)} | ${markdown([item.sourceExcerpt, ...item.dialogue.map(line => `${line.speaker}：${line.text}`)].join('\n'))} | ${item.duration || ''} | ${project.outputs[item.id]?.status || 'planned'} |`),

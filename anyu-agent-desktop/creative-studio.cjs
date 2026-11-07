@@ -170,7 +170,9 @@ class CreativeStudio {
     await fs.mkdir(indexDirectory, { recursive: true })
     await atomicJSON(path.join(indexDirectory, `${id}.json`), { id, owner, cwd, sessionId: task.sessionId })
     this.changed(task, project)
-    return { ...this.summary(project), scriptExcerpt: script.slice(0, 16000), next: 'Read the source and references, then save a grounded plan. No images have been generated.' }
+    return { ...this.summary(project), scriptExcerpt: script.slice(0, 16000), next: input.kind === 'ecommerce'
+      ? 'Read the references and save a plan with productLock (product identity only), styleLock (shared brand style), and a distinct purpose (decision question and new information) and camera (composition) for each item. Reference originals directly when sufficient; do not chain every image to the hero. No images have been generated.'
+      : 'Read the source and references, then save a grounded plan. No images have been generated.' }
   }
 
   async inputFile(task, file) {

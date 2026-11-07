@@ -9,6 +9,13 @@ const { spawn } = require('node:child_process')
 const { once } = require('node:events')
 
 const IMAGE = require('node:fs').readFileSync(path.join(__dirname, '../branding/logo.png')).toString('base64')
+function storyboardImage() {
+  const { createRequire } = require('node:module')
+  const requirePi = createRequire(path.resolve(__dirname, '../node_modules/@earendil-works/pi-coding-agent/package.json'))
+  const { PhotonImage } = requirePi('@silvia-odwyer/photon-node')
+  const image = new PhotonImage(require('node:crypto').randomBytes(768 * 768 * 4), 768, 768)
+  try { return Buffer.from(image.get_bytes()) } finally { image.free() }
+}
 function sendResponse(res, api, model, tool, args, final = 'DONE', usage = { input_tokens: 10, output_tokens: 3, total_tokens: 13, input_tokens_details: { cached_tokens: 4 } }) {
   res.writeHead(200, { 'Content-Type': 'text/event-stream' })
   const send = data => res.write(`data: ${JSON.stringify(data)}\n\n`)
@@ -110,6 +117,85 @@ test('conversation-only pet threads send no tools and preserve character instruc
   assert.equal(f.requests[0].body.tools?.length || 0, 0)
   assert.match(JSON.stringify(f.requests[0].body), /thoughtful desktop companion/)
   assert.ok(!f.events.some(e => e.type === 'tool_execution_start'))
+})
+
+test('official engine stores bounded previews for uploaded and tool-read images, then resumes and compacts', { timeout: 50000 }, async t => {
+  const { MAX_PREVIEW_BYTES } = require('../codex-input.cjs')
+  const original = storyboardImage(), data = original.toString('base64')
+  assert.ok(data.length > MAX_PREVIEW_BYTES)
+  const f = await fixture(t, {
+    setup: async directory => { await fs.writeFile(path.join(directory, 'frame.png'), original) },
+    handler: (_req, res, body, n) => sendResponse(res, 'openai-responses', body.model, n === 1 ? 'read' : null, { path: 'frame.png' }),
+  })
+  await f.command('prompt', { message: 'Inspect this storyboard image', images: [{ mimeType: 'image/png', data }] })
+  assert.equal((await f.event(e => e.type === 'agent_settled')).error, '')
+  const images = f.requests[1].body.input.flatMap(item => Array.isArray(item.content) ? item.content : Array.isArray(item.output) ? item.output : []).filter(part => part.type === 'input_image')
+  assert.equal(images.length, 2)
+  assert.ok(images.every(part => part.image_url.length < MAX_PREVIEW_BYTES))
+  assert.deepEqual(await fs.readFile(path.join(f.directory, 'frame.png')), original)
+  const state = await f.command('get_state')
+  await f.restart()
+  const before = f.events.length
+  await f.command('prompt', { message: 'Continue the same storyboard' })
+  assert.equal((await f.event(e => e.type === 'agent_settled' && f.events.indexOf(e) >= before)).error, '')
+  assert.equal((await f.command('get_state')).threadId, state.threadId)
+  assert.ok(JSON.stringify(f.requests.at(-1).body).includes('frame.png'))
+  assert.ok(await f.command('compact'))
+  assert.deepEqual(await fs.readFile(path.join(f.directory, 'frame.png')), original)
+})
+
+test('an already-failed oversized official thread resumes after restart without deleting history', { timeout: 90000 }, async t => {
+  const { CodexRuntime } = require('../codex-runtime.cjs')
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'anyu-oversized-thread-'))
+  const requests = [], outcomes = []
+  let runtime, settle
+  const server = http.createServer(async (req, res) => {
+    const chunks = []; for await (const chunk of req) chunks.push(chunk)
+    const bytes = Buffer.concat(chunks), body = JSON.parse(bytes)
+    requests.push({ bytes: bytes.length, marker: bytes.includes('STORYBOARD_PROJECT_TO_KEEP'), images: body.input.flatMap(item => Array.isArray(item.content) ? item.content : []).filter(part => part.type === 'input_image').length })
+    sendResponse(res, 'openai-responses', body.model, null, null, 'STORYBOARD_CONTINUED')
+  })
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
+  t.after(async () => { await runtime?.close(); server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); await fs.rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }) })
+  const options = {
+    cwd: directory, home: path.join(directory, 'codex'), agentDir: path.join(directory, 'pi'), sessionPath: path.join(directory, 'session.codex.jsonl'), credential: 'test', conversationOnly: true,
+    model: { id: 'test', api: 'openai-responses', provider: 'anyu-test', baseUrl: `http://127.0.0.1:${server.address().port}/v1`, contextWindow: 128000, input: ['text', 'image'], reasoning: false },
+    contextPolicy: { contextWindow: 128000, triggerTokens: 110000, native: { enabled: true } },
+  }
+  const emit = event => { if (event.type === 'agent_settled') { outcomes.push(event); settle?.(event) } }
+  const finished = () => new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('Oversized thread did not settle')), 20000)
+    settle = value => { clearTimeout(timer); resolve(value) }
+  })
+  runtime = new CodexRuntime(options, emit)
+  await runtime.initialize()
+  const threadId = runtime.threadId
+  // Reproduce the previous boundary: original images are persisted by the
+  // official engine, and the model request fails above 64 MiB.
+  runtime.imagePreviews.url = async url => ({ url })
+  const data = storyboardImage().toString('base64')
+  const perTurn = 4, turns = Math.ceil(65 * 1024 * 1024 / data.length / perTurn)
+  let done
+  for (let turn = 0; turn < turns; turn++) {
+    done = finished()
+    await runtime.command({ type: 'prompt', message: `STORYBOARD_PROJECT_TO_KEEP batch ${turn}`, images: Array.from({ length: perTurn }, () => ({ mimeType: 'image/png', data })) })
+    const result = await done
+    if (turn === turns - 1) assert.match(result.error, /413|MODEL_INPUT_TOO_LARGE|size limit/)
+    else assert.equal(result.error, '')
+  }
+  assert.equal(requests.length, turns - 1)
+  assert.equal(outcomes.length, turns, 'The permanent size error must settle without retrying the task')
+  await runtime.close()
+  runtime = new CodexRuntime(options, emit)
+  await runtime.initialize()
+  assert.equal(runtime.threadId, threadId)
+  done = finished()
+  await runtime.command({ type: 'prompt', message: '1.' })
+  assert.equal((await done).error, '')
+  assert.equal(requests.length, turns)
+  assert.equal(requests.at(-1).marker, true)
+  assert.equal(requests.at(-1).images, turns * perTurn)
+  assert.ok(requests.at(-1).bytes < 16 * 1024 * 1024)
 })
 
 test('official engine uses native Responses for a preferred GPT Chat catalog entry', async t => {

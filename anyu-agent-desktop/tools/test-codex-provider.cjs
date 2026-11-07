@@ -20,13 +20,55 @@ async function fixture(t, handler, model = {}, options = {}) {
     ...options,
   }).start()
   t.after(async () => { await bridge.close(); server.closeAllConnections(); await new Promise(resolve => server.close(resolve)) })
-  const request = body => fetch(`${bridge.origin}/responses`, {
+  const request = (body, timeout = 5000) => fetch(`${bridge.origin}/responses`, {
     method: 'POST', headers: { Authorization: `Bearer ${bridge.token}`, 'Content-Type': 'application/json', 'x-session-id': 'session-test' },
     body: JSON.stringify({ model: bridge.model.id, stream: true, input: [{ role: 'user', content: 'hello' }], ...body }),
-    signal: AbortSignal.timeout(5000),
+    signal: AbortSignal.timeout(timeout),
   })
   return { bridge, requests, request }
 }
+
+test('oversized storyboard history is resized before forwarding and a short follow-up succeeds', { timeout: 60000 }, async t => {
+  const { createRequire } = require('node:module')
+  const path = require('node:path')
+  const requirePi = createRequire(path.resolve(__dirname, '../node_modules/@earendil-works/pi-coding-agent/package.json'))
+  const { PhotonImage } = requirePi('@silvia-odwyer/photon-node')
+  const image = new PhotonImage(require('node:crypto').randomBytes(768 * 768 * 4), 768, 768)
+  let data
+  try { data = Buffer.from(image.get_bytes()).toString('base64') } finally { image.free() }
+  const count = Math.ceil(65 * 1024 * 1024 / data.length)
+  const input = Array.from({ length: count }, (_, i) => [
+    { type: 'function_call', call_id: `image_${i}`, name: 'read', arguments: JSON.stringify({ path: `story/frame_${i}.png` }) },
+    { type: 'function_call_output', call_id: `image_${i}`, output: [{ type: 'input_text', text: `Frame ${i} ready on disk` }, { type: 'input_image', image_url: `data:image/png;base64,${data}` }] },
+  ]).flat()
+  const body = { input }
+  assert.ok(Buffer.byteLength(JSON.stringify(body)) > 64 * 1024 * 1024)
+  const sizes = []
+  const f = await fixture(t, (request, res) => {
+    sizes.push(Buffer.byteLength(JSON.stringify(request.body)))
+    res.writeHead(200, { 'Content-Type': 'application/json' }); res.end('{"ok":true}')
+  }, { api: 'openai-responses' })
+  assert.equal((await f.request(body, 25000)).status, 200)
+  input.push({ role: 'user', content: '1.' })
+  assert.equal((await f.request(body, 25000)).status, 200)
+  assert.equal(f.requests.length, 2)
+  for (const size of sizes) assert.ok(size < 16 * 1024 * 1024)
+  const results = f.requests.at(-1).body.input.filter(item => item.type === 'function_call_output')
+  assert.equal(results.length, count)
+  assert.ok(results.every(item => item.output.some(part => part.type === 'input_image')))
+  assert.equal(f.requests.at(-1).body.input.at(-1).content, '1.')
+  assert.equal(input[1].output[1].image_url, `data:image/png;base64,${data}`)
+  t.diagnostic(`History ${Math.ceil(Buffer.byteLength(JSON.stringify(body)) / 1024 / 1024)} MiB; forwarded ${Math.ceil(sizes[0] / 1024)} KiB; images ${count}`)
+})
+
+test('a preview failure returns an actionable 413 before calling upstream, without a socket reset', async t => {
+  const { ImagePreviews, MAX_PREVIEW_BYTES } = require('../codex-input.cjs')
+  const f = await fixture(t, () => assert.fail('Must not forward failed input'), {}, { imagePreviews: new ImagePreviews({ resize: async () => null }) })
+  const response = await f.request({ input: [{ role: 'user', content: [{ type: 'input_image', image_url: 'data:image/png;base64,' + 'a'.repeat(MAX_PREVIEW_BYTES) }] }] })
+  assert.equal(response.status, 413)
+  assert.equal((await response.json()).error.code, 'MODEL_IMAGE_PREVIEW_FAILED')
+  assert.equal(f.requests.length, 0)
+})
 
 for (const api of ['openai-responses', 'openai-completions', 'anthropic-messages', 'google-generative-ai']) test(`conversation-only ${api} omits native and incremental tools`, async t => {
   const f = await fixture(t, (_, res) => {

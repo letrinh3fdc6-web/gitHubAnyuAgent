@@ -6,6 +6,7 @@ const crypto = require('node:crypto')
 const { CodexClient } = require('./codex-client.cjs')
 const { CodexProviderBridge } = require('./codex-provider.cjs')
 const { CodexTools } = require('./codex-tools.cjs')
+const { ImagePreviews } = require('./codex-input.cjs')
 
 function runtimeConfig(model, bridge, policy) {
   return {
@@ -44,8 +45,9 @@ class CodexRuntime {
   }
   async initialize() {
     const options = this.options
-    this.tools = await new CodexTools({ ...options, ask: (request, signal) => this.ask(request, signal), emit: event => this.emit(event) }).initialize()
-    this.bridge = await new CodexProviderBridge({ model: options.model, credential: options.credential, conversationOnly: options.conversationOnly, getThinking: () => this.thinking, onModelRequest: () => {
+    this.imagePreviews = new ImagePreviews()
+    this.tools = await new CodexTools({ ...options, imagePreviews: this.imagePreviews, ask: (request, signal) => this.ask(request, signal), emit: event => this.emit(event) }).initialize()
+    this.bridge = await new CodexProviderBridge({ model: options.model, credential: options.credential, imagePreviews: this.imagePreviews, conversationOnly: options.conversationOnly, getThinking: () => this.thinking, onModelRequest: () => {
       if (!this.compaction) this.emit({ type: 'turn_start' })
     }, onProviderActivity: type => {
       if (!this.compaction) this.emit({ type: 'message_update', assistantMessageEvent: { type } })
@@ -81,8 +83,10 @@ class CodexRuntime {
     let saved
     try { saved = JSON.parse(fs.readFileSync(options.sessionPath, 'utf8').trim()) } catch (error) { if (error.code !== 'ENOENT') throw error }
     let result
-    if (saved?.threadId) result = await this.client.request('thread/resume', { ...base, threadId: saved.threadId })
-    else if (saved?.forkThreadId) result = await this.client.request('thread/fork', { ...base, threadId: saved.forkThreadId })
+    // The host restores its own UI events. Hydrating all engine turns would
+    // duplicate embedded images and can overflow the JSONL event boundary.
+    if (saved?.threadId) result = await this.client.request('thread/resume', { ...base, threadId: saved.threadId, excludeTurns: true })
+    else if (saved?.forkThreadId) result = await this.client.request('thread/fork', { ...base, threadId: saved.forkThreadId, excludeTurns: true })
     else result = await this.client.request('thread/start', { ...base, dynamicTools: this.tools.specs(), allowProviderModelFallback: false })
     this.threadId = result.thread.id
     fs.mkdirSync(path.dirname(options.sessionPath), { recursive: true })
@@ -105,9 +109,13 @@ class CodexRuntime {
       case 'prompt': {
         if (this.turn || this.starting || this.compaction) throw new Error('This session is still running')
         this.controller = new AbortController(); this.starting = true; this.lastText = ''; this.activeMessages.clear(); this.endedMessages.clear(); this.currentMessage = null; this.turnUsage = {}
-        const input = [{ type: 'text', text: command.message || '', text_elements: [] }, ...(command.images || []).map(image => ({ type: 'image', url: `data:${image.mimeType};base64,${image.data}` }))]
         this.emit({ type: 'agent_start' })
         try {
+          const images = await this.imagePreviews.parts((command.images || []).map(image => ({ ...image, type: 'image' })), this.controller.signal)
+          const input = [{ type: 'text', text: command.message || '', text_elements: [] }, ...images.map(part => part.type === 'image'
+            ? { type: 'image', url: `data:${part.mimeType};base64,${part.data}` }
+            : { type: 'text', text: part.text, text_elements: [] })]
+          this.controller.signal.throwIfAborted()
           const result = await this.client.request('turn/start', { threadId: this.threadId, input, ...(this.thinking !== 'auto' ? { effort: this.thinking === 'off' ? 'none' : this.thinking } : {}) })
           // turn/completed can arrive in the same stdout chunk as the RPC reply.
           if (this.starting) this.turn = result.turn.id

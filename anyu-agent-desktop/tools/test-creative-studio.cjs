@@ -67,6 +67,49 @@ test('failed anchor blocks dependent images; explicit retry preserves successful
   assert.ok(result.items.every(item => item.status === 'completed'))
 }))
 
+test('campaign planning reaches real submission and local edits preserve unrelated completed images', async () => fixture(async f => {
+  await fs.writeFile(path.join(f.cwd, 'product.png'), PNG)
+  const plan = draft(3)
+  plan.productLock = 'Keep the actual product outline and logo'
+  plan.audience = 'Home cooks'; plan.platform = 'Taobao'
+  const purposes = ['Identify this product', 'Inspect the actual joint', 'Understand the included parts']
+  const cameras = ['Full product on white', 'Macro joint close-up', 'Overhead parts layout']
+  for (const [index, item] of plan.items.entries()) {
+    Object.assign(item, { purpose: purposes[index], camera: cameras[index], referenceIds: ['ref-001'] })
+  }
+  plan.items[1].dependsOn = ['item-1']
+  let project = await f.create({ files: ['product.png'] })
+  const invalid = structuredClone(plan); invalid.items[1].purpose = invalid.items[0].purpose
+  await assert.rejects(f.save(project, invalid), /用途重复/)
+  assert.equal(f.creates(), 0)
+  project = await f.save(project, plan)
+  const sent = [], original = f.options.create
+  f.options.create = async (fields, files) => { sent.push({ fields, files }); return original(fields) }
+  await f.generate(project)
+  const completed = await f.wait(project.projectId)
+  assert.equal(f.creates(), 3)
+  const detail = sent.find(({ fields }) => fields.prompt.includes(purposes[1]))
+  assert.ok(detail.fields.prompt.includes(cameras[1]))
+  assert.ok(detail.fields.prompt.includes(plan.audience))
+  assert.equal(detail.files.length, 2)
+  assert.equal(detail.files[0].name, 'ref-001.png')
+  assert.equal(detail.files[1].name, 'item-1-1.png')
+  assert.match(detail.fields.prompt, /参考图2（item-1）：已生成的参考图/)
+  assert.ok(sent.every(({ fields }) => [...fields.prompt].length <= 6000))
+  assert.ok((await fs.readFile(path.join(project.directory, 'storyboard.csv'), 'utf8')).includes(purposes[1]))
+  const edit = structuredClone(project.plan); edit.items[1].camera += ', tighter crop'
+  const updated = await f.save(project, edit)
+  assert.deepEqual(updated.items.map(item => item.status), ['completed', 'planned', 'completed'])
+  await f.generate(updated)
+  const result = await f.wait(project.projectId)
+  assert.equal(f.creates(), 4)
+  assert.equal(result.items[0].file, completed.items[0].file)
+  assert.equal(result.items[2].file, completed.items[2].file)
+  assert.equal(result.items[1].file, 'images/item-2-2.png')
+  await f.generate(updated); await f.wait(project.projectId)
+  assert.equal(f.creates(), 4)
+}))
+
 test('ambiguous submission is never automatically retried and can bind a matching existing remote task', async () => fixture(async f => {
   const original = f.options.create
   f.options.create = async fields => { await original(fields); throw new Error('Connection closed after submission') }

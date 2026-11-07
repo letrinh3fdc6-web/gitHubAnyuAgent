@@ -4,6 +4,71 @@ const { checkedPlan, itemFingerprint, generationPrompt, projectExports } = requi
 
 const product = () => ({ kind: 'ecommerce', references: [{ id: 'ref-001' }] })
 const draft = () => ({ objective: 'A product campaign', styleLock: 'Keep the original product', items: [{ id: 'hero', kind: 'product', title: 'Hero image', prompt: 'One product on white', referenceIds: ['ref-001'] }, { id: 'detail', kind: 'detail', title: 'Details', prompt: 'Show its construction', dependsOn: ['hero'] }] })
+const campaign = () => {
+  const plan = draft()
+  Object.assign(plan, { productLock: 'Keep the actual shape, logo and SKU', audience: 'Small kitchen owners', platform: 'Taobao' })
+  Object.assign(plan.items[0], { purpose: 'Identify the product and variant', camera: 'Full product, uncluttered background' })
+  Object.assign(plan.items[1], { purpose: 'Inspect the visible joint construction', camera: 'Macro view of the joint, annotation space' })
+  return plan
+}
+
+test('campaign plans reject missing tasks and duplicate information, while allowing purposeful angle variants', () => {
+  for (const change of [
+    plan => { delete plan.items[0].purpose },
+    plan => { delete plan.items[0].camera },
+    plan => { plan.items[1].purpose = `  ${plan.items[0].purpose.toUpperCase()}! ` },
+    plan => { plan.items[1].prompt = plan.items[0].prompt; plan.items[1].camera = plan.items[0].camera },
+    plan => { plan.productLock = '' },
+  ]) { const plan = campaign(); change(plan); assert.throws(() => checkedPlan(plan, product())) }
+  const angles = campaign()
+  angles.items[1].prompt = angles.items[0].prompt
+  assert.equal(checkedPlan(angles, product()).items.length, 2, 'different composition and purpose are legitimate')
+  assert.throws(() => checkedPlan(campaign(), { ...product(), kind: 'comic' }), /仅用于电商/)
+})
+
+test('actual campaign prompts carry decision, composition, reference roles and verified facts', () => {
+  const input = campaign()
+  input.claims = [{ text: 'One included tray', evidence: 'Packing list', status: 'verified' }, { text: 'Unverified load rating', status: 'pending' }]
+  input.items[1].referenceIds = ['ref-001', 'ref-001']
+  input.items[1].dependsOn = ['hero', 'hero']
+  const plan = checkedPlan(input, product()), item = plan.items[1]
+  const prompt = generationPrompt(plan, item)
+  for (const value of [plan.objective, plan.audience, plan.platform, plan.productLock, item.purpose, item.camera, 'One included tray', 'Packing list']) assert.ok(prompt.includes(value), value)
+  assert.ok(!prompt.includes('Unverified load rating'))
+  assert.match(prompt, /参考图1（ref-001）：原始素材/)
+  assert.match(prompt, /参考图2（hero）：已生成的参考图/)
+  assert.ok(!prompt.includes('参考图3'))
+  assert.ok(!generationPrompt(plan, plan.items[0]).includes(item.purpose), 'do not ask each image to render every task')
+})
+
+test('campaign size validation counts Unicode code points and never truncates identity requirements', () => {
+  const input = campaign()
+  input.items = [input.items[0]]
+  const plan = checkedPlan(input, product())
+  const prefixLength = [...generationPrompt(plan, plan.items[0])].length - [...plan.items[0].prompt].length
+  input.items[0].prompt = '\u{1f9f4}'.repeat(6000 - prefixLength)
+  assert.equal([...generationPrompt(checkedPlan(input, product()), checkedPlan(input, product()).items[0])].length, 6000)
+  input.items[0].prompt += 'x'
+  assert.throws(() => checkedPlan(input, product()), /超过 6000/)
+})
+
+test('campaign identity and strategy edits invalidate outputs; independent task edits stay local', () => {
+  const input = campaign(); input.items[1].dependsOn = []
+  const before = checkedPlan(input, product())
+  for (const field of ['productLock', 'objective', 'audience', 'platform']) {
+    const after = structuredClone(before); after[field] += ' revised'
+    assert.notEqual(itemFingerprint(before, before.items[0]), itemFingerprint(after, after.items[0]), field)
+  }
+  const after = structuredClone(before); after.items[1].purpose += ' with a closer view'
+  assert.equal(itemFingerprint(before, before.items[0]), itemFingerprint(after, after.items[0]))
+  assert.notEqual(itemFingerprint(before, before.items[1]), itemFingerprint(after, after.items[1]))
+})
+
+test('legacy prompts remain byte-compatible for previously submitted and uncertain tasks', () => {
+  const plan = checkedPlan(draft(), product())
+  assert.equal(Object.hasOwn(plan, 'productLock'), false)
+  assert.equal(generationPrompt(plan, plan.items[0]), 'One product on white\n\n统一视觉约束：Keep the original product\n\n不要添加未要求的文字、Logo、水印或虚构认证。\n\n严格保留所附参考图中的商品结构、角色身份及对应的外观特征；不得混淆角色或改变商品。')
+})
 
 test('plans validate references and reject duplicate IDs, cycles, missing dependencies and unsupported sizes', () => {
   assert.equal(checkedPlan(draft(), product()).items.length, 2)

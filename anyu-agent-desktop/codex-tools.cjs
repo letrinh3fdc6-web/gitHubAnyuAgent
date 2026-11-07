@@ -1,13 +1,15 @@
 'use strict'
 const path = require('node:path')
 const { pathToFileURL } = require('node:url')
+const { ImagePreviews } = require('./codex-input.cjs')
 
 const READ_TOOLS = new Set(['read', 'grep', 'find', 'ls', 'runtime_probe'])
 const libraryFile = relative => pathToFileURL(path.join(__dirname, 'node_modules/@earendil-works/pi-coding-agent/dist', relative)).href
 
 class CodexTools {
-  constructor({ cwd, readOnly = false, conversationOnly = false, ask, emit, model, agentDir, skillPaths = [] }) {
+  constructor({ cwd, readOnly = false, conversationOnly = false, ask, emit, model, agentDir, skillPaths = [], imagePreviews = new ImagePreviews() }) {
     Object.assign(this, { cwd, readOnly, conversationOnly, ask, emit, model, agentDir, skillPaths })
+    this.imagePreviews = imagePreviews
     this.tools = new Map()
     this.hooks = new Map()
     this.tail = Promise.resolve()
@@ -73,9 +75,19 @@ class CodexTools {
       for (const hook of this.hooks.get('tool_result') || []) await hook({ ...event, result, isError }, this.context(signal)).catch(() => {})
     }
     this.emit({ type: 'tool_execution_end', toolName: call.tool, toolCallId: id, args, result, isError })
+    let content
+    try { content = await this.imagePreviews.parts(result?.content || [], signal) }
+    catch (error) {
+      // The tool has already run. A preview failure must not imply that its
+      // side effects should be repeated, or discard the useful text result.
+      return { success: false, contentItems: [
+        ...(result?.content || []).filter(part => part.type === 'text').map(part => ({ type: 'inputText', text: part.text })),
+        { type: 'inputText', text: `The tool has already finished. Do not repeat its side effects. Model preview error: ${error.message}` },
+      ] }
+    }
     return {
       success: !isError,
-      contentItems: (result?.content || []).map(part => part.type === 'image'
+      contentItems: content.map(part => part.type === 'image'
         ? { type: 'inputImage', imageUrl: `data:${part.mimeType};base64,${part.data}` }
         : { type: 'inputText', text: String(part.text || '') }),
     }

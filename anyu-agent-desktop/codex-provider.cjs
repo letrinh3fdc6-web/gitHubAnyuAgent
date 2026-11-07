@@ -4,6 +4,7 @@ const http = require('node:http')
 const https = require('node:https')
 const crypto = require('node:crypto')
 const { once } = require('node:events')
+const { ImagePreviews, readModelInput } = require('./codex-input.cjs')
 
 const HISTORY_PREFIX = 'anyu_provider_v1:'
 const zeroUsage = () => ({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } })
@@ -96,9 +97,10 @@ function toProviderContext(body, model) {
 }
 
 class CodexProviderBridge {
-  constructor({ model, credential, conversationOnly = false, getThinking = () => 'auto', onModelRequest = () => {}, onProviderActivity = () => {} }) {
+  constructor({ model, credential, imagePreviews = new ImagePreviews(), conversationOnly = false, getThinking = () => 'auto', onModelRequest = () => {}, onProviderActivity = () => {} }) {
     this.model = model
     this.credential = credential
+    this.imagePreviews = imagePreviews
     this.conversationOnly = conversationOnly
     this.getThinking = getThinking
     this.onModelRequest = onModelRequest
@@ -122,6 +124,7 @@ class CodexProviderBridge {
     for (const socket of this.sockets) socket.destroy()
     if (this.server) await new Promise(resolve => this.server.close(resolve))
     for (const agent of Object.values(this.agents)) agent.destroy()
+    this.imagePreviews.clear()
   }
   async handle(req, res) {
     if (req.url.startsWith('/provider/')) { this.forwardProvider(req, res); return }
@@ -133,13 +136,7 @@ class CodexProviderBridge {
     this.controllers.add(controller)
     res.once('close', () => { if (!res.writableEnded) controller.abort() })
     try {
-      const chunks = []; let size = 0
-      for await (const chunk of req) {
-        size += chunk.length
-        if (size > 64 * 1024 * 1024) throw Object.assign(new Error('Model input exceeds 64 MiB'), { status: 413 })
-        chunks.push(chunk)
-      }
-      const body = JSON.parse(Buffer.concat(chunks))
+      const body = await readModelInput(req, this.imagePreviews, controller.signal)
       if (body.model !== this.model.id) throw Object.assign(new Error('Model does not match the selected group'), { status: 400 })
       if (this.conversationOnly) {
         body.tools = []
