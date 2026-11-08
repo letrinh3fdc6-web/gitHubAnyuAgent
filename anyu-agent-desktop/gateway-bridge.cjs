@@ -61,15 +61,30 @@ function requestModel(route, body) {
 function normalizeManagedRequestBody(route, body) {
   const path = String(route?.upstreamPath || '').split('?')[0]
   const responses = path === '/v1/responses' || path === '/v1/responses/compact'
-  if (!responses && path !== '/v1/chat/completions') return body
+  const chat = path === '/v1/chat/completions'
+  const gemini = /^\/v1beta\/models\/[^/?#]+:(?:generateContent|streamGenerateContent)$/.test(path)
+  if (!responses && !chat && !gemini) return body
   let payload
   try { payload = JSON.parse(body.toString('utf8')) } catch { return body }
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return body
+  let changed = false
+  // Legacy Pi and App Server share this bridge. Neither should impose an SDK
+  // output default; Anthropic's required max_tokens is forwarded unchanged.
+  const outputSettings = gemini ? payload.generationConfig : payload
+  for (const field of gemini ? ['maxOutputTokens'] : ['max_tokens', 'max_completion_tokens', 'max_output_tokens']) {
+    if (outputSettings && Object.hasOwn(outputSettings, field)) {
+      delete outputSettings[field]
+      changed = true
+    }
+  }
   const effort = responses ? payload?.reasoning?.effort : payload?.reasoning_effort
-  if (effort !== 'off') return body
-  // Pi 的关闭档是 off；本机 OpenAI 兼容网关接受的关闭值为 none。
-  if (responses) payload.reasoning.effort = 'none'
-  else payload.reasoning_effort = 'none'
-  return Buffer.from(JSON.stringify(payload))
+  if ((responses || chat) && effort === 'off') {
+    // Pi 的关闭档是 off；本机 OpenAI 兼容网关接受的关闭值为 none。
+    if (responses) payload.reasoning.effort = 'none'
+    else payload.reasoning_effort = 'none'
+    changed = true
+  }
+  return changed ? Buffer.from(JSON.stringify(payload)) : body
 }
 
 function allowedGatewayPath(pathname) {
@@ -119,6 +134,8 @@ function writeJSON(res, statusCode, message, code) {
   res.end(body)
 }
 
+const { KeyedSerialQueue } = require('./runtime-lifecycle.cjs')
+
 class LocalGatewayBridge {
   constructor(options = {}) {
     this.gatewayBase = new URL(options.gatewayBase)
@@ -138,13 +155,16 @@ class LocalGatewayBridge {
     this.upstreamAgent = createUpstreamAgent(this.gatewayBase.protocol)
     this.token = ''
     this.origin = ''
+    this.lifecycle = new KeyedSerialQueue()
   }
 
-  async start() {
+  start() { return this.lifecycle.run('bridge', () => this.startUnsafe()) }
+
+  async startUnsafe() {
     // 多会话并行后，网关桥是所有 Pi 子进程共用的入口；令牌一旦轮换，
     // 先启动的进程会被 401 掐断。已启动时直接复用现有监听与令牌。
     if (this.server && this.token && this.origin) return { origin: this.origin, token: this.token }
-    await this.stop()
+    await this.stopUnsafe()
     if (!this.upstreamAgent || this.upstreamAgent.destroyed) this.upstreamAgent = createUpstreamAgent(this.gatewayBase.protocol)
     this.token = crypto.randomBytes(32).toString('base64url')
     this.server = http.createServer((req, res) => { void this.handle(req, res) })
@@ -152,13 +172,13 @@ class LocalGatewayBridge {
       this.sockets.add(socket)
       socket.once('close', () => this.sockets.delete(socket))
     })
-    await new Promise((resolve, reject) => {
+    try { await new Promise((resolve, reject) => {
       const onError = (error) => { this.server?.off('listening', onListening); reject(error) }
       const onListening = () => { this.server?.off('error', onError); resolve() }
       this.server.once('error', onError)
       this.server.once('listening', onListening)
       this.server.listen(0, '127.0.0.1')
-    })
+    }) } catch (error) { await this.stopUnsafe(); throw error }
     const address = this.server.address()
     this.origin = `http://127.0.0.1:${address.port}`
     return { origin: this.origin, token: this.token }
@@ -172,17 +192,20 @@ class LocalGatewayBridge {
 
   removeThinkingContext(contextKey) { this.thinkingContexts.delete(contextKey) }
 
-  async stop() {
+  stop() { return this.lifecycle.run('bridge', () => this.stopUnsafe()) }
+
+  async stopUnsafe() {
     const server = this.server
     this.server = null
     this.origin = ''
     this.token = ''
     this.thinkingContexts.clear()
+    this.upstreamAgent?.destroy()
+    this.upstreamAgent = null
     if (!server) return
     for (const socket of this.sockets) socket.destroy()
     this.sockets.clear()
     await new Promise((resolve) => server.close(() => resolve()))
-    this.upstreamAgent.destroy()
   }
 
   async handle(req, res) {

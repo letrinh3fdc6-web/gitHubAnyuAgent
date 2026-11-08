@@ -10,6 +10,7 @@ const tests = ['test-agent-context.cjs', 'test-agent-workbench.cjs', 'test-agent
 tests.push('test-pets.cjs', 'test-pet-links.cjs', 'test-pet-memory.cjs', 'test-pet-voice-player.cjs', 'test-pet-drag.cjs', 'test-agent-event-log.cjs', 'test-task-storage.cjs')
 tests.push('test-skill-store.cjs', 'test-creative-project.cjs', 'test-creative-studio.cjs', 'test-creative-document.cjs', 'test-creative-integration.cjs')
 tests.push('test-codex-input.cjs')
+tests.push('test-runtime-lifecycle.cjs')
 if (!portable) tests.push('test-context-pi-live.cjs', 'test-runtime-probe-pi-live.cjs', 'test-subagent-pi-live.cjs', 'test-approval-pi-live.cjs', 'test-workbench-pi-live.cjs', 'test-codex-client.cjs', 'test-codex-runtime.cjs', 'test-codex-provider.cjs')
 const commands = [
   ['tools/test-elevation-ipc.cjs'],
@@ -26,7 +27,7 @@ for (const args of commands) {
   report.checks.push({ command: args, passed: result.status === 0 })
   if (result.status !== 0) break
 }
-for (const file of ['main.cjs', 'agent-workbench.cjs', 'workspace-checkpoints.cjs', 'agent-orchestrator.cjs', 'pi-workbench-extension.mjs', 'skill-store.cjs', 'creative-project.cjs', 'creative-studio.cjs', 'creative-document.cjs', 'codex-client.cjs', 'codex-provider.cjs', 'codex-input.cjs', 'codex-tools.cjs', 'codex-runtime.cjs', 'codex-worker.cjs', 'package-lock.json']) report.sources[file] = crypto.createHash('sha256').update(fs.readFileSync(path.join(root, file))).digest('hex')
+for (const file of ['main.cjs', 'runtime-lifecycle.cjs', 'gateway-bridge.cjs', 'agent-session.cjs', 'agent-workbench.cjs', 'workspace-checkpoints.cjs', 'agent-orchestrator.cjs', 'pi-workbench-extension.mjs', 'skill-store.cjs', 'creative-project.cjs', 'creative-studio.cjs', 'creative-document.cjs', 'codex-client.cjs', 'codex-provider.cjs', 'codex-input.cjs', 'codex-tools.cjs', 'codex-runtime.cjs', 'codex-worker.cjs', 'package-lock.json']) report.sources[file] = crypto.createHash('sha256').update(fs.readFileSync(path.join(root, file))).digest('hex')
 report.passed = report.checks.length === commands.length && report.checks.every(check => check.passed)
 const output = path.join(root, 'test-results')
 fs.mkdirSync(output, { recursive: true })

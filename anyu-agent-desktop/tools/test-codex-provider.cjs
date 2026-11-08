@@ -143,6 +143,17 @@ test('explicit Responses catalog never falls back even on protocol mismatch', as
   assert.equal(f.requests.length, 1)
 })
 
+for (const api of ['openai-responses', 'openai-completions', 'google-generative-ai']) test(`${api} omits optional output limits even with a legacy catalog cap`, async t => {
+  const f = await fixture(t, (_req, res) => { res.writeHead(400, { 'Content-Type': 'application/json' }); res.end('{"error":{"message":"fixture completed"}}') }, { id: 'test-model', api, preferNativeResponses: false, maxTokens: 16384 })
+  assert.equal((await f.request({ max_output_tokens: 1024, max_tokens: 2048, max_completion_tokens: 4096 })).status, 400)
+  assert.equal(f.requests.length, 1)
+  const body = f.requests[0].body
+  assert.equal(body.max_tokens, undefined)
+  assert.equal(body.max_completion_tokens, undefined)
+  assert.equal(body.max_output_tokens, undefined)
+  assert.equal(body.generationConfig?.maxOutputTokens, undefined)
+})
+
 test('native requests reuse their upstream connection', async t => {
   const f = await fixture(t, (_, res) => { res.writeHead(200, { 'Content-Type': 'text/event-stream' }); res.end('data: [DONE]\n\n') })
   for (let i = 0; i < 2; i++) await (await f.request()).text()
@@ -231,4 +242,56 @@ test('Claude native stream errors retain their diagnostic after response headers
   assert.match(body, /response.failed/)
   assert.match(body, /Claude fixture overloaded/)
   assert.doesNotMatch(body, /response.completed/)
+})
+
+for (const [maxTokens, contextWindow, expected] of [[16384, 128000, 16384], [128000, 1000000, 128000], [128000, 8192, null]]) test(`Claude output metadata ${maxTokens}/${contextWindow} respects the selected cap and available context`, async t => {
+  const f = await fixture(t, (_req, res) => { res.writeHead(400); res.end('{"type":"error","error":{"type":"invalid_request_error","message":"fixture completed"}}') }, { id: 'claude-sonnet-5-5', api: 'anthropic-messages', preferNativeResponses: false, reasoning: true, maxTokens, contextWindow })
+  f.bridge.getThinking = () => 'xhigh'
+  assert.equal((await f.request()).status, 400)
+  const body = f.requests[0].body
+  if (expected) assert.equal(body.max_tokens, expected)
+  else assert.ok(body.max_tokens > 0 && body.max_tokens < 4096)
+  assert.deepEqual(body.thinking, { type: 'adaptive', display: 'summarized' })
+  assert.equal(body.output_config.effort, 'xhigh')
+})
+
+for (const partialTool of [false, true]) test(`Claude output limit is incomplete, retains history and never executes a truncated tool (${partialTool})`, async t => {
+  const f = await fixture(t, (req, res) => {
+    res.writeHead(200, { 'Content-Type': 'text/event-stream' })
+    const events = [
+      { type: 'message_start', message: { id: 'msg_limited', model: req.body.model, usage: { input_tokens: 10, output_tokens: 0 } } },
+      { type: 'content_block_start', index: 0, content_block: { type: 'thinking', thinking: '' } },
+      { type: 'content_block_delta', index: 0, delta: { type: 'thinking_delta', thinking: 'Public summary.' } },
+      { type: 'content_block_delta', index: 0, delta: { type: 'signature_delta', signature: 'LIMIT_SIGNATURE' } },
+      { type: 'content_block_stop', index: 0 },
+      ...(partialTool ? [
+        { type: 'content_block_start', index: 1, content_block: { type: 'tool_use', id: 'truncated_call', name: 'write', input: {} } },
+        { type: 'content_block_delta', index: 1, delta: { type: 'input_json_delta', partial_json: '{"path":"unsafe.txt","content":"unfinished' } },
+        { type: 'content_block_stop', index: 1 },
+      ] : []),
+      { type: 'content_block_start', index: partialTool ? 2 : 1, content_block: { type: 'text', text: '' } },
+      { type: 'content_block_delta', index: partialTool ? 2 : 1, delta: { type: 'text_delta', text: 'Partial answer.' } },
+      { type: 'content_block_stop', index: partialTool ? 2 : 1 },
+      { type: 'message_delta', delta: { stop_reason: 'max_tokens' }, usage: { output_tokens: 64 } },
+      { type: 'message_stop' },
+    ]
+    res.end(events.map(event => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join(''))
+  }, { id: 'claude-sonnet-5-5', api: 'anthropic-messages', preferNativeResponses: false, reasoning: true, maxTokens: 16384, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } })
+  const body = await (await f.request()).text()
+  const events = body.split('\n').filter(line => line.startsWith('data: ')).map(line => JSON.parse(line.slice(6)))
+  const result = events.find(event => event.type === 'response.incomplete')?.response
+  assert.ok(result, body)
+  assert.equal(result.status, 'incomplete')
+  assert.equal(result.incomplete_details.reason, 'max_output_tokens')
+  assert.equal(result.usage.output_tokens, 64)
+  assert.equal(result.output.find(item => item.type === 'message').content[0].text, 'Partial answer.')
+  assert.equal(result.output.find(item => item.type === 'message').status, 'incomplete')
+  assert.equal(result.output.filter(item => item.type === 'message').length, 1)
+  assert.equal(events.filter(event => event.type === 'response.output_item.added' && event.item.type === 'message').length, 1)
+  assert.ok(!events.some(event => event.item?.type === 'function_call'))
+  assert.doesNotMatch(body, /response.failed|response.completed|function_call_arguments.done/)
+  const history = JSON.parse(Buffer.from(result.output[0].encrypted_content.slice(HISTORY_PREFIX.length), 'base64').toString('utf8'))
+  assert.equal(history.content.find(part => part.type === 'thinking').thinkingSignature, 'LIMIT_SIGNATURE')
+  assert.ok(!history.content.some(part => part.type === 'toolCall'))
+  assert.equal(history.stopReason, 'length')
 })

@@ -52,6 +52,73 @@ test('campaign size validation counts Unicode code points and never truncates id
   assert.throws(() => checkedPlan(input, product()), /超过 6000/)
 })
 
+test('per-image evidence selection survives saving and never injects unrelated or pending claims', () => {
+  const input = campaign()
+  input.items[1].dependsOn = []
+  input.claims = [
+    { id: 'appearance', text: 'A blue outer shell', evidence: 'Product photo', status: 'verified' },
+    { id: 'included-tray', text: 'One included tray', evidence: 'Packing list', status: 'verified' },
+    { id: 'load', text: 'Unverified load rating', status: 'pending' },
+  ]
+  input.items[0].claimIds = ['appearance']; input.items[1].claimIds = []
+  const plan = checkedPlan(input, product())
+  assert.deepEqual(checkedPlan(JSON.parse(JSON.stringify(plan)), product()), plan)
+  const hero = generationPrompt(plan, plan.items[0]), detail = generationPrompt(plan, plan.items[1])
+  assert.ok(hero.includes('A blue outer shell')); assert.ok(!hero.includes('One included tray'))
+  for (const claim of input.claims) assert.ok(!detail.includes(claim.text))
+  assert.ok(!hero.includes('Unverified load rating'))
+  const revised = structuredClone(plan); revised.items[0].claimIds = ['included-tray']
+  assert.notEqual(itemFingerprint(plan, plan.items[0]), itemFingerprint(revised, revised.items[0]))
+  assert.equal(itemFingerprint(plan, plan.items[1]), itemFingerprint(revised, revised.items[1]))
+  const otherFact = structuredClone(plan); otherFact.claims[1].text += ' revised'
+  assert.equal(itemFingerprint(plan, plan.items[0]), itemFingerprint(otherFact, otherFact.items[0]), 'an unselected fact must not discard a completed image')
+  const chosenFact = structuredClone(plan); chosenFact.claims[0].evidence += ' corrected'
+  assert.notEqual(itemFingerprint(plan, plan.items[0]), itemFingerprint(chosenFact, chosenFact.items[0]))
+  assert.equal(itemFingerprint(plan, plan.items[1]), itemFingerprint(chosenFact, chosenFact.items[1]))
+})
+
+test('reference roles follow upload order and distinguish style from actual product identity', () => {
+  const input = campaign(); input.items[1].referenceIds = ['ref-001', 'ref-001', 'ref-002']
+  input.items[1].referenceRoles = [
+    { id: 'hero', role: 'style', instruction: 'Only reuse lighting' },
+    { id: 'ref-002', role: 'style', instruction: 'Only reuse the type hierarchy' },
+    { id: 'ref-001', role: 'detail', instruction: 'Use only the foreground gray variant' },
+  ]
+  const project = { ...product(), references: [{ id: 'ref-001' }, { id: 'ref-002' }] }
+  const plan = checkedPlan(input, project), prompt = generationPrompt(plan, plan.items[1])
+  assert.match(prompt, /参考图1（ref-001）：核对当前商品/)
+  assert.match(prompt, /参考图2（ref-002）：仅学习色彩/)
+  assert.match(prompt, /参考图3（hero）：仅学习色彩/)
+  assert.ok(!prompt.includes('参考图4')); assert.ok(prompt.includes('Use only the foreground gray variant'))
+  assert.ok(!prompt.includes('严格保留所附参考图中的商品结构'), 'style references must not override the product')
+  const revised = structuredClone(plan); revised.items[1].referenceRoles[0].instruction += ' and colors'
+  assert.notEqual(itemFingerprint(plan, plan.items[1]), itemFingerprint(revised, revised.items[1]))
+})
+
+test('new evidence and reference fields reject missing, duplicate, pending and out-of-scope inputs', () => {
+  const valid = () => {
+    const input = campaign()
+    input.claims = [{ id: 'visible', text: 'Visible exterior', evidence: 'Photo', status: 'verified' }, { id: 'unknown', text: 'Unknown material', status: 'pending' }]
+    input.items[0].claimIds = ['visible']
+    input.items[0].referenceRoles = [{ id: 'ref-001', role: 'product', instruction: 'Current SKU' }]
+    return input
+  }
+  for (const change of [
+    plan => { plan.claims[1].id = 'visible' },
+    plan => { plan.claims[0].id = ['visible'] },
+    plan => { plan.items[0].claimIds = ['missing'] },
+    plan => { plan.items[0].claimIds = ['unknown'] },
+    plan => { plan.items[0].claimIds = ['visible', 'visible'] },
+    plan => { plan.items[0].claimIds = null },
+    plan => { plan.items[0].referenceRoles = [] },
+    plan => { plan.items[0].referenceRoles.push(plan.items[0].referenceRoles[0]) },
+    plan => { plan.items[0].referenceRoles[0].id = 'not-uploaded' },
+    plan => { plan.items[0].referenceRoles[0].role = 'anything' },
+    plan => { plan.items[0].referenceRoles[0].instruction = '' },
+    plan => { delete plan.productLock },
+  ]) { const plan = valid(); change(plan); assert.throws(() => checkedPlan(plan, product())) }
+})
+
 test('campaign identity and strategy edits invalidate outputs; independent task edits stay local', () => {
   const input = campaign(); input.items[1].dependsOn = []
   const before = checkedPlan(input, product())

@@ -183,7 +183,10 @@ class CodexProviderBridge {
       const url = new URL(`${this.model.baseUrl.replace(/\/$/, '')}/responses`)
       // Converted providers keep their signatures in private reasoning items.
       // The visible messages/tool calls are already present for native history.
-      const nativeBody = Array.isArray(body.input) ? { ...body, input: body.input.filter(item => !(item.type === 'reasoning' && String(item.encrypted_content || '').startsWith(HISTORY_PREFIX))) } : body
+      const nativeBody = { ...body, ...(Array.isArray(body.input) ? { input: body.input.filter(item => !(item.type === 'reasoning' && String(item.encrypted_content || '').startsWith(HISTORY_PREFIX))) } : {}) }
+      delete nativeBody.max_output_tokens
+      delete nativeBody.max_tokens
+      delete nativeBody.max_completion_tokens
       const data = Buffer.from(JSON.stringify(nativeBody))
       const upstream = (url.protocol === 'https:' ? https : http).request(url, {
         method: 'POST', signal, agent: this.agents[url.protocol],
@@ -252,11 +255,12 @@ class CodexProviderBridge {
           payload.output_config = { ...payload.output_config, effort: limited ? 'high' : level }
         }
         if (claude && payload.thinking && payload.thinking.type !== 'disabled') payload.thinking.display = 'summarized'
-        // Anthropic requires max_tokens. Other protocols keep their upstream
-        // default unless the catalogue explicitly declares an output limit.
-        if (!explicitMax && api !== 'anthropic-messages') {
+        // Only Anthropic requires an explicit output budget. Optional limits
+        // must not inherit an old catalog cap or SDK default.
+        if (api !== 'anthropic-messages') {
           delete payload.max_tokens; delete payload.max_completion_tokens
           if (payload.config) delete payload.config.maxOutputTokens
+          if (payload.generationConfig) delete payload.generationConfig.maxOutputTokens
         }
         return payload
       },
@@ -316,11 +320,15 @@ class CodexProviderBridge {
         await send({ type: 'response.reasoning_summary_text.delta', output_index: 0, item_id: `rs_${id}`, summary_index: 0, delta })
       }
       if (event.type !== 'done') continue
-      if (event.reason === 'length') throw new Error('Model output limit reached before the turn completed')
+      const limited = claude && event.reason === 'length'
+      if (event.reason === 'length' && !limited) throw new Error('Model output limit reached before the turn completed')
       await start()
+      // A token limit is a terminal truncation, not a transient transport error.
+      // Never expose partially generated tool arguments as executable calls.
       const message = event.message
+      const savedMessage = limited ? { ...message, content: message.content.filter(part => part.type !== 'toolCall') } : message
       const summary = thinking ? [{ type: 'summary_text', text: thinking }] : []
-      const history = { id: `rs_${id}`, type: 'reasoning', summary, encrypted_content: HISTORY_PREFIX + Buffer.from(JSON.stringify(message)).toString('base64') }
+      const history = { id: `rs_${id}`, type: 'reasoning', summary, encrypted_content: HISTORY_PREFIX + Buffer.from(JSON.stringify(savedMessage)).toString('base64') }
       const outputItems = new Map([[0, history]])
       for (let i = 0; i < message.content.length; i++) if (message.content[i].type === 'text') await textItem(i)
       let nextToolIndex = items.size + 1
@@ -333,11 +341,11 @@ class CodexProviderBridge {
         const part = message.content[i]
         if (part.type === 'text') {
           const entry = await textItem(i)
-          entry.item.status = 'completed'; entry.item.content[0].text = part.text
+          entry.item.status = limited ? 'incomplete' : 'completed'; entry.item.content[0].text = part.text
           await send({ type: 'response.output_text.done', output_index: entry.index, item_id: entry.item.id, content_index: 0, text: part.text })
           await send({ type: 'response.output_item.done', output_index: entry.index, item: entry.item })
           outputItems.set(entry.index, entry.item)
-        } else if (part.type === 'toolCall') {
+        } else if (part.type === 'toolCall' && !limited) {
           const namespace = context.toolNamespaces.get(part.name)
           const item = { id: `fc_${id}_${i}`, type: 'function_call', call_id: part.id, name: part.name, ...(namespace ? { namespace } : {}), arguments: JSON.stringify(part.arguments), status: 'completed' }
           const index = nextToolIndex++
@@ -349,7 +357,7 @@ class CodexProviderBridge {
       }
       const usage = message.usage || zeroUsage()
       const output = [...outputItems.entries()].sort(([left], [right]) => left - right).map(([, item]) => item)
-      await send({ type: 'response.completed', response: { ...response, status: 'completed', output, usage: { input_tokens: usage.input + usage.cacheRead + usage.cacheWrite, output_tokens: usage.output, total_tokens: usage.totalTokens, input_tokens_details: { cached_tokens: usage.cacheRead }, output_tokens_details: { reasoning_tokens: usage.reasoning || 0 } } } })
+      await send({ type: limited ? 'response.incomplete' : 'response.completed', response: { ...response, status: limited ? 'incomplete' : 'completed', ...(limited ? { incomplete_details: { reason: 'max_output_tokens' } } : {}), output, usage: { input_tokens: usage.input + usage.cacheRead + usage.cacheWrite, output_tokens: usage.output, total_tokens: usage.totalTokens, input_tokens_details: { cached_tokens: usage.cacheRead }, output_tokens_details: { reasoning_tokens: usage.reasoning || 0 } } } })
       res.end()
       return
     }

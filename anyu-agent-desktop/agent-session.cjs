@@ -11,6 +11,7 @@ const fs = require('node:fs')
 const path = require('node:path')
 const crypto = require('node:crypto')
 const { AgentEventLog } = require('./agent-event-log.cjs')
+const { KeyedSerialQueue } = require('./runtime-lifecycle.cjs')
 
 const EVENT_VERSION = 1
 const APPROVAL_TIMEOUT_MS = 10 * 60 * 1000
@@ -83,6 +84,9 @@ class AgentSessionService {
     this.userDataDir = String(options.userDataDir || '')
     if (!this.userDataDir) throw new Error('AgentSessionService requires userDataDir')
     this.startRuntime = options.startRuntime
+    this.isStopping = options.isStopping || (() => false)
+    this.admissions = new KeyedSerialQueue()
+    this.promptAdmissions = new Set()
     this.sendCommand = options.sendCommand
     this.configureThinking = options.configureThinking
     this.beforePrompt = options.beforePrompt
@@ -212,6 +216,11 @@ class AgentSessionService {
 
   async start(payload = {}) {
     const sessionId = safeSessionId(payload.sessionId || payload.conversationId)
+    return this.admissions.run(sessionId, () => this.startUnsafe(payload, sessionId))
+  }
+
+  async startUnsafe(payload, sessionId) {
+    if (this.isStopping()) throw new Error('会话正在停止')
     if (this.runs.has(sessionId) || this.maintenance.has(sessionId)) throw new Error('当前会话仍在运行或压缩，不能更改运行配置')
     const record = this.sessions.get(sessionId) || {
       sessionId,
@@ -277,6 +286,14 @@ class AgentSessionService {
 
   async prompt(payload = {}) {
     const sessionId = safeSessionId(payload.sessionId || payload.conversationId)
+    if (this.runs.has(sessionId) || this.maintenance.has(sessionId) || this.promptAdmissions.has(sessionId)) throw new Error('当前会话仍在运行或压缩，请等待或先停止当前任务')
+    this.promptAdmissions.add(sessionId)
+    try { return await this.admissions.run(sessionId, () => this.promptUnsafe(payload, sessionId)) }
+    finally { this.promptAdmissions.delete(sessionId) }
+  }
+
+  async promptUnsafe(payload, sessionId) {
+    if (this.isStopping()) throw new Error('会话正在停止')
     const record = this.sessions.get(sessionId)
     if (!record) throw new Error('Agent 会话尚未初始化')
     const message = String(payload.message || '')
@@ -285,7 +302,7 @@ class AgentSessionService {
 
     let runtime = this.resolveRuntime?.(record.piSessionPath) || null
     if (!runtime) {
-      await this.start({ ...record, sessionId, cwd: record.cwd, models: record.models || [] })
+      await this.startUnsafe({ ...record, sessionId, cwd: record.cwd, models: record.models || [] }, sessionId)
       runtime = this.resolveRuntime?.(record.piSessionPath) || null
     }
     if (!runtime) throw new Error('Agent 运行时未启动')
@@ -313,7 +330,7 @@ class AgentSessionService {
     try {
       await this.beforePrompt?.(record, run, payload)
       await this.configureThinking?.(runtime, payload.thinkingLevel || 'auto')
-      if (this.runs.get(sessionId) !== run || run.aborting) throw new Error('当前任务已取消')
+      if (this.runs.get(sessionId) !== run || run.aborting || this.isStopping()) throw new Error('当前任务已取消')
       await this.sendCommand({ type: 'prompt', sessionKey: record.piSessionPath, message, ...(run.images.length ? { images: run.images } : {}) }, runtime)
     } catch (error) {
       if (this.runs.get(sessionId) === run) this.finishRun(sessionId, { status: run.aborting ? 'cancelled' : 'failed', error: error?.message || String(error) })
@@ -861,6 +878,13 @@ class AgentSessionService {
         delete current.streamStatus
         current.isStreaming = false
         current.isError = event.status === 'failed'
+        current.isStopped = event.status === 'cancelled'
+        if (current.isStopped) {
+          for (const activity of current.activities) if (activity.status === 'running') {
+            activity.status = 'cancelled'
+            activity.finishedAt = event.at
+          }
+        }
         if (event.error) current.error = event.error
         if (event.text) current.content = event.text
         if (!current.thinking && event.thinking) current.thinking = event.thinking
@@ -887,7 +911,7 @@ class AgentSessionService {
         }
       }
     }
-    return messages.filter((message) => message.role === 'user' || message.content || message.activities?.length || message.subagents?.length || message.isStreaming)
+    return messages.filter((message) => message.role === 'user' || message.content || message.thinking || message.parts?.some(part => part.kind === 'text' && part.content) || message.activities?.length || message.subagents?.length || message.isStreaming)
   }
 
   snapshot(payload = {}) {

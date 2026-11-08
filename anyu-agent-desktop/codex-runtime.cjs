@@ -211,6 +211,9 @@ class CodexRuntime {
     pending.resolve(result)
   }
   finish(error = '', interrupted = false) {
+    if (this.options.model.api === 'anthropic-messages' && /^claude-/i.test(this.options.model.id) && error === 'Incomplete response returned, reason: max_output_tokens') {
+      error = 'Claude reached the output limit (max_output_tokens). Partial output is saved; lower thinking effort or continue in smaller parts.'
+    }
     const wasActive = this.turn || this.starting
     this.turn = null; this.starting = false; this.lastError = ''; this.retryCount = 0
     this.controller?.abort()

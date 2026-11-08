@@ -1,6 +1,6 @@
 {
   "name": "anyu-agent-desktop",
-  "version": "1.0.87",
+  "version": "1.0.88",
   "description": "AnyuAgent standalone desktop workspace",
   "main": "main.cjs",
   "author": "Anyu AI",
@@ -117,6 +117,7 @@
       "tools/auto_edit_worker.py"
     ],
     "files": [
+      "runtime-lifecycle.cjs",
       "codex-*.cjs",
       "agent-context.cjs",
       "release-notes.json",

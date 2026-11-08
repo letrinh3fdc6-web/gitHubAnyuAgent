@@ -29,12 +29,14 @@ async function packageCreativeSkills(destination) {
   const records = []
   for (const skill of catalog.skills) {
     if (!idPattern.test(skill.id) || !catalog.categories.some(category => category.id === skill.category_id)) throw new Error('Invalid creative skill or category')
+    const version = skill.version === undefined ? catalog.version : skill.version
+    if (typeof version !== 'string' || !/^\d+\.\d+\.\d+$/.test(version)) throw new Error('Invalid creative skill version')
     const selected = skill.sources.map(id => { if (!sources[id]) throw new Error('Unknown provenance entry'); return sources[id] })
     const experience = { schema_version: 1, ...skill.experience, required_tools: ['creative_studio'], sources: selected.map(source => ({ name: source.name, url: `https://github.com/${source.repo}/tree/${source.commit}`, license: source.license })) }
     const files = {
       'SKILL.md': await fs.readFile(path.join(sourceRoot, skill.id, 'SKILL.md')),
       'anyu-skill.json': Buffer.from(JSON.stringify(experience, null, 2) + '\n'),
-      'provenance.json': Buffer.from(JSON.stringify({ schema: 1, id: skill.id, version: catalog.version, sources: selected }, null, 2) + '\n'),
+      'provenance.json': Buffer.from(JSON.stringify({ schema: 1, id: skill.id, version, sources: selected }, null, 2) + '\n'),
       'THIRD_PARTY_NOTICES.md': Buffer.from([
         `# ${skill.name}: source and license notices`, '',
         'This is an AnyuAgent adaptation. Host integration, prompts and output contracts are maintained for the current client. No affiliation with or endorsement by the referenced authors is implied.', '',
@@ -57,8 +59,8 @@ async function packageCreativeSkills(destination) {
     }
     const bytes = await archiveFiles(files)
     await decodePackage(bytes)
-    const filename = `${skill.id}-${catalog.version}.zip`
-    const record = { id: skill.id, name: skill.name, description: skill.description, category_id: skill.category_id, sort_order: skill.sort_order, version: catalog.version, sha256: hash(bytes), size: bytes.length, filename, files: Object.fromEntries(Object.entries(files).map(([name, bytes]) => [name, hash(bytes)])) }
+    const filename = `${skill.id}-${version}.zip`
+    const record = { id: skill.id, name: skill.name, description: skill.description, category_id: skill.category_id, sort_order: skill.sort_order, version, sha256: hash(bytes), size: bytes.length, filename, files: Object.fromEntries(Object.entries(files).map(([name, bytes]) => [name, hash(bytes)])) }
     if (destination) { await fs.mkdir(destination, { recursive: true }); await fs.writeFile(path.join(destination, filename), bytes) }
     records.push({ ...record, bytes })
   }

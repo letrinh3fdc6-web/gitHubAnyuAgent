@@ -107,6 +107,11 @@ for (const { api, scenario } of cases) {
     const last = events.filter(event => event.type === 'message_end' && event.message?.role === 'assistant').at(-1)?.message
     assert.equal(last?.stopReason, 'stop')
     assert.equal(last.content.filter(part => part.type === 'text').map(part => part.text).join(''), 'RECOVERED')
+    for (const body of bodies) {
+      assert.equal(body.max_tokens, undefined)
+      assert.equal(body.max_completion_tokens, undefined)
+      assert.equal(body.max_output_tokens, undefined)
+    }
     assert.ok(bodies.every(body => (api === 'openai-responses' ? body.input : body.messages).some(message => Array.isArray(message.content) && message.content.some(part => part.type === (api === 'openai-responses' ? 'input_image' : 'image_url')))))
   })
 }

@@ -123,11 +123,30 @@ async function main() {
   assert.strictEqual(JSON.parse(normalizeManagedRequestBody({ upstreamPath: '/v1/chat/completions' }, chatBody)).reasoning_effort, 'none')
   assert.strictEqual(normalizeManagedRequestBody({ upstreamPath: '/v1/messages' }, offBody), offBody)
   assert.strictEqual(normalizeManagedRequestBody(responsesRoute, Buffer.from('invalid')).toString(), 'invalid')
+  const tool = { name: 'example', input_schema: { properties: { max_tokens: { type: 'number' } } } }
+  for (const path of ['/v1/responses', '/v1/responses/compact', '/v1/chat/completions']) {
+    const body = Buffer.from(JSON.stringify({ model: 'test', max_tokens: 16384, max_completion_tokens: 2048, max_output_tokens: 4096, tools: [tool], reasoning: { effort: 'high' } }))
+    const normalized = JSON.parse(normalizeManagedRequestBody({ upstreamPath: path }, body))
+    assert.deepStrictEqual(normalized, { model: 'test', tools: [tool], reasoning: { effort: 'high' } })
+  }
+  for (const method of ['generateContent', 'streamGenerateContent']) {
+    const body = Buffer.from(JSON.stringify({ contents: [], generationConfig: { maxOutputTokens: 16384, thinkingConfig: { thinkingBudget: 1024 } } }))
+    const normalized = JSON.parse(normalizeManagedRequestBody({ upstreamPath: `/v1beta/models/gemini-test:${method}?alt=sse` }, body))
+    assert.deepStrictEqual(normalized, { contents: [], generationConfig: { thinkingConfig: { thinkingBudget: 1024 } } })
+  }
+  for (const path of ['/v1/messages', '/v1/messages/count_tokens', '/v1beta/models/gemini-test:countTokens']) {
+    const body = Buffer.from('{"max_tokens":65536,"generationConfig":{"maxOutputTokens":1024}}')
+    assert.strictEqual(normalizeManagedRequestBody({ upstreamPath: path }, body), body)
+  }
+  for (const contents of ['null', '[]', '1', '{"model":"test","reasoning":{"effort":"high"}}']) {
+    const body = Buffer.from(contents)
+    assert.strictEqual(normalizeManagedRequestBody(responsesRoute, body), body)
+  }
 
   const response = await fetch(`${baseUrl}/responses`, {
     method: 'POST',
     headers: { Authorization: `Bearer ${local.token}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ model: 'gpt-5.6', input: 'hello' })
+    body: JSON.stringify({ model: 'gpt-5.6', input: 'hello', max_output_tokens: 16384 })
   })
   assert.strictEqual(response.status, 200)
   assert.strictEqual(await response.text(), 'data: first\n\ndata: done\n\n')
@@ -139,6 +158,8 @@ async function main() {
   assert.strictEqual(requests[1].authorization, 'Bearer new-jwt')
   assert.strictEqual(requests[1].group, '17')
   assert.strictEqual(requests[1].model, 'gpt-5.6')
+  assert.deepStrictEqual(JSON.parse(requests[0].body), { model: 'gpt-5.6', input: 'hello' })
+  assert.strictEqual(requests[0].body, requests[1].body)
 
   const normalized = await fetch(`${baseUrl}/responses`, {
     method: 'POST',

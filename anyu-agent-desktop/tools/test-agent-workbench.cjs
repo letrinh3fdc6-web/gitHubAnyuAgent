@@ -22,6 +22,44 @@ async function fixture(t, options = {}) {
   return { wb, directory, cwd, begin, finish }
 }
 
+test('slow billing does not hold the next turn, coalesces and drains on close', async t => {
+  let release
+  let calls = 0
+  const billing = new Promise(resolve => { release = resolve })
+  const h = await fixture(t, { billing: async () => { calls++; return billing } })
+  const task = await h.begin('session', '', { lazyCheckpoint: true })
+  task.requests.push({ id: 'local', serverRequestId: 'server' })
+  try {
+    await h.finish(task)
+    assert.equal(calls, 1)
+    const joined = h.wb.syncBilling(task.id)
+    const next = await h.begin('session', '', { lazyCheckpoint: true })
+    assert.equal(next.status, 'running')
+    assert.equal(calls, 1)
+    let closed = false
+    const closing = h.wb.close().then(() => { closed = true })
+    await new Promise(resolve => setImmediate(resolve))
+    assert.equal(closed, false)
+    release([{ request_id: 'client:server', actual_cost: 0.25 }])
+    await Promise.all([joined, closing])
+    assert.equal(task.requests[0].cost, 0.25)
+  } finally { release([]) }
+})
+
+test('billing response from an old account is not applied after switching', async t => {
+  let owner = '1'
+  let release
+  const pending = new Promise(resolve => { release = resolve })
+  const h = await fixture(t, { getOwner: () => owner, billing: () => pending })
+  const task = await h.begin()
+  task.requests.push({ id: 'local', serverRequestId: 'server' })
+  const sync = h.wb.syncBilling(task.id)
+  owner = '2'
+  release([{ request_id: 'client:server', actual_cost: 9 }])
+  await assert.rejects(sync, /Account changed/)
+  assert.equal(task.requests[0].cost, undefined)
+})
+
 test('durable checkpoints survive a main-process restart and never replay automatically', async t => {
   let resumed = 0
   const h = await fixture(t, { resume: async () => { resumed++; return { ok: true } } })

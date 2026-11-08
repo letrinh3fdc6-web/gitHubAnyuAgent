@@ -7,6 +7,29 @@ const path = require('node:path')
 const { test } = require('node:test')
 const { AgentSessionService } = require('../agent-session.cjs')
 
+test('same-session cold starts serialize metadata and other sessions start independently', async t => {
+  const userDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'anyu-session-start-'))
+  let release
+  const gate = new Promise(resolve => { release = resolve })
+  const starts = []
+  const service = new AgentSessionService({ userDataDir, startRuntime: async options => {
+    starts.push(options)
+    if (options.agentSessionId === 'one' && !options.sessionPath) await gate
+    return { sessionPath: `${options.agentSessionId}.jsonl`, cwd: options.cwd }
+  } })
+  t.after(async () => { release(); await service.flushLogs(); fs.rmSync(userDataDir, { recursive: true, force: true }) })
+  const first = service.start({ sessionId: 'one', model: 'first', cwd: '/project' })
+  const next = service.start({ sessionId: 'one', model: 'next' })
+  await service.start({ sessionId: 'two', model: 'independent' })
+  assert.equal(starts.length, 2)
+  release()
+  await Promise.all([first, next])
+  assert.equal(starts[2].sessionPath, 'one.jsonl')
+  assert.equal(starts[2].cwd, '/project')
+  assert.equal(starts[2].force, true)
+  assert.equal(service.sessions.get('one').model, 'next')
+})
+
 async function createSession(t) {
   const userDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'anyu-session-retry-'))
   t.after(async () => { await service.flushLogs(); fs.rmSync(userDataDir, { recursive: true, force: true }) })
@@ -27,6 +50,23 @@ async function createSession(t) {
   })
   return { service, events, ingest, start, end }
 }
+
+test('cancelled replies keep text, thinking and tools after durable replay', async t => {
+  const { service, ingest, start } = await createSession(t)
+  start()
+  ingest({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'Partial answer' } })
+  ingest({ type: 'message_update', assistantMessageEvent: { type: 'thinking_delta', delta: 'Summary' } })
+  ingest({ type: 'tool_execution_start', toolCallId: 'read-partial', toolName: 'read', args: {} })
+  service.runs.get('retry-test').aborting = true
+  ingest({ type: 'agent_settled' })
+  await service.flushLogs()
+  const replay = new AgentSessionService({ userDataDir: service.userDataDir })
+  const message = replay.snapshot({ sessionId: 'retry-test' }).messages.at(-1)
+  assert.equal(message.content, 'Partial answer')
+  assert.equal(message.thinking, 'Summary')
+  assert.equal(message.isStopped, true)
+  assert.equal(message.activities[0].status, 'cancelled')
+})
 
 test('auto permissions do not restart a runtime that resolves to confirm', async t => {
   const userDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'anyu-session-permission-'))

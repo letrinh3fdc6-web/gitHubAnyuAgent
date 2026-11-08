@@ -110,6 +110,43 @@ test('campaign planning reaches real submission and local edits preserve unrelat
   assert.equal(f.creates(), 4)
 }))
 
+test('scoped campaign facts and reference roles reach submission and survive project restoration', async () => fixture(async f => {
+  await fs.writeFile(path.join(f.cwd, 'product.png'), PNG)
+  await fs.writeFile(path.join(f.cwd, 'style.png'), PNG)
+  const plan = draft(2)
+  plan.productLock = 'Current blue SKU only'
+  plan.claims = [
+    { id: 'outer', text: 'Visible blue shell', evidence: 'Product photo', status: 'verified' },
+    { id: 'bundle', text: 'One included cable', evidence: 'Packing list', status: 'verified' },
+    { id: 'pending', text: 'Unconfirmed battery life', status: 'pending' },
+  ]
+  for (const [index, item] of plan.items.entries()) Object.assign(item, {
+    purpose: index ? 'Inspect the visible surface' : 'Identify the current SKU',
+    camera: index ? 'Macro surface view' : 'Whole product on white',
+    referenceIds: ['ref-001', 'ref-002'], claimIds: index ? [] : ['outer'],
+    referenceRoles: [{ id: 'ref-001', role: 'product', instruction: 'Only the blue SKU' }, { id: 'ref-002', role: 'style', instruction: 'Only the white space and type hierarchy' }],
+  })
+  const project = await f.save(await f.create({ files: ['product.png', 'style.png'] }), plan)
+  const sent = [], original = f.options.create
+  f.options.create = async (fields, files) => { sent.push({ fields, files }); return original(fields) }
+  await f.generate(project); await f.wait(project.projectId)
+  assert.equal(f.creates(), 2)
+  const hero = sent.find(entry => entry.fields.prompt.includes(plan.items[0].purpose))
+  assert.ok(hero.fields.prompt.includes('Visible blue shell'))
+  assert.ok(sent.every(entry => !entry.fields.prompt.includes('One included cable') && !entry.fields.prompt.includes('Unconfirmed battery life')))
+  assert.ok(sent.every(entry => entry.files.length === 2 && entry.fields.prompt.includes('参考图2（ref-002）：仅学习色彩')))
+  const restored = new CreativeStudio(f.options)
+  try {
+    const inspected = await restored.dispatch(f.task, { action: 'inspect', projectId: project.projectId })
+    assert.deepEqual(inspected.plan.items[0].claimIds, ['outer'])
+    assert.deepEqual(inspected.plan.items[1].claimIds, [])
+    assert.equal(inspected.plan.items[0].referenceRoles[1].role, 'style')
+    await restored.dispatch(f.task, { action: 'generate', projectId: project.projectId, revision: project.revision, groupId: 3, model: 'gpt-image-1' })
+    await restored.jobs.get(project.projectId)?.promise
+    assert.equal(f.creates(), 2, 'restoration must not regenerate completed scoped plans')
+  } finally { await restored.close() }
+}))
+
 test('ambiguous submission is never automatically retried and can bind a matching existing remote task', async () => fixture(async f => {
   const original = f.options.create
   f.options.create = async fields => { await original(fields); throw new Error('Connection closed after submission') }

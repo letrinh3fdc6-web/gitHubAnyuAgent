@@ -252,6 +252,45 @@ test('official engine exposes a Claude SSE failure instead of a generic disconne
   assert.ok(f.requests.length <= 3)
 })
 
+for (const thinkingOnly of [false, true]) test(`official engine preserves limited Claude output, does not replay it and can continue after restart (${thinkingOnly})`, { timeout: 40000 }, async t => {
+  const f = await fixture(t, { api: 'anthropic-messages', model: { id: 'claude-sonnet-5-5', reasoning: true, maxTokens: 16384 }, handler: (_req, res, body, n) => {
+    if (n !== 1) return sendResponse(res, 'anthropic-messages', body.model, null, null, 'CONTINUED')
+    res.writeHead(200, { 'Content-Type': 'text/event-stream' })
+    const events = [
+      { type: 'message_start', message: { id: 'msg_limited', model: body.model, usage: { input_tokens: 10, output_tokens: 0 } } },
+      { type: 'content_block_start', index: 0, content_block: thinkingOnly ? { type: 'thinking', thinking: '' } : { type: 'text', text: '' } },
+      { type: 'content_block_delta', index: 0, delta: thinkingOnly ? { type: 'thinking_delta', thinking: 'PARTIAL_MARKER' } : { type: 'text_delta', text: 'PARTIAL_MARKER' } },
+      ...(thinkingOnly ? [{ type: 'content_block_delta', index: 0, delta: { type: 'signature_delta', signature: 'PRIVATE_LIMIT_SIGNATURE' } }] : []),
+      { type: 'content_block_stop', index: 0 },
+      { type: 'content_block_start', index: 1, content_block: { type: 'tool_use', id: 'truncated_call', name: 'write', input: {} } },
+      { type: 'content_block_delta', index: 1, delta: { type: 'input_json_delta', partial_json: '{"path":"unsafe.txt","content":"unfinished' } },
+      { type: 'content_block_stop', index: 1 },
+      { type: 'message_delta', delta: { stop_reason: 'max_tokens' }, usage: { output_tokens: 64 } },
+      { type: 'message_stop' },
+    ]
+    res.end(events.map(event => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join(''))
+  } })
+  await f.command('prompt', { message: 'Write a long response' })
+  const done = await f.event(e => e.type === 'agent_settled')
+  assert.match(done.error, /max_output_tokens/)
+  assert.match(done.error, /lower thinking effort/)
+  assert.doesNotMatch(done.error, /stream disconnected/)
+  assert.equal(f.requests.length, 1, 'A deterministic output limit must not replay the same paid generation')
+  assert.ok(!f.events.some(e => e.type === 'tool_execution_start'))
+  if (thinkingOnly) assert.ok(f.events.some(e => e.type === 'message_update' && e.assistantMessageEvent?.type === 'thinking_delta' && e.assistantMessageEvent.delta === 'PARTIAL_MARKER'))
+  else assert.match(f.events.filter(e => e.type === 'message_end').at(-1).message.content[0].text, /PARTIAL_MARKER/)
+  assert.ok(!JSON.stringify(f.events).includes('PRIVATE_LIMIT_SIGNATURE'))
+  await f.restart()
+  const before = f.events.length
+  await f.command('prompt', { message: 'Continue the partial answer' })
+  const next = await f.event(e => e.type === 'agent_settled' && f.events.indexOf(e) >= before)
+  assert.equal(next.error, '')
+  assert.equal(f.requests.length, 2)
+  assert.match(JSON.stringify(f.requests.at(-1).body), /PARTIAL_MARKER/)
+  if (thinkingOnly) assert.match(JSON.stringify(f.requests.at(-1).body), /PRIVATE_LIMIT_SIGNATURE/)
+  assert.ok(!JSON.stringify(f.requests.at(-1).body).includes('truncated_call'))
+})
+
 for (const api of ['openai-responses', 'openai-completions', 'anthropic-messages', 'google-generative-ai']) {
   test(`official engine: ${api} image + tool + next turn + resume`, { timeout: 50000 }, async t => {
     const f = await fixture(t, { api })

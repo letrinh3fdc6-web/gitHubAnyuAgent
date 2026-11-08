@@ -24,6 +24,7 @@ class AgentWorkbench {
     this.contexts = new Map()
     this.operations = new Map()
     this.pending = new Map()
+    this.billingPending = new Map()
     this.requestLocks = new Map()
     this.snapshotPreparations = new Map()
     this.getOwner = options.getOwner || (() => 'local')
@@ -139,8 +140,9 @@ class AgentWorkbench {
       task.verifiedAt = now()
     }
     task.status = status
-    await this.syncBilling(task.rootId).catch(() => {})
     await this.store.save()
+    // File baselines and verification remain a barrier; remote billing does not.
+    void this.syncBilling(task.rootId).then(() => this.changed(task, 'billing')).catch(error => this.options.log?.(error.message))
     if (!task.parentId) this.options.notify?.(status === 'completed' && task.acceptance !== 'failed' ? 'AnyuAgent 任务完成' : 'AnyuAgent 任务需要处理', bounded(task.input, 80))
   }
 
@@ -277,11 +279,24 @@ class AgentWorkbench {
   }
 
   async syncBilling(rootId) {
-    const tasks = Object.values(this.store.state.tasks).filter(task => task.rootId === rootId && task.owner === String(this.getOwner()))
+    const owner = String(this.getOwner())
+    const key = JSON.stringify([owner, rootId])
+    if (this.billingPending.has(key)) return this.billingPending.get(key)
+    const pending = this.syncBillingForOwner(rootId, owner).finally(() => {
+      if (this.billingPending.get(key) === pending) this.billingPending.delete(key)
+    })
+    this.billingPending.set(key, pending)
+    return pending
+  }
+
+  async syncBillingForOwner(rootId, owner) {
+    const tasks = Object.values(this.store.state.tasks).filter(task => task.rootId === rootId && task.owner === owner)
     const unsettled = tasks.flatMap(task => task.requests).filter(request => request.cost === undefined && request.serverRequestId)
     for (let offset = 0; offset < unsettled.length; offset += 50) {
       const batch = unsettled.slice(offset, offset + 50)
+      if (String(this.getOwner()) !== owner) throw new Error('Account changed during billing refresh')
       const records = await this.options.billing(batch.map(item => `client:${item.serverRequestId}`))
+      if (String(this.getOwner()) !== owner) throw new Error('Account changed during billing refresh')
       for (const request of batch) {
         const matching = records.filter(item => item.request_id === `client:${request.serverRequestId}`)
         if (matching.length) { request.cost = matching.reduce((sum, item) => sum + Number(item.actual_cost || 0), 0); request.settledAt = now() }
@@ -473,6 +488,7 @@ class AgentWorkbench {
   async close() {
     clearInterval(this.timer)
     await Promise.allSettled([...this.pending.values()])
+    await Promise.allSettled([...this.billingPending.values()])
     await this.store.queue
     await this.connectors.close()
     this.server?.closeAllConnections()

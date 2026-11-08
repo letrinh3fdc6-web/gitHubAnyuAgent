@@ -50,6 +50,7 @@ const { prepare: prepareDependencies, dependencyEnvironment, resolvePython } = r
 const { existingBash, shellEnvironment, ensureWindowsShell } = require('./tools/windows-shell-bootstrap.cjs')
 const { LocalGatewayBridge, managedProviderName, managedBaseUrl } = require('./gateway-bridge.cjs')
 const { AgentSessionService } = require('./agent-session.cjs')
+const { KeyedSerialQueue, waitForSpawn, withStartupCancellation } = require('./runtime-lifecycle.cjs')
 const { AgentContextSettings } = require('./agent-context.cjs')
 const { AgentWorkbench } = require('./agent-workbench.cjs')
 const { CreativeStudio, CREATIVE_SKILL_IDS } = require('./creative-studio.cjs')
@@ -383,6 +384,7 @@ const artifactPreviews = new ArtifactPreviews()
 let browserBridge = null
 let browserBridgeToken = ''
 const browserBridgeCwds = new Set()
+const browserBridgeLifecycle = new KeyedSerialQueue()
 let previewProtocolRegistered = false
 let browserHistoryTransition = false
 let auth = null
@@ -398,7 +400,8 @@ const keyCache = new Map()
 const PI_IDLE_RUNTIME_CACHE_SIZE = 4
 const piRuntimes = new Map()
 let piActiveKey = ''
-let piStartLock = Promise.resolve()
+const piStarts = new KeyedSerialQueue()
+let piStartCancellation = new AbortController()
 // 进程启动时刻：用于判断"现在跑的这个主进程是什么时候加载的代码"。
 const processStartedAt = Date.now()
 function activePiRuntime() {
@@ -1687,7 +1690,7 @@ function settlePiRequest(runtime, id, error, value) {
   else pending.resolve(value)
 }
 
-async function stopPiRuntime(runtime) {
+async function stopPiRuntime(runtime, graceMs = 6000) {
   gatewayBridge.removeThinkingContext(runtime.gatewayContext)
   const child = runtime.child
   runtime.child = null
@@ -1697,7 +1700,7 @@ async function stopPiRuntime(runtime) {
     try { child.stdin?.end() } catch {}
     await new Promise(resolve => {
       if (child.exitCode !== null || child.signalCode) return resolve()
-      const timer = setTimeout(resolve, 6000)
+      const timer = setTimeout(resolve, graceMs)
       child.once('exit', () => { clearTimeout(timer); resolve() })
     })
     if (child.exitCode === null && !child.signalCode) {
@@ -1730,7 +1733,17 @@ async function stopPiRuntime(runtime) {
   }
 }
 
-async function stopPi() {
+function stopPi() {
+  if (piStarts.draining) return piStarts.draining
+  const stopping = piStarts.drain(async () => {
+    try { await stopPiUnsafe() }
+    finally { piStartCancellation = new AbortController() }
+  })
+  piStartCancellation.abort()
+  return stopping
+}
+
+async function stopPiUnsafe() {
   piSkillLaunch = null
   await agentOrchestrator?.close()
   try { await agentSessionService?.stopAll() } catch (error) { console.warn('Session log flush failed:', error.message) }
@@ -1748,7 +1761,11 @@ async function stopPi() {
   await agentSessionService?.flushLogs()
 }
 
-async function stopBrowserBridge() {
+function stopBrowserBridge() {
+  return browserBridgeLifecycle.run('bridge', stopBrowserBridgeUnsafe)
+}
+
+async function stopBrowserBridgeUnsafe() {
   const server = browserBridge
   browserBridge = null
   browserBridgeToken = ''
@@ -1756,7 +1773,11 @@ async function stopBrowserBridge() {
   if (server) { server.closeAllConnections(); await new Promise((resolve) => server.close(resolve)) }
 }
 
-async function startBrowserBridge(cwd) {
+function startBrowserBridge(cwd) {
+  return browserBridgeLifecycle.run('bridge', () => startBrowserBridgeUnsafe(cwd))
+}
+
+async function startBrowserBridgeUnsafe(cwd) {
   // 多会话并行后浏览器桥由所有 Pi 子进程共享：令牌保持稳定，只按需登记新的工作区，
   // 否则第二次启动会轮换令牌，让先启动的会话打不开结果文件。
   const realpath = (() => { try { return fs.realpathSync(cwd) } catch { return '' } })()
@@ -1764,7 +1785,7 @@ async function startBrowserBridge(cwd) {
     if (realpath) browserBridgeCwds.add(realpath)
     return { port: browserBridge.address().port, token: browserBridgeToken }
   }
-  await stopBrowserBridge()
+  await stopBrowserBridgeUnsafe()
   browserBridgeToken = crypto.randomBytes(32).toString('hex')
   if (realpath) browserBridgeCwds.add(realpath)
   const token = browserBridgeToken
@@ -1867,8 +1888,10 @@ function evictIdlePiRuntimes(keepKey, allowActiveIdle = false) {
 }
 
 async function startPiUnsafe(options = {}) {
+  const assertStarting = () => { if (options.startupSignal?.aborted) throw new Error('会话启动已取消') }
+  assertStarting()
   const managed = options.accessMode !== 'key'
-  const executable = await getDesktopRuntimes().ensure('pi', piExecutable())
+  const executable = await withStartupCancellation(getDesktopRuntimes().ensure('pi', piExecutable()), options.startupSignal)
   if (!fs.existsSync(executable)) throw new Error(`Pi 运行时不存在：${executable}`)
   const requestedSession = options.sessionPath && isInside(piSessionDir(), options.sessionPath) ? path.resolve(options.sessionPath) : ''
   let savedEngine = null
@@ -1876,7 +1899,8 @@ async function startPiUnsafe(options = {}) {
     try { savedEngine = JSON.parse(fs.readFileSync(requestedSession, 'utf8').split(/\r?\n/)[0]) } catch {}
   }
   const useCodex = savedEngine?.engine === 'codex' || Boolean(options.agentSessionId && !requestedSession)
-  const codexExecutable = useCodex ? await getDesktopRuntimes().ensure('codex', undefined) : undefined
+  const codexExecutable = useCodex ? await withStartupCancellation(getDesktopRuntimes().ensure('codex', undefined), options.startupSignal) : undefined
+  assertStarting()
   const key = requestedSession || `anon:${crypto.randomUUID()}`
   const existing = piRuntimes.get(key)
   if (existing?.compacting) throw new Error('当前会话正在压缩，请等待完成')
@@ -1903,13 +1927,15 @@ async function startPiUnsafe(options = {}) {
     if (!options.background) piActiveKey = key
     // 浏览器桥是所有进程共享的，这里只补登记该会话的工作区（幂等，不会轮换令牌）。
     try { await startBrowserBridge(existing.cwd) } catch {}
+    assertStarting()
     return { ok: true, reused: true, cwd: existing.cwd, sessionDir: piSessionDir(), sessionPath: existing.key, permissionMode: existing.permissionMode }
   }
   // Pi 的 Bash 工具依赖 Git Bash；等待后台安装完成，避免先启动后误选系统 WSL bash.exe。
   if (process.platform === 'win32') {
-    const shell = await startWindowsShellBootstrap().catch((error) => ({ status: 'manual', shellPath: '', error: error?.message || String(error) }))
+    const shell = await withStartupCancellation(startWindowsShellBootstrap().catch((error) => ({ status: 'manual', shellPath: '', error: error?.message || String(error) })), options.startupSignal)
     if (!shell?.shellPath && !existingBash()) console.warn(`[shell] Git Bash 不可用：${shell?.error || '请在设置中安装 Git for Windows'}`)
   }
+  assertStarting()
   if (existing) {
     piRuntimes.delete(key)
     await stopPiRuntime(existing)
@@ -1920,6 +1946,7 @@ async function startPiUnsafe(options = {}) {
   if (managed) {
     if (!auth?.accessToken) throw new Error('登录状态已失效，请重新登录')
     const bridge = await gatewayBridge.start()
+    assertStarting()
     credential = bridge.token
     bridgeOrigin = bridge.origin
   } else {
@@ -1994,7 +2021,11 @@ async function startPiUnsafe(options = {}) {
   const runtime = { key, engine: useCodex ? 'codex' : 'pi', gatewayContext, contextPolicy, contextSignature, buffer: '', pending: new Map(), counter: 0, child: null, inFlightPrompt: false, lastUsedAt: Date.now(), lastEventAt: 0, cwd, permissionMode: resolvedPermissionMode, executionHost }
   let startupStderr = ''
   let stateResponse = null
+  let startupStop = null
+  const cancelStartup = () => { startupStop ||= stopPiRuntime(runtime, 1200) }
   try {
+  assertStarting()
+  options.startupSignal?.addEventListener('abort', cancelStartup, { once: true })
   if (managed) gatewayBridge.setThinkingLevel(gatewayContext, options.thinkingLevel || 'auto')
   const launchOptions = {
     cwd,
@@ -2039,17 +2070,7 @@ async function startPiUnsafe(options = {}) {
       if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('pi:exit', { code, sessionKey: runtime.key })
     }
   })
-  await new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error(`Pi Agent 启动超时${startupStderr.trim() ? `: ${startupStderr.trim().slice(-1200)}` : ''}`)), 12000)
-    const fail = (error) => { clearTimeout(timer); reject(error) }
-    child.once('error', fail)
-    child.once('exit', (code, signal) => { fail(new Error(`Pi Agent 启动失败 (${code ?? signal ?? 'unknown'})${startupStderr.trim() ? `: ${startupStderr.trim().slice(-1200)}` : ''}`)) })
-    const check = () => {
-      if (child.exitCode !== null) { fail(new Error(`Pi Agent 启动失败 (${child.exitCode})${startupStderr.trim() ? `: ${startupStderr.trim().slice(-1200)}` : ''}`)); return }
-      if (runtime.child === child) { clearTimeout(timer); resolve() } else setTimeout(check, 60)
-    }
-    setTimeout(check, 120)
-  })
+  await waitForSpawn(child, { detail: () => startupStderr.trim() ? `: ${startupStderr.trim().slice(-1200)}` : '' })
   if (useCodex) {
     const configured = configuredModels.providers[provider]?.models.find(model => model.id === selectedModelId)
     if (!configured) throw new Error('所选模型没有可用的运行时配置，请刷新模型目录')
@@ -2067,9 +2088,12 @@ async function startPiUnsafe(options = {}) {
   if (!options.background) piSkillLaunch = skillLaunch
   } catch (error) {
     // 启动失败只清理这个会话自己的进程，不能连坐正在跑任务的后台会话。
-    await stopPiRuntime(runtime)
+    await (startupStop || stopPiRuntime(runtime))
     throw error
+  } finally {
+    options.startupSignal?.removeEventListener('abort', cancelStartup)
   }
+  if (options.startupSignal?.aborted) { await (startupStop || stopPiRuntime(runtime)); throw new Error('会话启动已取消') }
   piRuntimes.set(key, runtime)
   // 匿名键对齐：新会话没有预建文件，Pi 启动后才有真实 sessionFile，
   // 把运行时重挂到真实路径上，后续事件才能和渲染层的 sessionPath 对上。
@@ -2095,7 +2119,7 @@ async function startPiUnsafe(options = {}) {
   }
   // 保存可复用的启动参数，权限档位切换时由主进程重启同一会话。
   // force 和恢复标记只属于当前调用，不能带进下一次重启。
-  const { force: _force, __sessionRecoveryAttempt: _recoveryAttempt, ...startOptions } = options
+  const { force: _force, __sessionRecoveryAttempt: _recoveryAttempt, startupSignal: _startupSignal, ...startOptions } = options
   runtime.startOptions = {
     ...startOptions,
     sessionPath: finalKey,
@@ -2179,14 +2203,11 @@ async function autoEditAnalyze(payload = {}) {
 }
 
 async function startPi(options = {}) {
-  const execute = async () => {
-    // 启动失败只影响这一个会话（startPiUnsafe 已自行清理新起的进程），
-    // 不能再调用 stopPi() 把其它会话正在跑的任务一起杀掉。
-    return startPiWithRecovery(options)
-  }
-  const run = piStartLock.then(execute, execute)
-  piStartLock = run.catch(() => {})
-  return run
+  if (isQuitting) throw new Error('应用正在退出')
+  const sessionPath = options.sessionPath ? path.resolve(options.sessionPath) : ''
+  const key = sessionPath ? (process.platform === 'win32' ? sessionPath.toLowerCase() : sessionPath) : options.agentSessionId || crypto.randomUUID()
+  const startupSignal = piStartCancellation.signal
+  return piStarts.run(key, () => startPiWithRecovery({ ...options, startupSignal }))
 }
 
 let permissionChangeLock = Promise.resolve()
@@ -3081,6 +3102,7 @@ app.whenReady().then(async () => {
   // directly for the desktop workspace.
   agentSessionService = new AgentSessionService({
     userDataDir: app.getPath('userData'),
+    isStopping: () => Boolean(piStarts.draining || isQuitting),
     startRuntime: (options) => startPi(options),
     beforePrompt: (record, run, payload) => agentWorkbench.begin(record, run, { ...payload, lazyCheckpoint: true }),
     sendCommand: (command, runtime) => sendPi(command, runtime),

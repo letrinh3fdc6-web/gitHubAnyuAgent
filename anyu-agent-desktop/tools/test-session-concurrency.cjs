@@ -7,6 +7,7 @@ const path = require('node:path')
 const vm = require('node:vm')
 const { test } = require('node:test')
 const { AgentSessionService } = require('../agent-session.cjs')
+const { withStartupCancellation } = require('../runtime-lifecycle.cjs')
 
 const source = fs.readFileSync(path.join(__dirname, '../main.cjs'), 'utf8')
 const evictionStart = source.indexOf('function evictIdlePiRuntimes(')
@@ -43,6 +44,7 @@ function host() {
     sessionWorkingDirectory: () => path.resolve('test-workspace'),
     resolvePermissionMode: () => 'full', runtimeExecutionHost: () => 'standard',
     startBrowserBridge: async () => {},
+    withStartupCancellation,
   }
   vm.runInNewContext(`${source.slice(evictionStart, startRuntimeEnd)}
     this.evict = evictIdlePiRuntimes; this.startRuntime = startPiUnsafe`, context)

@@ -31,6 +31,10 @@ function checkedPlan(input, project) {
     claims: list(input.claims, 50, item => {
       if (!item || !['verified', 'pending'].includes(item.status)) throw new Error('商品证据状态无效')
       const claim = { text: text(item.text, 500, '商品表述', true), evidence: text(item.evidence, 1000, '证据来源'), status: item.status }
+      if (item.id !== undefined) {
+        if (typeof item.id !== 'string' || !ID.test(item.id)) throw new Error('商品证据标识无效')
+        claim.id = item.id
+      }
       if (claim.status === 'verified' && !claim.evidence) throw new Error('已核实的商品表述必须填写证据来源')
       return claim
     }, '商品证据'),
@@ -50,6 +54,14 @@ function checkedPlan(input, project) {
         onImageText: list(item.onImageText, 12, value => text(value, 240, '图中文字', true), '图中文字'),
         size: text(item.size, 40, '尺寸') || 'auto', quality: item.quality || 'auto',
       }
+      if (item.claimIds !== undefined) result.claimIds = list(item.claimIds, 50, id => {
+        if (typeof id !== 'string' || !ID.test(id)) throw new Error('本图证据标识无效')
+        return id
+      }, '本图证据')
+      if (item.referenceRoles !== undefined) result.referenceRoles = list(item.referenceRoles, 20, reference => {
+        if (!reference || typeof reference.id !== 'string' || !ID.test(reference.id) || !['product', 'detail', 'style'].includes(reference.role)) throw new Error('参考图用途无效')
+        return { id: reference.id, role: reference.role, instruction: text(reference.instruction, 500, '参考图具体用途', true) }
+      }, '参考图用途')
       if (!['auto', 'low', 'medium', 'high'].includes(result.quality) || !/^(auto|[0-9]{3,5}x[0-9]{3,5}|[0-9]{1,2}:[0-9]{1,2}|[124]K)$/i.test(result.size)) throw new Error('图片尺寸或质量无效')
       if (item.duration !== undefined) {
         if (!Number.isFinite(item.duration) || item.duration < 0.2 || item.duration > 120) throw new Error('镜头时长必须为 0.2 至 120 秒')
@@ -75,6 +87,29 @@ function checkedPlan(input, project) {
         if (seen.has(key)) throw new Error(`图片 ${item.id} 与 ${seen.get(key)} 的${label}重复；请明确不同的信息任务，或合并为一张`)
         seen.set(key, item.id)
       }
+    }
+  }
+  const claimsByID = new Map()
+  for (const claim of plan.claims) if (claim.id) {
+    if (claimsByID.has(claim.id)) throw new Error(`商品证据标识重复：${claim.id}`)
+    claimsByID.set(claim.id, claim)
+  }
+  for (const item of plan.items) {
+    if (item.claimIds !== undefined || item.referenceRoles !== undefined) {
+      if (!plan.productLock) throw new Error('本图证据与参考用途需要电商 productLock 计划')
+    }
+    if (item.claimIds) {
+      if (new Set(item.claimIds).size !== item.claimIds.length) throw new Error(`图片 ${item.id} 的证据标识重复`)
+      for (const id of item.claimIds) if (claimsByID.get(id)?.status !== 'verified') throw new Error(`图片 ${item.id} 的证据 ${id} 不存在或尚未核实`)
+    }
+    if (item.referenceRoles) {
+      const selected = new Set([...item.referenceIds, ...item.dependsOn])
+      const roles = new Set()
+      for (const reference of item.referenceRoles) {
+        if (!selected.has(reference.id) || roles.has(reference.id)) throw new Error(`图片 ${item.id} 的参考用途重复或未被本图引用：${reference.id}`)
+        roles.add(reference.id)
+      }
+      if (roles.size !== selected.size) throw new Error(`图片 ${item.id} 请为每张已引用素材填写参考用途`)
     }
   }
   if (!plan.items.length) throw new Error('计划至少包含一张图片或一个分镜')
@@ -105,7 +140,8 @@ function itemFingerprint(plan, item, cache = new Map()) {
     if (!dependency) throw new Error('图片依赖不存在')
     return itemFingerprint(plan, dependency, cache)
   })
-  const context = plan.productLock ? { productLock: plan.productLock, objective: plan.objective, audience: plan.audience, platform: plan.platform, claims: plan.claims } : undefined
+  const claims = item.claimIds === undefined ? plan.claims : plan.claims.filter(claim => claim.status === 'verified' && item.claimIds.includes(claim.id))
+  const context = plan.productLock ? { productLock: plan.productLock, objective: plan.objective, audience: plan.audience, platform: plan.platform, claims } : undefined
   const fingerprint = hash({ styleLock: plan.styleLock, constraints: plan.constraints, item, dependencies, context })
   cache.set(item.id, fingerprint)
   return fingerprint
@@ -124,8 +160,13 @@ function generationPrompt(plan, item) {
     ...[
       ...[...new Set(item.referenceIds)].map(id => [id, '原始素材，按本图描述核对商品外观与真实结构']),
       ...[...new Set(item.dependsOn)].map(id => [id, '已生成的参考图，只继承本图明确需要的商品细节或风格，不默认继承其背景、文案、摆位和构图']),
-    ].map(([id, role], index) => `参考图${index + 1}（${id}）：${role}。`),
-    ...plan.claims.filter(claim => claim.status === 'verified').map(claim => `已确认事实（仅在与本图任务相关时使用）：${claim.text}；依据：${claim.evidence}`),
+    ].map(([id, role], index) => {
+      const usage = item.referenceRoles?.find(reference => reference.id === id)
+      if (!usage) return `参考图${index + 1}（${id}）：${role}。`
+      const rule = usage.role === 'style' ? '仅学习色彩、光线和排版节奏，不继承参考商品、品牌、文字、参数或配件' : usage.role === 'detail' ? '核对当前商品已拍到的真实细节，不推测背面或内部结构' : '核对当前商品与SKU身份，不继承背景、促销信息或未选中的其他款式'
+      return `参考图${index + 1}（${id}）：${rule}；本图取用：${usage.instruction}。`
+    }),
+    ...plan.claims.filter(claim => claim.status === 'verified' && (item.claimIds === undefined || item.claimIds.includes(claim.id))).map(claim => `已确认事实（仅在与本图任务相关时使用）：${claim.text}；依据：${claim.evidence}`),
     '不得补造参数、功效、认证、内部结构或对比结果；资料没有证实的内容不进入画面。策略、参考编号与证据备注不作为图中文字。',
   ] : []
   return [
@@ -135,7 +176,7 @@ function generationPrompt(plan, item) {
     plan.constraints && `全局禁止项：${plan.constraints}`,
     item.negativePrompt && `当前图片禁止项：${item.negativePrompt}`,
     item.onImageText.length ? `只允许以下已经确认的图中文字，逐字保留：${item.onImageText.join('；')}` : '不要添加未要求的文字、Logo、水印或虚构认证。',
-    item.referenceIds.length || item.dependsOn.length ? '严格保留所附参考图中的商品结构、角色身份及对应的外观特征；不得混淆角色或改变商品。' : '',
+    item.referenceIds.length || item.dependsOn.length ? item.referenceRoles ? '商品身份只取自标为商品或细节的素材，并遵守商品保真约束；风格参考不能改变商品或引入其他SKU。' : '严格保留所附参考图中的商品结构、角色身份及对应的外观特征；不得混淆角色或改变商品。' : '',
   ].filter(Boolean).join('\n\n')
 }
 

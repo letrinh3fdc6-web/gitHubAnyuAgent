@@ -24,6 +24,8 @@ test('six self-contained licensed skill packages are reproducible and install wi
       assert.equal(experience.schema_version, 1); assert.deepEqual(experience.required_tools, ['creative_studio'])
       assert.ok(experience.steps.length >= 4); assert.ok(experience.examples.length >= 3)
       const provenance = JSON.parse(files.get('provenance.json'))
+      assert.equal(provenance.version, skill.version)
+      assert.equal(skill.filename, `${skill.id}-${skill.version}.zip`)
       for (const source of provenance.sources) {
         assert.match(source.commit, /^[a-f0-9]{40}$/)
         assert.match(files.get(`licenses/${source.license_file}`).toString('utf8'), /Permission is hereby granted/)
