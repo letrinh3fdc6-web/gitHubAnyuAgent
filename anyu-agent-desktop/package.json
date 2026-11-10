@@ -1,6 +1,6 @@
 {
   "name": "anyu-agent-desktop",
-  "version": "1.0.88",
+  "version": "1.0.89",
   "description": "AnyuAgent standalone desktop workspace",
   "main": "main.cjs",
   "author": "Anyu AI",
@@ -154,6 +154,7 @@
       "skill-analysis.cjs",
       "skill-manager.cjs",
       "skill-store.cjs",
+      "skill-updates.cjs",
       "video-studio.cjs",
       "creative-*.cjs",
       "agent-session.cjs",

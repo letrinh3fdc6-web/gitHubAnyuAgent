@@ -82,7 +82,7 @@ test('main-process startup cancels each pending session before shutdown and can 
   const starts = []
   let cleanups = 0
   const context = {
-    KeyedSerialQueue, AbortController, path, crypto, process, isQuitting: false,
+    KeyedSerialQueue, AbortController, path, crypto, process, isQuitting: false, skillUpdater: null, withStartupCancellation,
     piStarts: new KeyedSerialQueue(), piStartCancellation: new AbortController(),
     startPiWithRecovery: options => {
       starts.push(options.agentSessionId)
@@ -103,6 +103,14 @@ test('main-process startup cancels each pending session before shutdown and can 
   assert.equal(cleanups, 1)
   assert.equal(context.piStarts.tails.size, 0)
   assert.equal(await context.startPi({ agentSessionId: 'next-login', ready: true }), 'ready')
+  const replacement = deferred()
+  context.skillUpdater = { commit: replacement.promise, waitForCommit: () => replacement.promise }
+  const queued = assert.rejects(context.startPi({ agentSessionId: 'waiting-for-skill', ready: true }), /cancelled/)
+  await context.stopPi()
+  await queued
+  replacement.resolve()
+  await new Promise(resolve => setImmediate(resolve))
+  assert(!starts.includes('waiting-for-skill'), 'An interrupted skill wait must not start a runtime after logout')
 })
 
 test('concurrent gateway starts share one listener and token across stop/restart', async t => {

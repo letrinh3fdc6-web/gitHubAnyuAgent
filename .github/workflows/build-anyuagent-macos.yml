@@ -178,17 +178,17 @@ jobs:
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: anyuagent-v1.0.88
+          tag_name: anyuagent-v1.0.89
           target_commitish: ${{ github.sha }}
-          name: AnyuAgent 1.0.88
+          name: AnyuAgent 1.0.89
           draft: true
           make_latest: false
           body: |
-            AnyuAgent 1.0.88 updates conversation input handling, large project history loading, creative project recovery and the recharge panel. Existing creative skills, persistent projects and restart recovery remain available. Public video-studio runtime packages are not included.
+            AnyuAgent 1.0.89 synchronizes the current workspace, improves login startup, creative project placement and online skill updates. Existing creative workflows, persistent projects and restart recovery remain available. Public video-studio runtime packages are not included.
 
             macOS downloads include separate Apple Silicon and Intel DMG/ZIP packages. Each package includes a matching native runtime. These packages are unsigned and are not notarized.
 
-            Windows download: https://x.ailzd.com/downloads/AnyuAgent-Setup-1.0.88.exe
+            Windows download: https://x.ailzd.com/downloads/AnyuAgent-Setup-1.0.89.exe
           files: |
             release-assets/*.dmg
             release-assets/*.zip

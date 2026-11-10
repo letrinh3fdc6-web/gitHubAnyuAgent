@@ -9,9 +9,10 @@ const {VideoStudio} = require('../video-studio.cjs')
 
 test('frozen runtime downloads into a clean user directory, renders and transcribes with portable dependencies', {timeout: 600000}, async t => {
   const repository = path.resolve(__dirname, '../../../..')
-  const output = path.join(repository, 'outputs/anyu-video-studio-internal')
-  const build = process.env.ANYU_VIDEO_PACKAGE_DIR || path.join(output, 'build'), runtime = 'anyu-video-studio-0.1.0-win32-x64-internal.zip'
-  const manifest = JSON.parse(await fs.readFile(path.join(build, `${runtime}.manifest.json`), 'utf8'))
+  const output = process.env.ANYU_VIDEO_TEST_OUTPUT || path.join(repository, 'outputs/anyu-video-studio-internal')
+  const build = process.env.ANYU_VIDEO_PACKAGE_DIR || path.join(repository, 'outputs/anyu-video-studio-internal/build')
+  const manifest = JSON.parse(await fs.readFile(path.join(build, 'skill-package/ANYU_RUNTIME.json'), 'utf8'))
+  const runtime = path.basename(manifest.platforms['win32-x64'].path)
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'anyu完整安装 '))
   const requests = [], progress = []
   const server = http.createServer(async (req, res) => {

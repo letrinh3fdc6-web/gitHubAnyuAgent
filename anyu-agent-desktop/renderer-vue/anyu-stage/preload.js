@@ -1,4 +1,4 @@
-(() => {
+window.addEventListener('anyu:app-ready', () => requestAnimationFrame(() => requestAnimationFrame(() => {
   const route = location.pathname.replace(/\/+$/, '') || '/'
   if (!['/', '/home'].includes(route)) return
   if (window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) return
@@ -14,4 +14,4 @@
     link.fetchPriority = 'low'
     document.head.appendChild(link)
   }
-})()
+})), { once: true })

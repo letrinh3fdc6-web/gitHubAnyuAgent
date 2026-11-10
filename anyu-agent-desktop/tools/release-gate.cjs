@@ -8,7 +8,7 @@ const root = path.resolve(__dirname, '..')
 const portable = process.argv.includes('--portable')
 const tests = ['test-agent-context.cjs', 'test-agent-workbench.cjs', 'test-agent-connectors.cjs', 'test-workbench-integration.cjs', 'test-agent-session.cjs', 'test-session-concurrency.cjs', 'test-agent-orchestrator.cjs', 'test-runtime-probe.cjs', 'test-auth-memory.cjs']
 tests.push('test-pets.cjs', 'test-pet-links.cjs', 'test-pet-memory.cjs', 'test-pet-voice-player.cjs', 'test-pet-drag.cjs', 'test-agent-event-log.cjs', 'test-task-storage.cjs')
-tests.push('test-skill-store.cjs', 'test-creative-project.cjs', 'test-creative-studio.cjs', 'test-creative-document.cjs', 'test-creative-integration.cjs')
+tests.push('test-skill-store.cjs', 'test-skill-updates.cjs', 'test-creative-project.cjs', 'test-creative-studio.cjs', 'test-creative-document.cjs', 'test-creative-integration.cjs')
 tests.push('test-codex-input.cjs')
 tests.push('test-runtime-lifecycle.cjs')
 if (!portable) tests.push('test-context-pi-live.cjs', 'test-runtime-probe-pi-live.cjs', 'test-subagent-pi-live.cjs', 'test-approval-pi-live.cjs', 'test-workbench-pi-live.cjs', 'test-codex-client.cjs', 'test-codex-runtime.cjs', 'test-codex-provider.cjs')

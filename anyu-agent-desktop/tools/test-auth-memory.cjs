@@ -18,6 +18,7 @@ function harness(t, requestApi = async () => { throw new Error('Unexpected netwo
   function launch(gateway = 'https://x.ailzd.com', filesystem = fs) {
     const context = {
       fs: filesystem, path, Buffer, process, Date, auth: null, authGeneration: 0, authRefreshPromise: null, desktopPets: null,
+      skillAuthEpoch: 0, skillUpdater: null,
       GATEWAY_BASE: gateway, app: { getPath: () => directory }, requestApi,
       safeStorage: { isEncryptionAvailable: () => true, encryptString: value => Buffer.from(value.split('').reverse().join('')), decryptString: value => value.toString().split('').reverse().join('') },
     }
@@ -40,6 +41,23 @@ test('reopening restores encrypted credentials without a network round trip', as
   assert.equal(state.accessToken, original.accessToken)
   assert.equal(state.refreshToken, original.refreshToken)
   assert.equal(state.expiresAt, JSON.parse(Buffer.from(original.accessToken.split('.')[1], 'base64url')).exp * 1000)
+})
+
+test('new logins schedule skill synchronization while token rotations preserve its session identity', async t => {
+  const h = harness(t)
+  const runtime = h.launch()
+  let scheduled = 0
+  runtime.skillUpdater = { state: { status: 'ready' }, schedule: () => { scheduled++ } }
+  runtime.saveAuth(saved())
+  assert.equal(scheduled, 1)
+  const epoch = runtime.skillAuthEpoch
+  runtime.saveAuth({ ...runtime.auth, accessToken: 'rotated-token' })
+  assert.equal(scheduled, 1)
+  assert.equal(runtime.skillAuthEpoch, epoch)
+  runtime.clearAuth()
+  runtime.saveAuth(saved())
+  assert.equal(scheduled, 2)
+  assert(runtime.skillAuthEpoch > epoch)
 })
 
 test('expired access tokens rotate once for simultaneous UI and model requests', async t => {

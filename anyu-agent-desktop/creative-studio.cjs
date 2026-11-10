@@ -91,6 +91,7 @@ class CreativeStudio {
   summary(project) {
     return {
       projectId: project.id, sessionId: project.sessionId || '', name: project.name, kind: project.kind, revision: project.revision,
+      originRunId: project.originRunId || '', createdAt: project.createdAt,
       directory: project.directory, planFile: path.join(project.directory, 'creative-plan.json'),
       scriptFile: project.script ? path.join(project.directory, 'source', 'script.txt') : '',
       scriptInfo: project.scriptInfo || null, references: project.references.map(({ originalPath, ...reference }) => reference),
@@ -152,7 +153,7 @@ class CreativeStudio {
       preparedReferences.push({ bytes, reference: { id: refID, file: relative, name: path.basename(file), mimeType: type.mime, sha256: crypto.createHash('sha256').update(bytes).digest('hex'), bytes: bytes.length, originalPath: file } })
     }
     await fs.mkdir(directory, { recursive: true })
-    const project = { schema: 1, id, owner, sessionId: task.sessionId, cwd, relativeRoot, directory, name, kind: input.kind, brief: String(input.brief || '').trim(), script, scriptInfo, references: [], plan: null, revision: 0, outputs: {}, history: [], createdAt: now(), updatedAt: now() }
+    const project = { schema: 1, id, owner, sessionId: task.sessionId, originRunId: task.id || '', cwd, relativeRoot, directory, name, kind: input.kind, brief: String(input.brief || '').trim(), script, scriptInfo, references: [], plan: null, revision: 0, outputs: {}, history: [], createdAt: now(), updatedAt: now() }
     for (const { bytes, reference } of preparedReferences) {
       const relative = reference.file
       const target = await this.projectFile(project, relative)

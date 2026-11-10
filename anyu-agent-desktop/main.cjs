@@ -12,6 +12,7 @@ const path = require('path')
 const os = require('os')
 const crypto = require('crypto')
 const skillStore = require('./skill-store.cjs')
+const { SkillUpdater } = require('./skill-updates.cjs')
 const { VideoStudio } = require('./video-studio.cjs')
 const dns = require('node:dns')
 const net = require('node:net')
@@ -958,6 +959,19 @@ function closeBrowserView() {
 
 let desktopUpdater = null
 let updateRendererBusy = false
+let skillUpdater = null
+let skillAuthEpoch = 0
+const skillInstalls = new Set()
+
+function skillUpdateBusy() {
+  return isQuitting || updateRendererBusy || Boolean(agentSessionService?.runs.size) ||
+    Boolean(agentSessionService?.promptAdmissions.size) || Boolean(agentSessionService?.maintenance.size) ||
+    Boolean(piStarts.tails.size) || analysisControllers.size > 0 || Boolean(creativeStudio?.jobs.size) ||
+    Boolean(videoStudio?.pending.size) || Boolean(videoStudio?.installing) || Boolean(videoStudio?.modelInstalling) ||
+    Boolean(agentOrchestrator?.children.size) || Boolean(agentOrchestrator?.childQueue.length) ||
+    [...piRuntimes.values()].some(runtime => runtime.inFlightPrompt || runtime.compacting) ||
+    ['waiting', 'preparing', 'installing', 'restarting'].includes(desktopUpdater?.state.phase)
+}
 
 function getDesktopUpdater() {
   if (!desktopUpdater) desktopUpdater = new DesktopUpdater({
@@ -965,7 +979,7 @@ function getDesktopUpdater() {
     manifestUrl: UPDATE_MANIFEST_URL,
     localOnly: LOCAL_ONLY_API && !process.env.ANYU_UPDATE_MANIFEST_URL,
     emit: sendUpdateProgress,
-    isBusy: () => updateRendererBusy || Boolean(agentSessionService?.runs.size) || analysisControllers.size > 0 || Boolean(creativeStudio?.jobs.size),
+    isBusy: () => updateRendererBusy || Boolean(agentSessionService?.runs.size) || analysisControllers.size > 0 || Boolean(creativeStudio?.jobs.size) || Boolean(skillUpdater?.commit) || skillInstalls.size > 0,
     quit: () => { isQuitting = true; app.quit() }
   })
   return desktopUpdater
@@ -998,6 +1012,7 @@ function saveAuth(data) {
   const previousOwner = auth?.user?.id
   if (data.accessToken !== auth?.accessToken || data.refreshToken !== auth?.refreshToken) authGeneration++
   auth = data
+  if (previousOwner !== data.user?.id) skillAuthEpoch++
   if (previousOwner !== data.user?.id) desktopPets?.sync()
   const out = { apiBase: GATEWAY_BASE, accessToken: protect(data.accessToken), refreshToken: protect(data.refreshToken), aiHubAccessToken: protect(data.aiHubAccessToken), user: data.user || null }
   fs.mkdirSync(path.dirname(authFile()), { recursive: true })
@@ -1006,9 +1021,11 @@ function saveAuth(data) {
     fs.writeFileSync(temporary, JSON.stringify(out), { mode: 0o600 })
     fs.renameSync(temporary, authFile())
   } finally { try { fs.rmSync(temporary, { force: true }) } catch {} }
+  if (previousOwner !== data.user?.id || skillUpdater?.state.status === 'idle') skillUpdater?.schedule()
 }
 
 function clearAuth() {
+	skillAuthEpoch++
 	authGeneration++
 	auth = null
 	desktopPets?.sync()
@@ -2204,9 +2221,11 @@ async function autoEditAnalyze(payload = {}) {
 
 async function startPi(options = {}) {
   if (isQuitting) throw new Error('应用正在退出')
+  const startupSignal = piStartCancellation.signal
+  if (skillUpdater?.commit) await withStartupCancellation(skillUpdater.waitForCommit(), startupSignal)
+  if (isQuitting) throw new Error('应用正在退出')
   const sessionPath = options.sessionPath ? path.resolve(options.sessionPath) : ''
   const key = sessionPath ? (process.platform === 'win32' ? sessionPath.toLowerCase() : sessionPath) : options.agentSessionId || crypto.randomUUID()
-  const startupSignal = piStartCancellation.signal
   return piStarts.run(key, () => startPiWithRecovery({ ...options, startupSignal }))
 }
 
@@ -3104,7 +3123,10 @@ app.whenReady().then(async () => {
     userDataDir: app.getPath('userData'),
     isStopping: () => Boolean(piStarts.draining || isQuitting),
     startRuntime: (options) => startPi(options),
-    beforePrompt: (record, run, payload) => agentWorkbench.begin(record, run, { ...payload, lazyCheckpoint: true }),
+    beforePrompt: async (record, run, payload) => {
+      await skillUpdater?.waitForCommit()
+      return agentWorkbench.begin(record, run, { ...payload, lazyCheckpoint: true })
+    },
     sendCommand: (command, runtime) => sendPi(command, runtime),
     configureThinking: async (runtime, level) => {
       gatewayBridge.setThinkingLevel(runtime?.gatewayContext, level)
@@ -3191,6 +3213,16 @@ app.whenReady().then(async () => {
     log: message => console.error('[video-studio]', message),
   })
   // Existing local skills remain intact; new skills come from the server store on demand.
+  skillUpdater = new SkillUpdater({
+    manager: skillManager,
+    catalog: () => requestApi('/anyu-agent/skill-store'),
+    download: skill => downloadStoreSkill(skill.id, skill),
+    owner: () => auth?.accessToken && auth?.user?.id ? `${skillAuthEpoch}:${auth.user.id}` : '',
+    isBusy: skillUpdateBusy,
+    locks: skillInstalls,
+    emit: state => { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('skills:update-progress', state) },
+  })
+  skillUpdater.schedule(3000)
   // Bash 是 Pi 编程工具的基础环境。后台准备，不阻塞窗口首屏；已有 Git Bash 直接复用。
   setTimeout(() => { void startWindowsShellBootstrap() }, 1200)
   // 环境准备放到首屏之后后台执行，不阻塞窗口打开；中断后下次启动会继续检查。
@@ -3559,9 +3591,10 @@ app.whenReady().then(async () => {
     await stopPiRuntime(target)
     return { ok: true }
   })
-  ipcMain.handle('pi:command', (_, command) => {
+  ipcMain.handle('pi:command', async (_, command) => {
     const allowed = new Set(['prompt', 'steer', 'follow_up', 'abort', 'clear_queue', 'new_session', 'switch_session', 'get_state', 'set_model', 'set_thinking_level', 'get_available_thinking_levels', 'cycle_thinking_level', 'get_messages', 'get_entries', 'get_tree', 'set_session_name'])
     if (!command || !allowed.has(command.type)) throw new Error('不支持的 Pi 命令')
+    if (['prompt', 'steer', 'follow_up'].includes(command.type)) await skillUpdater?.waitForCommit()
     if (command.type === 'switch_session' && !isInside(piSessionDir(), command.sessionPath)) {
       throw new Error('不允许打开工作区之外的会话文件')
     }
@@ -3587,8 +3620,10 @@ app.whenReady().then(async () => {
     const result = await dialog.showOpenDialog(mainWindow, { properties: ['openFile', 'multiSelections'] })
     return result.canceled ? [] : result.filePaths
   })
-  ipcMain.handle('skills:list', () => skillManager?.list() || [])
-  ipcMain.handle('skills:capabilities', () => ['creative_studio'])
+  ipcMain.handle('skills:list', async () => { await skillUpdater.waitForCommit(); return skillManager?.list() || [] })
+  ipcMain.handle('skills:update-state', () => skillUpdater.state)
+  ipcMain.handle('skills:update-sync', () => skillUpdater.sync())
+  ipcMain.handle('skills:capabilities', () => ['creative_studio', 'video_studio'])
   ipcMain.handle('skills:creative', async (_, action, payload = {}) => {
     if (!['list', 'status', 'cancel', 'export'].includes(action) || typeof payload.sessionId !== 'string') throw new Error('无效的创作操作')
     const owner = String(auth?.user?.id || 'local')
@@ -3603,9 +3638,9 @@ app.whenReady().then(async () => {
   })
   ipcMain.handle('skills:runtime-status', (_, id) => id === 'anyu-video-studio' ? videoStudio.status() : null)
   ipcMain.handle('skills:runtime-prepare', (_, id, component) => { if (id !== 'anyu-video-studio' || component && component !== 'whisper-tiny') throw new Error('Unsupported skill runtime'); return component ? videoStudio.prepareModel() : videoStudio.prepare() })
-  async function downloadStoreSkill(id) {
+  async function downloadStoreSkill(id, publishedSkill) {
     if (!skillStore.idPattern.test(id)) throw new Error('技能标识无效')
-    const catalog = await requestApi('/anyu-agent/skill-store')
+    const catalog = publishedSkill ? { skills: [publishedSkill] } : await requestApi('/anyu-agent/skill-store')
     const skill = catalog?.skills?.find(item => item.id === id)
     if (!skill) throw new Error('技能已下架或不可用，请刷新商店')
     const route = `/anyu-agent/skill-store/skills/${encodeURIComponent(id)}/download?sha256=${encodeURIComponent(skill.sha256)}`
@@ -3618,7 +3653,6 @@ app.whenReady().then(async () => {
     const { skill, bytes } = await downloadStoreSkill(id)
     return skillStore.packageDetail(skill, bytes)
   })
-  const skillInstalls = new Set()
   ipcMain.handle('skills:store-install', async (_, id) => {
     if (!skillStore.idPattern.test(id) || skillInstalls.has(id)) throw new Error('技能标识无效或正在安装')
     skillInstalls.add(id)
@@ -3635,13 +3669,16 @@ app.whenReady().then(async () => {
       return installed
     } finally { skillInstalls.delete(id) }
   })
-  ipcMain.handle('skills:read', (_, id) => skillManager.read(id))
-  ipcMain.handle('skills:training-read', (_, id) => skillManager.readTraining(id))
-  ipcMain.handle('skills:training-save', (_, payload) => skillManager.saveTraining(payload))
+  ipcMain.handle('skills:read', async (_, id) => { await skillUpdater.waitForCommit(); return skillManager.read(id) })
+  ipcMain.handle('skills:training-read', async (_, id) => { await skillUpdater.waitForCommit(); return skillManager.readTraining(id) })
+  ipcMain.handle('skills:training-save', async (_, payload) => { await skillUpdater.waitForCommit(); return skillManager.saveTraining(payload) })
   ipcMain.handle('skills:install-local', async () => {
     const result = await dialog.showOpenDialog(mainWindow, { properties: ['openDirectory'] })
     if (result.canceled || !result.filePaths[0]) return null
-    return skillManager.install(result.filePaths[0])
+    const id = path.basename(result.filePaths[0])
+    if (skillInstalls.has(id)) throw new Error('技能正在更新，请稍后重试')
+    skillInstalls.add(id)
+    try { return skillManager.install(result.filePaths[0]) } finally { skillInstalls.delete(id) }
   })
   ipcMain.handle('plugin:state', () => pluginManager.state())
   ipcMain.handle('plugin:scan', (_, sourcePath) => pluginManager.scanPackage(sourcePath))
@@ -3849,8 +3886,8 @@ app.whenReady().then(async () => {
 })
 app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit() })
 installGracefulQuit(app, {
-  beforeStop: () => { isQuitting = true; desktopPets?.close() },
-  stop: async () => { await stopPi(); await creativeStudio?.close(); await videoStudio?.close(); await agentWorkbench?.close() },
+  beforeStop: () => { isQuitting = true; skillUpdater?.dispose(); desktopPets?.close() },
+  stop: async () => { await skillUpdater?.waitForCommit(); await stopPi(); await creativeStudio?.close(); await videoStudio?.close(); await agentWorkbench?.close() },
   onError: error => console.error('[shutdown]', error)
 })
 }

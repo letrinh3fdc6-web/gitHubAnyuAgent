@@ -51,6 +51,33 @@ test('create, persist, generate anchor before dependent shots, export real local
   assert.equal(f.creates(), 2)
 }))
 
+test('project placement retains the creating run through later edits, progress and restoration', async () => fixture(async f => {
+  const events = []
+  f.options.changed = progress => events.push(progress)
+  f.task.id = 'native-origin'
+  const project = await f.create()
+  assert.equal(project.originRunId, 'native-origin')
+  assert.ok(Number.isFinite(Date.parse(project.createdAt)))
+  f.task.id = 'native-later'
+  const saved = await f.save(project, draft(1))
+  await f.generate(saved); await f.wait(saved.projectId)
+  assert.ok(events.length > 1)
+  assert.ok(events.every(event => event.originRunId === 'native-origin' && event.createdAt === project.createdAt))
+  const restored = new CreativeStudio(f.options)
+  try {
+    const listed = await restored.dispatch(f.task, { action: 'list' })
+    assert.equal(listed.projects[0].originRunId, 'native-origin')
+    assert.equal(listed.projects[0].createdAt, project.createdAt)
+    const file = path.join(project.directory, 'project.json')
+    const legacy = JSON.parse(await fs.readFile(file, 'utf8'))
+    delete legacy.originRunId
+    await fs.writeFile(file, JSON.stringify(legacy))
+    const old = await restored.dispatch(f.task, { action: 'inspect', projectId: project.projectId })
+    assert.equal(old.originRunId, '')
+    assert.equal(old.createdAt, project.createdAt)
+  } finally { await restored.close() }
+}))
+
 test('failed anchor blocks dependent images; explicit retry preserves successful outputs', async () => fixture(async f => {
   let fail = true
   const original = f.options.create

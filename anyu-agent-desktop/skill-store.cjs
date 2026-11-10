@@ -77,7 +77,7 @@ async function renameDirectory(source, target, before) {
 }
 
 // @project-doc docs/interfaces/anyuagent_skill_store.md#installation
-async function installPackage(manager, skill, bytes, expectedRevision) {
+async function installPackage(manager, skill, bytes, expectedRevision, { beforeCommit = () => {} } = {}) {
   if (!idPattern.test(skill?.id) || !/^[a-f0-9]{64}$/.test(skill?.sha256) || hash(bytes) !== skill.sha256) throw new Error('技能包 SHA-256 校验失败')
   const entries = await decodePackage(bytes)
   const target = path.join(manager.root, skill.id)
@@ -96,15 +96,18 @@ async function installPackage(manager, skill, bytes, expectedRevision) {
     if (fs.existsSync(rules)) fs.copyFileSync(rules, path.join(stage, 'ANYU_TRAINING.md'))
     fs.writeFileSync(path.join(stage, '.anyu-store.json'), JSON.stringify({ version: skill.version, sha256: skill.sha256, name: String(skill.name || '').trim().slice(0, 120) }))
     // A downloader must not overwrite changes made while the package was in flight.
+    beforeCommit()
     if (localRevision(target) !== expectedRevision) throw new Error('本机技能已变更，请刷新后重试')
     if (fs.existsSync(target)) {
       fs.mkdirSync(backupRoot, { recursive: true })
       await renameDirectory(target, backup, () => {
+        beforeCommit()
         if (localRevision(target) !== expectedRevision) throw new Error('本机技能已变更，请刷新后重试')
       })
       moved = true
     }
     await renameDirectory(stage, target, () => {
+      beforeCommit()
       if (fs.existsSync(target)) throw new Error('本机技能已变更，请刷新后重试')
     })
     installed = true
