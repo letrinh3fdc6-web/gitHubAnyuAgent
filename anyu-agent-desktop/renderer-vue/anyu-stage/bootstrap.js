@@ -22,7 +22,7 @@ const hasStableViewport = () => {
 try {
   while (!hasStableViewport()) await nextFrame()
   await nextFrame()
-  await import('../_astro/index.astro_astro_type_script_index_0_lang.Cu0uHvXK.js?v=c2ffebfb9fa2')
+  await import('../_astro/index.astro_astro_type_script_index_0_lang.Cu0uHvXK.js?v=d7dd2b867f6a')
 } catch (error) {
   readyObserver.disconnect()
   reportFailure()

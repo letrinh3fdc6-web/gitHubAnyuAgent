@@ -3,6 +3,15 @@ export function stageRenderScale(width, height, pixelRatio = 1) {
   return Math.min(Math.max(1, pixelRatio), 1.5, Math.sqrt(2_000_000 / Math.max(1, width * height)))
 }
 
+export function reportStageProgress(progress, phase) {
+  if (!Number.isFinite(progress) || !document.body) return
+  const previous = Number(document.body.dataset.anyuLoadingProgress) || 0
+  const percentage = Math.max(0, Math.min(98, Math.round(progress)))
+  if (percentage < previous) return
+  document.body.dataset.anyuLoadingProgress = String(percentage)
+  document.body.dataset.anyuLoadingPhase = phase
+}
+
 export async function prepareStagePasses(renderer, processes, computation) {
   const target = renderer.getRenderTarget()
   let sliceStarted = performance.now()
@@ -37,19 +46,15 @@ export async function prepareStagePasses(renderer, processes, computation) {
 export function startStageLoop(ticker, render, dispose, onReady = () => {}) {
   let stopped = false
   let ready = false
-  let stableFrames = 0
-  let previousFrame = null
+  let renderedFrames = 0
   const tick = seconds => {
+    if (stopped || document.hidden) return
     try {
-      const started = performance.now()
       render(seconds * 1000)
-      // First draws can upload textures and allocate GPU buffers after compilation.
+      // Warm up uploads and buffers without requiring a minimum device frame rate.
       if (!ready) {
-        const stable = performance.now() - started < 50 &&
-          (previousFrame === null || started - previousFrame < 50)
-        stableFrames = stable ? stableFrames + 1 : 0
-        previousFrame = started
-        if (stableFrames >= 4) {
+        renderedFrames += 1
+        if (renderedFrames >= 4) {
           ready = true
           onReady()
         }
@@ -62,8 +67,7 @@ export function startStageLoop(ticker, render, dispose, onReady = () => {}) {
   }
   const syncVisibility = () => {
     ticker.remove(tick)
-    stableFrames = 0
-    previousFrame = null
+    renderedFrames = 0
     if (stopped || document.hidden) ticker.sleep()
     else {
       ticker.add(tick)
