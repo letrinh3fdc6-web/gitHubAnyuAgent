@@ -1,6 +1,6 @@
 {
   "name": "anyu-agent-desktop",
-  "version": "1.0.90",
+  "version": "1.0.92",
   "description": "AnyuAgent standalone desktop workspace",
   "main": "main.cjs",
   "author": "Anyu AI",
@@ -124,6 +124,7 @@
       "agent-workbench.cjs",
       "task-storage.cjs",
       "workspace-checkpoints.cjs",
+      "result-storage.cjs",
       "agent-verification.cjs",
       "agent-connectors.cjs",
       "pi-workbench-extension.mjs",

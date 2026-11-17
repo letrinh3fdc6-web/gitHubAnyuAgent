@@ -11,6 +11,7 @@ tests.push('test-pets.cjs', 'test-pet-links.cjs', 'test-pet-memory.cjs', 'test-p
 tests.push('test-skill-store.cjs', 'test-skill-updates.cjs', 'test-creative-project.cjs', 'test-creative-studio.cjs', 'test-creative-document.cjs', 'test-creative-integration.cjs')
 tests.push('test-codex-input.cjs')
 tests.push('test-runtime-lifecycle.cjs')
+tests.push('test-result-storage.cjs')
 if (!portable) tests.push('test-context-pi-live.cjs', 'test-runtime-probe-pi-live.cjs', 'test-subagent-pi-live.cjs', 'test-approval-pi-live.cjs', 'test-workbench-pi-live.cjs', 'test-codex-client.cjs', 'test-codex-runtime.cjs', 'test-codex-provider.cjs')
 const commands = [
   ['tools/test-elevation-ipc.cjs'],

@@ -19,15 +19,17 @@ function workspaceFile(root, requested) {
   return candidate
 }
 
-function localFilePath(cwd, requested) {
+function localFileCandidate(cwd, requested) {
   let value = String(requested || '').trim()
   if (/^file:/i.test(value)) value = fileURLToPath(value)
   else if (value.startsWith('artifact://')) value = value.slice('artifact://'.length)
   if (/^~(?:[\\/]|$)/.test(value)) value = path.join(require('node:os').homedir(), value.slice(1))
   if (!value || value.includes('\0')) throw new Error('文件路径无效')
   if (!path.isAbsolute(value) && !path.isAbsolute(String(cwd || ''))) throw new Error('相对路径需要选择工作目录')
-  return fs.realpathSync(path.isAbsolute(value) ? value : path.resolve(cwd, value))
+  return path.resolve(path.isAbsolute(value) ? value : path.resolve(cwd, value))
 }
+
+function localFilePath(cwd, requested) { return fs.realpathSync(localFileCandidate(cwd, requested)) }
 
 // Each explicitly opened file gets its own origin; old pages cannot read a new preview.
 class ArtifactPreviews {
@@ -62,7 +64,11 @@ class ArtifactPreviews {
   has(value) {
     try { const url = new URL(value); return url.protocol === 'leta-preview:' && this.entries.has(url.hostname) } catch { return false }
   }
+  rootFor(value) {
+    if (!this.has(value)) throw new Error('预览已失效')
+    return this.entries.get(new URL(value).hostname).root
+  }
   clear() { this.entries.clear() }
 }
 
-module.exports = { allowedBrowserUrl, workspaceFile, localFilePath, ArtifactPreviews }
+module.exports = { allowedBrowserUrl, workspaceFile, localFileCandidate, localFilePath, ArtifactPreviews }

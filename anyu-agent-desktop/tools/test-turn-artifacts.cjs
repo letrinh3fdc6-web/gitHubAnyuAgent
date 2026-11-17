@@ -3,6 +3,9 @@ const fs = require('fs')
 const os = require('os')
 const path = require('path')
 const vm = require('vm')
+const { ResultStorage } = require('../result-storage.cjs')
+
+async function main() {
 
 const root = path.resolve(__dirname, '..')
 const renderer = fs.readFileSync(path.join(root, 'renderer', 'app.js'), 'utf8')
@@ -37,7 +40,7 @@ assert.strictEqual(candidates.find('请读取 `existing.html`').length, 0, '引�
 assert.strictEqual(candidates.find('已生成 `C:\\My Workspace\\result page.html`')[0], 'C:\\My Workspace\\result page.html')
 assert.strictEqual(candidates.find('已导出 [预览](reports/my page.html)')[0], 'reports/my page.html')
 
-// 只有工作区内真实存在的文件才能进入产物卡。
+// Explicit local files may be outside the workspace; missing files need a verified copy.
 const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'leta-turn-artifact-'))
 const outside = path.join(path.dirname(workspace), `outside-${Date.now()}.html`)
 fs.writeFileSync(path.join(workspace, 'result.html'), '<!doctype html>\n<title>result</title>\n<p>ok</p>')
@@ -46,14 +49,16 @@ const mainContext = {
   fs,
   path,
   BROWSER_ARTIFACT_MAX_BYTES: 8 * 1024 * 1024,
+  getResultStorage: () => storage,
   isInside: (parent, candidate) => {
     const relative = path.relative(path.resolve(parent), path.resolve(candidate))
     return relative !== '' && !relative.startsWith('..') && !path.isAbsolute(relative)
   }
 }
-vm.runInNewContext(`${sourceSlice(main, 'function inspectWorkspaceArtifacts(payload = {}) {', 'function closeBrowserView() {')}; this.inspect = inspectWorkspaceArtifacts`, mainContext)
-const inspected = mainContext.inspect({ cwd: workspace, paths: ['result.html', 'missing.html', `../${path.basename(outside)}`] })
-assert.strictEqual(inspected.artifacts.length, 1)
+const storage = new ResultStorage({ userData: path.join(workspace, 'profile') })
+vm.runInNewContext(`${sourceSlice(main, 'async function inspectWorkspaceArtifacts(payload = {}) {', 'function closeBrowserView() {')}; this.inspect = inspectWorkspaceArtifacts`, mainContext)
+const inspected = await mainContext.inspect({ cwd: workspace, paths: ['result.html', 'missing.html', `../${path.basename(outside)}`] })
+assert.strictEqual(inspected.artifacts.length, 2)
 assert.strictEqual(inspected.artifacts[0].name, 'result.html')
 assert.strictEqual(inspected.artifacts[0].previewable, true)
 assert.strictEqual(inspected.artifacts[0].lineCount, 3)
@@ -62,3 +67,5 @@ assert(preload.includes("ipcRenderer.invoke('app:inspect-artifacts'"), '渲染�
 fs.rmSync(workspace, { recursive: true, force: true })
 fs.rmSync(outside, { force: true })
 console.log('turn code folding and verified artifact registry: passed')
+}
+main().catch(error => { console.error(error); process.exitCode = 1 })

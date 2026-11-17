@@ -43,6 +43,7 @@ function Show-Phase([string]$Text) {
 function Update-InstallProgress([string]$StageFile) {
     $names = @{
         'checking-processes' = '正在检查安装目录占用…'
+        'preserving-workspace' = '正在校验并保护历史工作区文件…'
         'removing-old' = '正在处理旧版本文件…'
         'removing-old-user' = '正在处理旧用户版本文件…'
         'recovering-old' = '正在兼容处理旧版本长路径文件…'
@@ -106,6 +107,7 @@ function Get-InstallerFailure([int]$ExitCode, [string]$StageFile = '') {
     if ($ExitCode -eq 32 -or $stages -contains 'failed-processes:timeout') { return 'Windows 进程检查超时，尚未覆盖应用文件。请稍后重试，并查看安装日志。' }
     if ($ExitCode -eq 33 -or @($stages | Where-Object { $_ -like 'failed-processes:*' }).Count) { return 'Windows 未能完成安装进程检查，尚未覆盖应用文件。请查看安装日志中的具体检查错误。' }
     if ($ExitCode -eq 34 -or $ExitCode -eq 35) { return '安装授权交接未完成，尚未覆盖应用文件。请重新尝试更新。' }
+    if ($ExitCode -eq 36) { return '旧工作区备份未通过校验，已停止安装并保留原文件。请检查磁盘空间、文件占用或工作区中的目录链接。' }
     $busyFile = @($stages | Where-Object { $_ -like 'failed-file-busy:*' } | Select-Object -Last 1)
     if ($busyFile.Count) { return ('旧版本文件正在被占用或无法替换：' + $busyFile[0].Substring('failed-file-busy:'.Length) + '。请关闭占用后重试。') }
     if (@($stages | Where-Object { $_ -like 'failed-old-uninstall:*' }).Count -or ($ExitCode -eq 2 -and @($stages | Where-Object { $_ -in @('removing-old', 'removing-old-user') }).Count)) {

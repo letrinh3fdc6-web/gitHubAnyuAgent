@@ -14,6 +14,8 @@ Var AnyuCancelFile
 Var AnyuUpdateSession
 Var AnyuHandoffCount
 Var AnyuHandoffValue
+Var AnyuPreservedDirectory
+Var AnyuPreservePowerShell
 !endif
 
 !macro AnyuLongPath OUTPUT INPUT
@@ -58,6 +60,34 @@ Var AnyuHandoffValue
   nsExec::ExecToStack /TIMEOUT=15000 '"$PowerShellPath" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$PLUGINSDIR\anyu-installer-processes.ps1" -InstallDirectory "$INSTDIR" -Mode "${MODE}" -InstallerProcessId $AnyuInstallerPid -LogPath "$TEMP\AnyuAgent-install.log"'
   Pop $AnyuProcessResult
   Pop $AnyuProcessOutput
+!macroend
+
+!macro AnyuPreserveWorkspace DIRECTORY
+  ${If} "${DIRECTORY}" != ""
+  ${AndIf} "${DIRECTORY}" != $AnyuPreservedDirectory
+    !insertmacro AnyuInstallPhase "preserving-workspace"
+    InitPluginsDir
+    File /oname=$PLUGINSDIR\anyu-preserve-workspace.ps1 "${BUILD_RESOURCES_DIR}\preserve-workspace.ps1"
+    StrCpy $AnyuPreservePowerShell "$SYSDIR\WindowsPowerShell\v1.0\powershell.exe"
+    ${If} ${FileExists} "$WINDIR\Sysnative\WindowsPowerShell\v1.0\powershell.exe"
+      StrCpy $AnyuPreservePowerShell "$WINDIR\Sysnative\WindowsPowerShell\v1.0\powershell.exe"
+    ${EndIf}
+    nsExec::ExecToStack '"$AnyuPreservePowerShell" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$PLUGINSDIR\anyu-preserve-workspace.ps1" -InstallDirectory "${DIRECTORY}"'
+    Pop $AnyuProcessResult
+    Pop $AnyuProcessOutput
+    ${If} $AnyuProcessResult != "0"
+      DetailPrint "$AnyuProcessOutput"
+      !insertmacro AnyuInstallPhase "failed-workspace-preservation:$AnyuProcessResult"
+      ${IfNot} ${Silent}
+        MessageBox MB_OK|MB_ICONSTOP "Cannot preserve workspace files. Installation stopped; original files were retained.$\r$\n$AnyuProcessOutput"
+      ${EndIf}
+      SetErrorLevel 36
+      Quit
+    ${EndIf}
+    DetailPrint "$AnyuProcessOutput"
+    StrCpy $AnyuPreservedDirectory "${DIRECTORY}"
+    ClearErrors
+  ${EndIf}
 !macroend
 
 !macro AnyuUpdateHandoff
@@ -154,6 +184,9 @@ Var AnyuHandoffValue
     Quit
   ${EndIf}
   DetailPrint "Process check complete. Preparing application files..."
+  !ifndef BUILD_UNINSTALLER
+    !insertmacro AnyuPreserveWorkspace "$INSTDIR"
+  !endif
 !macroend
 
 !macro customInstall

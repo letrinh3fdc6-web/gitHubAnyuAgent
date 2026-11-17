@@ -133,6 +133,7 @@ class AgentWorkbench {
       const after = await this.snapshots.capture(task.cwd)
       task.after = await this.snapshots.persist(`${task.id}-after`, after)
       task.changes = this.snapshots.changes(await this.snapshots.load(task.before), after)
+      await this.options.preserveResults?.(task, after)
     } else task.changes = []
     if (status === 'completed' && !task.parentId && task.settings.checks.length) {
       task.verification = await verify(task.cwd, task.settings.checks, this.options.environment?.() || process.env)

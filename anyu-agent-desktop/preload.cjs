@@ -1,5 +1,6 @@
-const { contextBridge, ipcRenderer } = require('electron')
+const { contextBridge, ipcRenderer, webUtils } = require('electron')
 contextBridge.exposeInMainWorld('anyu', {
+  filePath: file => webUtils.getPathForFile(file),
   agentCapabilities: { subagents: true, workbench: true, context: true },
   agentContext: (action, payload) => ipcRenderer.invoke('agent:context', action, payload || {}),
   releaseNotes: (acknowledge) => ipcRenderer.invoke('update:release-notes', acknowledge || ''),
@@ -104,7 +105,12 @@ contextBridge.exposeInMainWorld('anyu', {
   piForkSession: (payload) => ipcRenderer.invoke('pi:session-fork', payload || {}),
   appBuildInfo: () => ipcRenderer.invoke('app:build-info'),
   apiBase: () => ipcRenderer.invoke('app:api-base'),
-  defaultWorkspace: () => ipcRenderer.invoke('app:default-workspace'),
+  defaultWorkspace: (payload) => ipcRenderer.invoke('app:default-workspace', payload || {}),
+  onResultStorageWarning: (callback) => {
+    const listener = (_, payload) => callback(payload)
+    ipcRenderer.on('app:result-storage-warning', listener)
+    return () => ipcRenderer.removeListener('app:result-storage-warning', listener)
+  },
   openExternal: (url) => ipcRenderer.invoke('app:open-external', url),
   openFile: (payload) => ipcRenderer.invoke('app:open-file', payload || {}),
   openPath: (payload) => ipcRenderer.invoke('app:open-path', payload || {}),

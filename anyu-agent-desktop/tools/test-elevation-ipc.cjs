@@ -45,7 +45,7 @@ class FakeBroker {
 const electron = {
   app: Object.assign(new EventEmitter(), { setAppUserModelId() {}, commandLine: { appendSwitch() {} }, setPath() {}, getPath: () => workDir, requestSingleInstanceLock: () => childMode !== '--duplicate', isReady: () => true, whenReady: () => ({ then: fn => { boot = fn } }), quit: () => { quitCount++ }, getVersion: () => 'test', isPackaged: true }),
   BrowserWindow: FakeWindow, Tray: FakeTray,
-  screen: new EventEmitter(),
+  screen: Object.assign(new EventEmitter(), { getCursorScreenPoint: () => ({ x: 0, y: 0 }) }),
   ipcMain: { handle: (name, fn) => handlers.set(name, fn), on() {} },
   safeStorage: { isEncryptionAvailable: () => false }, shell: { openExternal: async () => {}, openPath: async file => { openedFiles.push(file); return '' } },
   protocol: { handle() {}, registerSchemesAsPrivileged() {} },
@@ -144,7 +144,7 @@ async function main() {
     electron.app.emit('activate')
     assert.equal(originalWindow.visible, true)
     const workspace = path.join(workDir, 'workspace')
-    fs.mkdirSync(workspace)
+    fs.mkdirSync(workspace, { recursive: true })
     const outside = path.join(workDir, 'external-file.txt')
     fs.writeFileSync(outside, 'external file')
     const event = { sender: testWindow.webContents }
@@ -155,7 +155,7 @@ async function main() {
     const result = await handlers.get('agent-browser:open-artifact')(event, { path: workspace })
     assert.equal(result.openedExternally, true, 'Directories open with the system file manager')
     assert.deepEqual(openedFiles, [outside, outside, workspace])
-    const artifacts = handlers.get('app:inspect-artifacts')(event, { cwd: workspace, paths: [outside] })
+    const artifacts = await handlers.get('app:inspect-artifacts')(event, { cwd: workspace, paths: [outside] })
     assert.equal(artifacts.artifacts[0].path, outside)
     testTray.menu.find(item => item.label === '退出 AnyuAgent').click()
     assert.equal(quitCount, 1, 'The explicit tray Quit command still exits')

@@ -42,6 +42,8 @@ function host() {
       model(value) { return value }
     },
     sessionWorkingDirectory: () => path.resolve('test-workspace'),
+    registerLegacyWorkspace() {},
+    getResultStorage: () => ({ resolveWorkspace: async cwd => cwd || path.resolve('test-workspace') }),
     resolvePermissionMode: () => 'full', runtimeExecutionHost: () => 'standard',
     startBrowserBridge: async () => {},
     withStartupCancellation,

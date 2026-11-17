@@ -16,6 +16,7 @@ function instrumentInstaller(originalScript) {
   let util = replaceOnce(read('include/installUtil.nsh'), '    SetErrorLevel 2\n    Quit', '    !insertmacro AnyuInstallPhase "failed-old-uninstall:$R0"\n    SetErrorLevel 2\n    Quit')
   util = replaceOnce(util, '    MessageBox MB_OK|MB_ICONEXCLAMATION "$(uninstallFailed): $R0"', '    MessageBox MB_OK|MB_ICONEXCLAMATION "$(uninstallFailed): $R0" /SD IDOK')
   util = replaceOnce(util, '  ${if} $R0 != 0', '  Call AnyuRecoverLegacyUninstall\n  ${if} $R0 != 0')
+  util = replaceOnce(util, '  StrCpy $uninstallerFileNameTemp "$PLUGINSDIR\\old-uninstaller.exe"', '  !insertmacro AnyuPreserveWorkspace "$installationDir"\n  StrCpy $uninstallerFileNameTemp "$PLUGINSDIR\\old-uninstaller.exe"')
   util += `
 Function AnyuRecoverLegacyUninstall
   \${if} $R0 != 2

@@ -178,17 +178,17 @@ jobs:
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: anyuagent-v1.0.90
+          tag_name: anyuagent-v1.0.92
           target_commitish: ${{ github.sha }}
-          name: AnyuAgent 1.0.90
+          name: AnyuAgent 1.0.92
           draft: true
           make_latest: false
           body: |
-            AnyuAgent 1.0.90 includes the current desktop workspace and model compatibility updates. Existing creative workflows, online skill updates, persistent projects and restart recovery remain available. Public video-studio runtime packages are not included.
+            AnyuAgent 1.0.92 adds native image and file drag-and-drop and immediate response cancellation, alongside the current website and backend compatibility fixes. Existing creative workflows, online skills and persistent projects remain available.
 
             macOS downloads include separate Apple Silicon and Intel DMG/ZIP packages. Each package includes a matching native runtime. These packages are unsigned and are not notarized.
 
-            Windows download: https://x.ailzd.com/downloads/AnyuAgent-Setup-1.0.90.exe
+            Windows download: https://x.ailzd.com/downloads/AnyuAgent-Setup-1.0.92.exe
           files: |
             release-assets/*.dmg
             release-assets/*.zip

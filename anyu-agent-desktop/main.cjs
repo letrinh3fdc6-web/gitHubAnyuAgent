@@ -22,6 +22,7 @@ const QRCode = require('qrcode')
 const { normalizeBrowserBounds, calculateBrowserFitZoom, limitBrowserZoom } = require('./browser-layout.cjs')
 const { RENDERER_ORIGIN, RENDERER_SCHEME, createRendererHandler } = require('./renderer-protocol.cjs')
 const { allowedBrowserUrl, workspaceFile, localFilePath, ArtifactPreviews } = require('./browser-policy.cjs')
+const { ResultStorage } = require('./result-storage.cjs')
 const { LocalFeedback, feedbackUrl } = require('./local-feedback.cjs')
 const { detailThumbnail } = require('./detail-thumbnails.cjs')
 // 旧版/损坏安装包可能漏带可选详情图模块；不能因此让整个主进程启动崩溃。
@@ -738,6 +739,7 @@ async function previewResponse(request) {
     const stat = await fs.promises.stat(real)
     const mime = PREVIEW_MIME[path.extname(real).toLowerCase()]
     if (!stat.isFile() || !mime || stat.size > BROWSER_ARTIFACT_MAX_BYTES) throw new Error('文件类型或大小不支持预览')
+    await getResultStorage().preserve(real, artifactPreviews.rootFor(request.url))
     const data = await fs.promises.readFile(real)
     const download = new URL(request.url).searchParams.get('download') === '1'
     const display = !download && ['application/json', 'text/csv', 'text/markdown', 'text/plain'].includes(mime)
@@ -876,14 +878,15 @@ async function createPaymentQrDataUrl(value) {
 
 
 async function openBrowserArtifact(payload = {}) {
-  const candidate = localFilePath(payload.cwd, payload.path)
-  const stat = fs.statSync(candidate)
+  const storage = getResultStorage()
+  const candidate = await storage.preserveResult(payload.cwd, payload.path)
+  const stat = await fs.promises.stat(candidate)
   if (!stat.isFile() || !PREVIEW_MIME[path.extname(candidate).toLowerCase()] || stat.size > BROWSER_ARTIFACT_MAX_BYTES) {
     await openWorkspacePath({ path: candidate })
     return { ...browserState, openedExternally: true, path: candidate }
   }
   const view = ensureBrowserView()
-  const previewUrl = artifactPreviews.open(candidate, payload.cwd)
+  const previewUrl = artifactPreviews.open(candidate, await storage.previewRoot(candidate, payload.cwd))
   browserState = { ...browserState, open: true, url: `artifact://${candidate}`, title: path.basename(candidate), loading: true, error: '' }
   sendBrowserState({ reveal: true })
   void view.webContents.loadURL(previewUrl).catch((error) => {
@@ -893,7 +896,7 @@ async function openBrowserArtifact(payload = {}) {
   return { ...browserState }
 }
 
-function inspectWorkspaceArtifacts(payload = {}) {
+async function inspectWorkspaceArtifacts(payload = {}) {
   const cwd = String(payload.cwd || '')
   const requestedPaths = Array.isArray(payload.paths) ? payload.paths.slice(0, 32) : []
   const previewExtensions = new Set(['.html', '.htm', '.json', '.csv', '.md', '.txt', '.png', '.jpg', '.jpeg', '.webp', '.gif', '.svg', '.pdf'])
@@ -903,7 +906,7 @@ function inspectWorkspaceArtifacts(payload = {}) {
     const raw = String(requested || '').trim().replace(/^['"`]|['"`]$/g, '')
     if (!raw) continue
     let candidate
-    try { candidate = localFilePath(cwd, raw) } catch { continue }
+    try { candidate = await getResultStorage().preserveResult(cwd, raw) } catch (error) { if (error.code === 'ENOENT') continue; throw error }
     const relativePath = path.isAbsolute(cwd) && isInside(cwd, candidate) ? path.relative(cwd, candidate) || path.basename(candidate) : candidate
     const stats = fs.statSync(candidate)
     if (stats.isDirectory()) {
@@ -929,7 +932,7 @@ function inspectWorkspaceArtifacts(payload = {}) {
 }
 
 async function openWorkspacePath(payload = {}) {
-  const real = localFilePath(payload.cwd, payload.path)
+  const real = await getResultStorage().preserveResult(payload.cwd, payload.path)
   if (payload.mode === 'explorer') {
     if (process.platform === 'win32') spawn('explorer.exe', [fs.statSync(real).isDirectory() ? real : `/select,${real}`], { detached: true, windowsHide: true }).unref()
     else shell.showItemInFolder(real)
@@ -979,7 +982,7 @@ function getDesktopUpdater() {
     manifestUrl: UPDATE_MANIFEST_URL,
     localOnly: LOCAL_ONLY_API && !process.env.ANYU_UPDATE_MANIFEST_URL,
     emit: sendUpdateProgress,
-    isBusy: () => updateRendererBusy || Boolean(agentSessionService?.runs.size) || analysisControllers.size > 0 || Boolean(creativeStudio?.jobs.size) || Boolean(skillUpdater?.commit) || skillInstalls.size > 0,
+    isBusy: () => updateRendererBusy || Boolean(agentSessionService?.runs.size) || Boolean(agentWorkbench?.pending.size) || Boolean(resultStorage?.pending.size) || analysisControllers.size > 0 || Boolean(creativeStudio?.jobs.size) || Boolean(skillUpdater?.commit) || skillInstalls.size > 0,
     quit: () => { isQuitting = true; app.quit() }
   })
   return desktopUpdater
@@ -1470,18 +1473,36 @@ function piExecutable() {
   return getDesktopRuntimes().executable('pi', fallback)
 }
 
-function defaultWorkspacePath() {
-  const installRoot = app.isPackaged ? path.dirname(app.getPath('exe')) : __dirname
-  const candidate = path.join(installRoot, 'workspace')
-  try {
-    fs.mkdirSync(candidate, { recursive: true })
-    fs.accessSync(candidate, fs.constants.R_OK | fs.constants.W_OK)
-    return candidate
-  } catch {
-    const fallback = path.join(app.getPath('userData'), 'workspace')
-    fs.mkdirSync(fallback, { recursive: true })
-    return fallback
+let resultStorage
+function getResultStorage() {
+  if (!resultStorage) {
+    const installs = [app.isPackaged ? path.dirname(app.getPath('exe')) : __dirname]
+    if (process.platform === 'win32') {
+      if (process.env.ProgramFiles) installs.push(path.join(process.env.ProgramFiles, 'AnyuAgent'))
+      if (process.env.LOCALAPPDATA) installs.push(path.join(process.env.LOCALAPPDATA, 'Programs', 'AnyuAgent'))
+    }
+    resultStorage = new ResultStorage({
+      userData: app.getPath('userData'), legacyRoots: installs.map(root => path.join(root, 'workspace')),
+      onWarning: (error, detail) => {
+        console.error('[result-storage]', error.message)
+        if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('app:result-storage-warning', { ...detail, message: '结果持久保存未完成，请暂时保留原文件：' + error.message })
+      },
+    })
+    for (const record of agentSessionService?.sessions.values() || []) registerLegacyWorkspace(record.cwd)
   }
+  return resultStorage
+}
+function registerLegacyWorkspace(cwd) {
+  if (!cwd || !path.isAbsolute(cwd) || path.basename(cwd).toLowerCase() !== 'workspace') return
+  const installation = path.dirname(cwd)
+  if (path.basename(installation).toLowerCase() === 'anyuagent' || fs.existsSync(path.join(installation, 'AnyuAgent.exe')) || fs.existsSync(installation + '.workspace-backups')) {
+    getResultStorage().registerLegacy(cwd)
+  }
+}
+function defaultWorkspacePath() {
+  const directory = getResultStorage().workspace
+  fs.mkdirSync(directory, { recursive: true })
+  return directory
 }
 // Electron 主进程能直接读 app.asar，但 pi.exe 这类外部进程读不到包内文件：
 // 打包后必须把路径换成 app.asar.unpacked 下的实体文件（配合 package.json 的 asarUnpack）。
@@ -1502,10 +1523,15 @@ function materializePiSession(payload = {}) {
         const lines = fs.readFileSync(sessionPath, 'utf8').split(/\r?\n/)
         const header = JSON.parse(lines[0])
         if (header?.type === 'session' && header.cwd !== requestedCwd) {
-          header.cwd = requestedCwd; lines[0] = JSON.stringify(header); fs.writeFileSync(sessionPath, lines.filter(Boolean).join('\n') + '\n', { mode: 0o600 })
+          header.cwd = requestedCwd; lines[0] = JSON.stringify(header)
+          const temporary = `${sessionPath}.${crypto.randomUUID()}.tmp`
+          try {
+            fs.writeFileSync(temporary, lines.filter(Boolean).join('\n') + '\n', { mode: 0o600, flag: 'wx' })
+            fs.renameSync(temporary, sessionPath)
+          } finally { fs.rmSync(temporary, { force: true }) }
           return { ok: true, created: false, updated: true, path: sessionPath }
         }
-      } catch {}
+      } catch (error) { throw new Error('会话工作目录更新失败，原始对话记录已保留：' + error.message) }
     }
     return { ok: true, created: false, path: sessionPath }
   }
@@ -1776,6 +1802,7 @@ async function stopPiUnsafe() {
   ])
   await executionBroker.close()
   await agentSessionService?.flushLogs()
+  await resultStorage?.flush()
 }
 
 function stopBrowserBridge() {
@@ -1911,6 +1938,12 @@ async function startPiUnsafe(options = {}) {
   const executable = await withStartupCancellation(getDesktopRuntimes().ensure('pi', piExecutable()), options.startupSignal)
   if (!fs.existsSync(executable)) throw new Error(`Pi 运行时不存在：${executable}`)
   const requestedSession = options.sessionPath && isInside(piSessionDir(), options.sessionPath) ? path.resolve(options.sessionPath) : ''
+  const previousCwd = requestedSession ? sessionWorkingDirectory(requestedSession) : ''
+  registerLegacyWorkspace(previousCwd)
+  registerLegacyWorkspace(options.cwd)
+  const durableCwd = await getResultStorage().resolveWorkspace(previousCwd || options.cwd)
+  options = { ...options, cwd: durableCwd }
+  if (requestedSession && previousCwd && previousCwd !== durableCwd) materializePiSession({ sessionPath: requestedSession, cwd: durableCwd })
   let savedEngine = null
   if (requestedSession && fs.existsSync(requestedSession)) {
     try { savedEngine = JSON.parse(fs.readFileSync(requestedSession, 'utf8').split(/\r?\n/)[0]) } catch {}
@@ -1985,6 +2018,8 @@ async function startPiUnsafe(options = {}) {
   if (managed && (!Number.isSafeInteger(selectedGroupId) || selectedGroupId <= 0)) throw new Error('自动分组模型缺少有效分组，请刷新模型目录')
   const provider = managed ? managedProviderName(selectedModel.api || 'openai-completions', selectedGroupId) : String(options.provider || providerForApi(selectedModel.api || 'openai-completions'))
   const args = ['--mode', 'rpc', '--provider', provider, '--model', selectedModelId, '--session-dir', sessionDir]
+  const outputLocationPrompt = '最终交付文件及其引用的本地资源应保存在当前工作目录或用户明确指定的持久目录，不要把系统临时目录或应用安装目录作为最终结果位置。历史对话中的安装目录工作区可能已经迁移；继续任务时以当前工作目录为准，先核实文件实际位置。交付时提供真实文件链接，不要只提供会失效的临时预览地址。'
+  args.push('--append-system-prompt', outputLocationPrompt)
   // 工具失败必须由 Agent 决策如何恢复，不能让一次底层异常直接终止整条对话。
   // 只传行为约束，不把任何具体错误或临时路径写进系统提示词。
   args.push('--append-system-prompt', '工具调用由你负责决策。工具失败只代表当前尝试失败：读取错误码和简短摘要，按需重试、改参数、选择替代工具或向用户说明；不要把原始堆栈、二进制内容、临时路径当成用户需求，也不要因一次工具失败终止后续对话。')
@@ -2097,7 +2132,7 @@ async function startPiUnsafe(options = {}) {
       home, cwd, codexExecutable, agentDir: piAgentDir(), skillPaths: pluginPaths,
       model: { ...configured, provider, preferNativeResponses: managed && selectedModel.platform === 'openai' && /^gpt-[56](?:[.-]|$)/i.test(selectedModelId), maxTokens: Number(selectedModel.maxTokens || selectedModel.max_tokens || selectedModel.max_output_tokens) || undefined },
       credential, contextPolicy, thinkingLevel: options.thinkingLevel || 'auto',
-      systemPrompt: [options.systemPrompt, !options.conversationOnly && permissionPrompt].filter(Boolean).join('\n\n'), readOnly: Boolean(options.readOnly), conversationOnly: Boolean(options.conversationOnly),
+      systemPrompt: [options.systemPrompt, !options.conversationOnly && permissionPrompt, !options.conversationOnly && outputLocationPrompt].filter(Boolean).join('\n\n'), readOnly: Boolean(options.readOnly), conversationOnly: Boolean(options.conversationOnly),
     } }, runtime)
   } else stateResponse = await sendPi({ type: 'get_state' }, runtime)
   const skillLaunch = { executable, cwd, env: { ...process.env, PI_CODING_AGENT_DIR: agentDir, ANYU_API_KEY: credential, PI_SKIP_VERSION_CHECK: '1', PI_OFFLINE: '1', ANYU_PERMISSION_MODE: '', ANYU_PERMISSION_PROFILE: '', LETA_BROWSER_BRIDGE_TOKEN: '', LETA_BROWSER_BRIDGE_PORT: '' } }
@@ -3114,6 +3149,7 @@ app.whenReady().then(async () => {
     changed: payload => { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('agent:workbench-changed', payload) },
     notify: (title, body) => { if (Notification.isSupported()) new Notification({ title, body }).show() },
     log: message => console.error('[workbench]', message),
+    preserveResults: (task, snapshot) => getResultStorage().preserveCheckpoint(task, snapshot),
   })
   await agentWorkbench.init()
   // Session layer: stable conversation ids -> pi sessions, normalized events,
@@ -3157,7 +3193,10 @@ app.whenReady().then(async () => {
       if (piRuntimes.get(key) === runtime) piRuntimes.delete(key)
     },
   })
-  agentSessionService.subscribe(event => agentWorkbench.event(event))
+  agentSessionService.subscribe(event => {
+    agentWorkbench.event(event)
+    getResultStorage().observe(event, agentSessionService.sessions.get(event.sessionId))
+  })
   desktopPets = createPets({
     app, BrowserWindow, screen, ipcMain, mainWindow: () => mainWindow,
     sessions: agentSessionService,
@@ -3538,8 +3577,14 @@ app.whenReady().then(async () => {
   ipcMain.handle('agent:sessions', () => agentSessionService.list().filter(session => desktopPets.manager.ownsSession(session.sessionId)))
   ipcMain.handle('pi:save-attachments', (_, payload) => savePiAttachments(payload || {}))
   ipcMain.handle('pi:attachments', (_, sessionPath) => loadPiAttachments(sessionPath))
-  ipcMain.handle('pi:materialize-session', (_, payload) => materializePiSession(payload || {}))
-  ipcMain.handle('pi:create-session', (_, payload) => createPiSession(payload || {}))
+  ipcMain.handle('pi:materialize-session', async (_, payload = {}) => {
+    registerLegacyWorkspace(payload.cwd)
+    return materializePiSession({ ...payload, cwd: await getResultStorage().resolveWorkspace(payload.cwd) })
+  })
+  ipcMain.handle('pi:create-session', async (_, payload = {}) => {
+    registerLegacyWorkspace(payload.cwd)
+    return createPiSession({ ...payload, cwd: await getResultStorage().resolveWorkspace(payload.cwd) })
+  })
   ipcMain.handle('pi:save-media', (_, payload) => savePiMediaMessages(payload || {}))
   ipcMain.handle('pi:save-optimistic-message', (_, payload) => savePiOptimisticMessage(payload || {}))
   ipcMain.handle('pi:optimistic-message', (_, sessionPath) => loadPiOptimisticMessage(sessionPath || ''))
@@ -3568,15 +3613,18 @@ app.whenReady().then(async () => {
     }
   })
   ipcMain.handle('app:api-base', () => API_BASE)
-  ipcMain.handle('app:default-workspace', () => {
+  ipcMain.handle('app:default-workspace', async (_, payload = {}) => {
     const installDirectory = path.dirname(app.getPath('exe'))
     const projectCandidate = path.resolve(__dirname, '..', '..', '..')
-    const projectDirectory = fs.existsSync(path.join(projectCandidate, 'external', 'anyuagent-github')) ? projectCandidate : ''
+    const projectDirectory = !app.isPackaged && fs.existsSync(path.join(projectCandidate, 'external', 'anyuagent-github')) ? projectCandidate : ''
+    registerLegacyWorkspace(payload.cwd)
+    const selectedPath = payload.cwd ? await getResultStorage().resolveWorkspace(payload.cwd) : ''
     return {
       path: defaultWorkspacePath(),
       installDirectory,
       homeDirectory: app.getPath('home'),
       projectDirectory,
+      selectedPath,
     }
   })
   ipcMain.handle('pi:stop', async (_, options = {}) => {
