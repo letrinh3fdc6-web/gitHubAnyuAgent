@@ -32,6 +32,19 @@ check('服务端模型能力覆盖旧模板，不制造额外档位', () => {
   assert.deepEqual(unknown.levels, ['off'])
 })
 
+check('GPT 6.2 catalog enables every declared effort without inheriting disabled metadata', () => {
+  const levels = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
+  for (const id of ['gpt-6.2-sol', 'gpt-6.2-astra']) {
+    const result = presets.resolveThinking({ id, reasoning: true, thinking: { family: 'openai', mode: 'effort', levels, default_level: 'medium', required: false } })
+    assert.equal(result.reasoning, true)
+    assert.equal(result.source, 'api')
+    assert.equal(result.defaultLevel, 'medium')
+    assert.deepEqual(result.levels, levels)
+    assert.equal(result.map.max, 'max')
+    assert.equal(result.map.minimal, 'minimal')
+  }
+})
+
 // ── 1. 模板库自身的不变量 ────────────────────────────────────────────────
 
 check('模板库档位全部合法且顺序稳定', () => {

@@ -160,6 +160,53 @@ test('native requests reuse their upstream connection', async t => {
   assert.equal(f.requests[0].port, f.requests[1].port)
 })
 
+for (const id of ['qwen3.8-max', 'kimi-k3.1-pro']) test(`${id} honors catalog role compatibility through tool rounds and resumed history`, async t => {
+  const compat = JSON.parse('{"supportsDeveloperRole":false}')
+  const f = await fixture(t, (req, res) => {
+    assert.equal(req.body.messages[0].role, 'system')
+    assert.equal(req.body.messages[0].content, 'System instructions.')
+    assert.ok(!req.body.messages.some(message => message.role === 'developer'))
+    const result = req.body.messages.find(message => message.role === 'tool')
+    if (result) {
+      const call = req.body.messages.find(message => message.tool_calls?.length)?.tool_calls[0]
+      assert.equal(call.id, result.tool_call_id)
+      assert.equal(call.function.name, 'diagnostic_echo')
+      assert.equal(result.content, 'TOOL_RESULT')
+    }
+    res.writeHead(200, { 'Content-Type': 'text/event-stream' })
+    const delta = result ? { content: 'Done.' } : { tool_calls: [{ index: 0, id: 'call_compat', type: 'function', function: { name: 'diagnostic_echo', arguments: '{"value":"ping"}' } }] }
+    const chunk = { id: 'chat_compat', object: 'chat.completion.chunk', model: id }
+    res.write(`data: ${JSON.stringify({ ...chunk, choices: [{ index: 0, delta, finish_reason: null }] })}\n\n`)
+    res.end(`data: ${JSON.stringify({ ...chunk, choices: [{ index: 0, delta: {}, finish_reason: result ? 'stop' : 'tool_calls' }], usage: { prompt_tokens: 5, completion_tokens: 2, total_tokens: 7 } })}\n\ndata: [DONE]\n\n`)
+  }, { id, api: 'openai-completions', preferNativeResponses: false, reasoning: true, compat, input: ['text'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } })
+  f.bridge.getThinking = () => 'high'
+  const tools = [{ type: 'function', name: 'diagnostic_echo', parameters: { type: 'object', properties: { value: { type: 'string' } }, required: ['value'] } }]
+  const instructions = 'System instructions.'
+  const first = await f.request({ instructions, tools })
+  assert.equal(first.status, 200)
+  const events = (await first.text()).split('\n').filter(line => line.startsWith('data: ')).map(line => JSON.parse(line.slice(6)))
+  const completed = events.find(event => event.type === 'response.completed')?.response
+  assert.ok(completed)
+  const call = completed.output.find(item => item.type === 'function_call')
+  assert.equal(call.name, 'diagnostic_echo')
+  assert.deepEqual(JSON.parse(call.arguments), { value: 'ping' })
+  const resumedHistory = JSON.parse(JSON.stringify(completed.output))
+  const next = await f.request({ instructions, tools, input: [{ role: 'user', content: 'hello' }, ...resumedHistory, { type: 'function_call_output', call_id: call.call_id, output: 'TOOL_RESULT' }] })
+  const nextBody = await next.text()
+  assert.equal(next.status, 200)
+  assert.match(nextBody, /Done\./)
+  assert.match(nextBody, /response.completed/)
+  assert.equal(f.requests.length, 2)
+  assert.equal(f.requests[0].body.reasoning_effort, 'high')
+  assert.deepEqual(f.bridge.model.compat, compat)
+})
+
+test('models without a catalog compatibility override retain their developer role', async t => {
+  const f = await fixture(t, (_req, res) => { res.writeHead(400, { 'Content-Type': 'application/json' }); res.end('{"error":{"message":"fixture completed"}}') }, { id: 'gpt-6.2-sol', reasoning: true, preferNativeResponses: false })
+  assert.equal((await f.request({ instructions: 'System instructions.' })).status, 400)
+  assert.equal(f.requests[0].body.messages[0].role, 'developer')
+})
+
 test('Claude streams summaries immediately and preserves signatures through tool rounds', async t => {
   let finish
   const ending = new Promise(resolve => { finish = resolve })
