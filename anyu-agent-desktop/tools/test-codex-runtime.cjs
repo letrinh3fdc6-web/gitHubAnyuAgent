@@ -253,7 +253,7 @@ test('official engine exposes a Claude SSE failure instead of a generic disconne
 })
 
 for (const thinkingOnly of [false, true]) test(`official engine preserves limited Claude output, does not replay it and can continue after restart (${thinkingOnly})`, { timeout: 40000 }, async t => {
-  const f = await fixture(t, { api: 'anthropic-messages', model: { id: 'claude-sonnet-5-5', reasoning: true, maxTokens: 16384 }, handler: (_req, res, body, n) => {
+  const f = await fixture(t, { api: 'anthropic-messages', model: { id: thinkingOnly ? 'claude-fable-5-2' : 'claude-sonnet-5-5', reasoning: true, maxTokens: 16384 }, handler: (_req, res, body, n) => {
     if (n !== 1) return sendResponse(res, 'anthropic-messages', body.model, null, null, 'CONTINUED')
     res.writeHead(200, { 'Content-Type': 'text/event-stream' })
     const events = [

@@ -265,7 +265,11 @@ for (const [id, level, expectedThinking, effort] of [
   ['claude-opus-5-5', 'auto', { type: 'adaptive', display: 'summarized' }, undefined],
   ['claude-opus-5', 'xhigh', { type: 'adaptive', display: 'summarized' }, 'xhigh'],
   ['claude-opus-4-6', 'auto', undefined, undefined],
-  ['claude-sonnet-5-5', 'between_tools', { type: 'between_tools', display: 'summarized' }, 'high'],
+  ['claude-sonnet-5-5', 'between_tools', { type: 'between_tools', display: 'summarized' }, 'low'],
+  ['claude-sonnet-5-5', 'off', { type: 'between_tools', display: 'summarized' }, 'low'],
+  ['claude-haiku-5-5', 'off', { type: 'disabled' }, 'low'],
+  ['claude-fable-5-2', 'high', { type: 'adaptive', display: 'summarized' }, 'high'],
+  ['111/claude-fable-5-2', 'high', { type: 'adaptive', display: 'summarized' }, 'high'],
 ]) test(`Claude native configuration: ${id} ${level}`, async t => {
   const f = await fixture(t, (_req, res) => { res.writeHead(400); res.end('{"type":"error","error":{"type":"invalid_request_error","message":"fixture completed"}}') }, { id, api: 'anthropic-messages', reasoning: true, preferNativeResponses: false })
   f.bridge.getThinking = () => level
@@ -289,6 +293,27 @@ test('Claude native stream errors retain their diagnostic after response headers
   assert.match(body, /response.failed/)
   assert.match(body, /Claude fixture overloaded/)
   assert.doesNotMatch(body, /response.completed/)
+})
+
+test('new Claude defaults to its model output capacity when the SDK catalog is older', async t => {
+  const f = await fixture(t, (_req, res) => { res.writeHead(400); res.end('{"error":{"message":"fixture completed"}}') }, { id: 'claude-fable-5-2', api: 'anthropic-messages', preferNativeResponses: false, reasoning: true, contextWindow: 1000000 })
+  await (await f.request()).text()
+  assert.equal(f.requests[0].body.max_tokens, 128000)
+})
+
+for (const limit of [128, 4096, 128000]) test(`explicit Claude output limit ${limit} survives SDK context clamping`, async t => {
+  const f = await fixture(t, (_req, res) => { res.writeHead(400); res.end('{"error":{"message":"fixture completed"}}') }, { id: 'claude-fable-5-2', api: 'anthropic-messages', preferNativeResponses: false, reasoning: true, maxTokens: 16384, contextWindow: 8192 })
+  f.bridge.getThinking = () => 'high'
+  await (await f.request({ max_output_tokens: limit })).text()
+  assert.equal(f.requests[0].body.max_tokens, limit)
+  assert.deepEqual(f.requests[0].body.thinking, { type: 'adaptive', display: 'summarized' })
+  assert.equal(f.requests[0].body.output_config.effort, 'high')
+})
+
+test('invalid explicit Claude output limits never reach the upstream', async t => {
+  const f = await fixture(t, () => assert.fail('Invalid limits must not be sent'), { id: 'claude-fable-5-2', api: 'anthropic-messages', preferNativeResponses: false })
+  for (const limit of [0, -1, 1.5, '8192']) assert.match(await (await f.request({ max_output_tokens: limit })).text(), /positive integer/)
+  assert.equal(f.requests.length, 0)
 })
 
 for (const [maxTokens, contextWindow, expected] of [[16384, 128000, 16384], [128000, 1000000, 128000], [128000, 8192, null]]) test(`Claude output metadata ${maxTokens}/${contextWindow} respects the selected cap and available context`, async t => {

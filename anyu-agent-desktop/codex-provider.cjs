@@ -225,16 +225,21 @@ class CodexProviderBridge {
     const provider = await import(`@earendil-works/pi-ai/api/${api}`)
     const context = toProviderContext(body, this.model)
     const level = this.getThinking()
-    const claude = api === 'anthropic-messages' && /^claude-/i.test(this.model.id)
-    const claudeId = this.model.id.toLowerCase().replaceAll('.', '-')
+    const claudeId = this.model.id.toLowerCase().trim().split('/').at(-1).replace(/^(?:(?:us|eu|apac|jp|au|us-gov|global)\.)?anthropic\./, '').replace(/-thinking$/, '').replace(/-\d{8}$/, '').replaceAll('.', '-')
+    const claude = api === 'anthropic-messages' && /^claude-/i.test(claudeId)
     const adaptiveClaude = claude && /^claude-(?:opus-4-[6-8]|sonnet-4-6|(?:opus|sonnet|haiku|fable|mythos)-5|mythos-preview)(?:-|$)/.test(claudeId)
+    const modernClaude = claude && /^claude-(?:(?:opus|sonnet|haiku)-5-5|(?:fable|mythos)-5-2)$/.test(claudeId)
+    const requestedMax = claude && body.max_output_tokens != null ? body.max_output_tokens : undefined
+    if (requestedMax !== undefined && (!Number.isSafeInteger(requestedMax) || requestedMax <= 0)) throw new Error('max_output_tokens must be a positive integer')
+    if (modernClaude && (level === 'off' || level === 'between_tools') && !['claude-sonnet-5-5', 'claude-haiku-5-5'].includes(claudeId)) throw new Error(`${this.model.id} requires adaptive thinking; select low, medium, high, xhigh or max`)
+    if (modernClaude && level === 'between_tools' && claudeId !== 'claude-sonnet-5-5') throw new Error(`${this.model.id} does not support between_tools`)
     const reasoning = level === 'auto' ? undefined : level === 'off' ? undefined : level
     const requestId = crypto.randomBytes(24).toString('hex')
     const transport = { status: 502, signal }
     this.providerRequests.set(requestId, transport)
     const explicitMax = Number.isSafeInteger(this.model.maxTokens) && this.model.maxTokens > 0
     const known = api === 'anthropic-messages' && (claude || !explicitMax) ? Object.values((await import('@earendil-works/pi-ai/providers/anthropic.models')).ANTHROPIC_MODELS).find(model => model.id === this.model.id) : undefined
-    const model = { ...(claude ? known : {}), ...this.model, api, maxTokens: explicitMax ? this.model.maxTokens : known?.maxTokens || 65536, baseUrl: `${new URL(this.origin).origin}/provider/${requestId}${new URL(this.model.baseUrl).pathname}`, ...(level === 'off' ? { reasoning: false } : {}) }
+    const model = { ...(claude ? known : {}), ...this.model, api, maxTokens: explicitMax ? this.model.maxTokens : modernClaude ? 128000 : known?.maxTokens || 65536, baseUrl: `${new URL(this.origin).origin}/provider/${requestId}${new URL(this.model.baseUrl).pathname}`, ...(level === 'off' ? { reasoning: false } : {}) }
     if (claude) {
       // Do not import SDK fallback models: the selected group owns model routing.
       model.compat = { ...(known?.compat?.supportsTemperature === false ? { supportsTemperature: false } : {}), forceAdaptiveThinking: adaptiveClaude, ...this.model.compat }
@@ -242,6 +247,7 @@ class CodexProviderBridge {
     }
     const stream = provider.streamSimple(model, context, {
       apiKey: this.credential, signal, reasoning, maxRetries: 0, timeoutMs: 15 * 60000,
+      ...(requestedMax !== undefined ? { maxTokens: requestedMax } : {}),
       onResponse: response => { transport.status = response.status },
       onPayload: payload => {
         if (claude && level === 'auto') {
@@ -251,10 +257,12 @@ class CodexProviderBridge {
           if (adaptiveClaude && !claudeId.includes('-4-')) payload.thinking = { type: 'adaptive', display: 'summarized' }
         } else if (adaptiveClaude) {
           const limited = level === 'off' || level === 'between_tools'
-          payload.thinking = { type: level === 'off' ? 'disabled' : level === 'between_tools' ? 'between_tools' : 'adaptive' }
-          payload.output_config = { ...payload.output_config, effort: limited ? 'high' : level }
+          payload.thinking = { type: limited && claudeId === 'claude-sonnet-5-5' ? 'between_tools' : level === 'off' ? 'disabled' : level === 'between_tools' ? 'between_tools' : 'adaptive' }
+          payload.output_config = { ...payload.output_config, effort: limited ? modernClaude ? 'low' : 'high' : level }
         }
         if (claude && payload.thinking && payload.thinking.type !== 'disabled') payload.thinking.display = 'summarized'
+        // Explicit client limits are authoritative even when the SDK clamps its default.
+        if (requestedMax !== undefined) payload.max_tokens = requestedMax
         // Only Anthropic requires an explicit output budget. Optional limits
         // must not inherit an old catalog cap or SDK default.
         if (api !== 'anthropic-messages') {

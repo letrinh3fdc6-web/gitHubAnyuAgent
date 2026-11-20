@@ -212,7 +212,7 @@ class CodexRuntime {
   }
   finish(error = '', interrupted = false) {
     if (this.options.model.api === 'anthropic-messages' && /^claude-/i.test(this.options.model.id) && error === 'Incomplete response returned, reason: max_output_tokens') {
-      error = 'Claude reached the output limit (max_output_tokens). Partial output is saved; lower thinking effort or continue in smaller parts.'
+      error = 'Claude 达到本轮输出上限（max_output_tokens），已保留生成内容。可点击“继续生成”，或降低思考深度后继续。 Output limit reached; partial output is saved. Continue generating or lower thinking effort.'
     }
     const wasActive = this.turn || this.starting
     this.turn = null; this.starting = false; this.lastError = ''; this.retryCount = 0

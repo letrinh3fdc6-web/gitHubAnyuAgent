@@ -1,0 +1,26 @@
+name: Desktop Runtime Quality
+on:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  clean-profile:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci --ignore-scripts --no-audit
+      - run: npm run release:gate -- --portable
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: runtime-gate-${{ matrix.os }}
+          path: test-results/release-gate.json
