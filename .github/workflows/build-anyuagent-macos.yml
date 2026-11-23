@@ -178,17 +178,17 @@ jobs:
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: anyuagent-v1.0.95
+          tag_name: anyuagent-v1.0.96
           target_commitish: ${{ github.sha }}
-          name: AnyuAgent 1.0.95
+          name: AnyuAgent 1.0.96
           draft: true
           make_latest: false
           body: |
-            AnyuAgent 1.0.95 includes the current desktop workspace and gateway compatibility. The gateway now supports disabling transport-error account cooldown while preserving request failover and existing account limits.
+            AnyuAgent 1.0.96 includes the current desktop workspace, updated video model integration, and Claude streaming and cache usage compatibility fixes.
 
             macOS downloads include separate Apple Silicon and Intel DMG/ZIP packages. Each package includes a matching native runtime. These packages are unsigned and are not notarized.
 
-            Windows download: https://x.ailzd.com/downloads/AnyuAgent-Setup-1.0.95.exe
+            Windows download: https://x.ailzd.com/downloads/AnyuAgent-Setup-1.0.96.exe
           files: |
             release-assets/*.dmg
             release-assets/*.zip
