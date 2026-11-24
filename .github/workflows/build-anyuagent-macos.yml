@@ -178,17 +178,17 @@ jobs:
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: anyuagent-v1.0.97
+          tag_name: anyuagent-v1.0.98
           target_commitish: ${{ github.sha }}
-          name: AnyuAgent 1.0.97
+          name: AnyuAgent 1.0.98
           draft: true
           make_latest: false
           body: |
-            AnyuAgent 1.0.97 packages the current desktop workspace and renderer alongside the server monitoring fix for successful requests without a measured first token.
+            AnyuAgent 1.0.98 packages the current desktop workspace and renderer alongside compact two-hour group cache trends in API key management.
 
             macOS downloads include separate Apple Silicon and Intel DMG/ZIP packages. Each package includes a matching native runtime. These packages are unsigned and are not notarized.
 
-            Windows download: https://x.ailzd.com/downloads/AnyuAgent-Setup-1.0.97.exe
+            Windows download: https://x.ailzd.com/downloads/AnyuAgent-Setup-1.0.98.exe
           files: |
             release-assets/*.dmg
             release-assets/*.zip
