@@ -178,17 +178,17 @@ jobs:
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: anyuagent-v1.0.96
+          tag_name: anyuagent-v1.0.97
           target_commitish: ${{ github.sha }}
-          name: AnyuAgent 1.0.96
+          name: AnyuAgent 1.0.97
           draft: true
           make_latest: false
           body: |
-            AnyuAgent 1.0.96 includes the current desktop workspace, updated video model integration, and Claude streaming and cache usage compatibility fixes.
+            AnyuAgent 1.0.97 packages the current desktop workspace and renderer alongside the server monitoring fix for successful requests without a measured first token.
 
             macOS downloads include separate Apple Silicon and Intel DMG/ZIP packages. Each package includes a matching native runtime. These packages are unsigned and are not notarized.
 
-            Windows download: https://x.ailzd.com/downloads/AnyuAgent-Setup-1.0.96.exe
+            Windows download: https://x.ailzd.com/downloads/AnyuAgent-Setup-1.0.97.exe
           files: |
             release-assets/*.dmg
             release-assets/*.zip
